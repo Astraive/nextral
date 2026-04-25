@@ -8,7 +8,7 @@ Tony proactively follows up on a commitment extracted from earlier conversation.
 
 1. Consolidation extracts commitment/reminder candidate.
 2. Candidate is normalized into prospective record (`scheduled` state).
-3. Scheduler (n8n or equivalent) evaluates due window and policy constraints.
+3. Package scheduler integration evaluates due window and policy constraints.
 4. At due time, workflow dispatches follow-up action.
 5. Outcome is recorded:
    - `completed`

@@ -1,0 +1,43 @@
+type Memory {
+  id: ID!
+  tenantId: String!
+  userId: String!
+  contentType: String!
+  memoryType: String!
+  privacyLevel: String!
+  status: String!
+  createdAt: String!
+}
+
+type RetrievedMemory {
+  memoryId: ID!
+  sourcePath: String!
+  retrievalScore: Float!
+}
+
+type RetrievalResponse {
+  items: [RetrievedMemory!]!
+  degradedReasons: [String!]!
+}
+
+type Reminder {
+  id: ID!
+  tenantId: String!
+  userId: String!
+  sourceMemoryId: ID!
+  title: String!
+  dueAt: String!
+  status: String!
+}
+
+type Query {
+  memory(tenantId: String!, userId: String!, id: ID!): Memory
+  retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!): RetrievalResponse!
+  reminders(tenantId: String!, userId: String!, dueAtOrBefore: String): [Reminder!]!
+}
+
+type Mutation {
+  ingestMemory(tenantId: String!, userId: String!, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!): ID!
+  forgetMemory(tenantId: String!, userId: String!, memoryId: ID!, actorId: String!, reason: String!, redact: Boolean!): ID!
+  scheduleReminder(tenantId: String!, userId: String!, sourceMemoryId: ID!, title: String!, dueAt: String!, timezone: String!): ID!
+}

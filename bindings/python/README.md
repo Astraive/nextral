@@ -2,4 +2,5 @@
 
 PyO3/maturin package exposing the canonical Rust core to Python.
 
-Current publish target is info-only as `nextral` version `0.0.1`.
+Current publish target exposes config validation, runtime smoke flow, request
+schemas, and re-embed planning through the native Rust extension.

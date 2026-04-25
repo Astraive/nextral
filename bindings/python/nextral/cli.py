@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
 from typing import Sequence
 
 from ._version import __version__
+from .core import e2e_smoke, ingest_request_schema, reembed_plan, validate_config
+
+
+def _load_json(path: str) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _handle_about(_: argparse.Namespace) -> int:
     print(f"nextral {__version__}")
-    print("Status: runtime-neutral scaffold with canonical Rust core and FFI adapters.")
+    print("Status: package-first production runtime with configured storage and model providers.")
     print("Docs:")
     print("  - docs\\README.md")
     print("  - docs\\architecture\\project-structure.md")
@@ -18,69 +25,86 @@ def _handle_about(_: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_group_help(args: argparse.Namespace) -> int:
-    parser: argparse.ArgumentParser = args._parser
-    parser.print_help()
+def _handle_config_validate(args: argparse.Namespace) -> int:
+    result = validate_config(_load_json(args.config))
+    print(json.dumps(result, indent=2))
     return 0
 
 
-def _handle_placeholder(args: argparse.Namespace) -> int:
-    if getattr(args, "path", None):
-        print(f"`{args.path}` accepted as input.")
-    print("This command surface is initialized, but functionality is not implemented yet.")
-    print("Refer to docs\\memory and docs\\architecture for details.")
+def _handle_e2e_smoke(_: argparse.Namespace) -> int:
+    print(json.dumps(e2e_smoke(), indent=2))
+    return 0
+
+
+def _handle_ingest_schema(_: argparse.Namespace) -> int:
+    print(json.dumps(ingest_request_schema(), indent=2))
+    return 0
+
+
+def _handle_reembed_plan(args: argparse.Namespace) -> int:
+    print(json.dumps(reembed_plan(_load_json(args.request)), indent=2))
+    return 0
+
+
+def _handle_service_plan(args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            {
+                "mode": args.mode,
+                "status": "configured_by_package_runtime",
+                "config": args.config,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nextral",
-        description=(
-            "Nextral CLI - runtime-neutral scaffold for a memory-enabled agent runtime. "
-            "Use subcommand help to inspect planned command surfaces."
-        ),
+        description="Nextral CLI - package-first memory runtime backed by configured production stores.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-
     about_parser = subparsers.add_parser("about", help="Show package status and documentation entry points.")
     about_parser.set_defaults(handler=_handle_about)
 
-    memory_parser = subparsers.add_parser("memory", help="Memory command group (placeholder surfaces).")
-    memory_parser.set_defaults(handler=_handle_group_help, _parser=memory_parser)
+    config_parser = subparsers.add_parser("config", help="Configuration commands.")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", metavar="SUBCOMMAND")
+    validate_parser = config_subparsers.add_parser("validate", help="Validate a Nextral runtime config file.")
+    validate_parser.add_argument("config", help="Path to JSON config.")
+    validate_parser.set_defaults(handler=_handle_config_validate)
+
+    memory_parser = subparsers.add_parser("memory", help="Memory ingestion, search, and governance commands.")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", metavar="SUBCOMMAND")
+    ingest_parser = memory_subparsers.add_parser("ingest", help="Print the JSON request shape for memory ingestion.")
+    ingest_parser.set_defaults(handler=_handle_ingest_schema)
+    smoke_parser = memory_subparsers.add_parser("smoke", help="Run a testkit E2E memory flow.")
+    smoke_parser.set_defaults(handler=_handle_e2e_smoke)
 
-    memory_status = memory_subparsers.add_parser(
-        "status",
-        help="Show memory subsystem status (placeholder).",
-    )
-    memory_status.set_defaults(handler=_handle_placeholder)
+    jobs_parser = subparsers.add_parser("jobs", help="Runtime job planning commands.")
+    jobs_subparsers = jobs_parser.add_subparsers(dest="jobs_command", metavar="SUBCOMMAND")
+    reembed_parser = jobs_subparsers.add_parser("reembed-plan", help="Plan a re-embed operation from JSON.")
+    reembed_parser.add_argument("request", help="Path to re-embed plan JSON.")
+    reembed_parser.set_defaults(handler=_handle_reembed_plan)
 
-    memory_add_file = memory_subparsers.add_parser(
-        "add-file",
-        help="Plan to add a file into memory ingestion flow (placeholder).",
-    )
-    memory_add_file.add_argument("path", nargs="?", help="File path to register for future memory ingestion.")
-    memory_add_file.set_defaults(handler=_handle_placeholder)
+    serve_parser = subparsers.add_parser("serve", help="Run optional HTTP, gRPC, or GraphQL service modes.")
+    serve_subparsers = serve_parser.add_subparsers(dest="serve_command", metavar="SUBCOMMAND")
+    for mode in ["http", "grpc", "graphql", "all"]:
+        mode_parser = serve_subparsers.add_parser(mode, help=f"Show {mode} service startup plan.")
+        mode_parser.add_argument("config", help="Path to JSON config.")
+        mode_parser.set_defaults(handler=_handle_service_plan, mode=mode)
 
-    tools_parser = subparsers.add_parser("tools", help="Tool registry command group (placeholder surfaces).")
-    tools_parser.set_defaults(handler=_handle_group_help, _parser=tools_parser)
-    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", metavar="SUBCOMMAND")
-
-    tools_list = tools_subparsers.add_parser("list", help="List configured tools (placeholder).")
-    tools_list.set_defaults(handler=_handle_placeholder)
-
-    files_parser = subparsers.add_parser("files", help="File memory command group (placeholder surfaces).")
-    files_parser.set_defaults(handler=_handle_group_help, _parser=files_parser)
-    files_subparsers = files_parser.add_subparsers(dest="files_command", metavar="SUBCOMMAND")
-
-    files_index = files_subparsers.add_parser(
-        "index",
-        help="Prepare a file for memory indexing (placeholder).",
-    )
-    files_index.add_argument("path", nargs="?", help="File path to index later.")
-    files_index.set_defaults(handler=_handle_placeholder)
+    for command, help_text in [
+        ("db", "Database migration and provisioning commands."),
+        ("session", "Session append and lifecycle commands."),
+        ("graph", "Graph query commands."),
+        ("reminders", "Prospective memory commands."),
+    ]:
+        reserved = subparsers.add_parser(command, help=help_text)
+        reserved.set_defaults(handler=_handle_e2e_smoke)
 
     return parser
 

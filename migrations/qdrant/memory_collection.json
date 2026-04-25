@@ -1,0 +1,17 @@
+{
+  "collection": "${NEXTRAL_QDRANT_COLLECTION}",
+  "vectors": {
+    "size": "${NEXTRAL_EMBEDDING_DIMENSION}",
+    "distance": "${NEXTRAL_QDRANT_DISTANCE}"
+  },
+  "payload_indexes": [
+    { "field_name": "tenant_id", "field_schema": "keyword" },
+    { "field_name": "user_id", "field_schema": "keyword" },
+    { "field_name": "privacy_level", "field_schema": "keyword" },
+    { "field_name": "status", "field_schema": "keyword" },
+    { "field_name": "content_type", "field_schema": "keyword" },
+    { "field_name": "memory_type", "field_schema": "keyword" },
+    { "field_name": "schema_version", "field_schema": "keyword" },
+    { "field_name": "created_at", "field_schema": "datetime" }
+  ]
+}

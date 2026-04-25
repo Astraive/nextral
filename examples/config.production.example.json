@@ -1,0 +1,71 @@
+{
+  "backend": "production_stores",
+  "stores": {
+    "postgres_url": "postgres://nextral:${NEXTRAL_POSTGRES_PASSWORD}@postgres:5432/nextral",
+    "redis_url": "redis://redis:6379/0",
+    "qdrant_url": "http://qdrant:6334",
+    "neo4j_url": "neo4j://neo4j:7687",
+    "s3_endpoint": "http://minio:9000",
+    "s3_bucket": "nextral-memory",
+    "s3_region": "us-east-1",
+    "s3_access_key_env": "NEXTRAL_S3_ACCESS_KEY",
+    "s3_secret_key_env": "NEXTRAL_S3_SECRET_KEY"
+  },
+  "embedding": {
+    "kind": "open_ai_compatible",
+    "model": "${NEXTRAL_EMBEDDING_MODEL}",
+    "dimension": 1536,
+    "endpoint": "${NEXTRAL_EMBEDDING_ENDPOINT}",
+    "api_key_env": "NEXTRAL_EMBEDDING_API_KEY"
+  },
+  "extraction": {
+    "kind": "http",
+    "model": "${NEXTRAL_EXTRACTION_MODEL}",
+    "endpoint": "${NEXTRAL_EXTRACTION_ENDPOINT}",
+    "api_key_env": "NEXTRAL_EXTRACTION_API_KEY"
+  },
+  "reranker": {
+    "kind": "none",
+    "model": null,
+    "endpoint": null,
+    "api_key_env": null
+  },
+  "ingestion_policy": {
+    "min_importance_score": 0.35,
+    "min_confidence_score": 0.6
+  },
+  "retrieval_policy": {
+    "privacy_scope": ["private", "sensitive", "shared"],
+    "token_budget": 1800,
+    "top_k_vector": 12,
+    "max_graph_hops": 2,
+    "scoring_weights": {
+      "semantic_similarity": 0.5,
+      "recency": 0.2,
+      "importance": 0.2,
+      "access": 0.1
+    }
+  },
+  "cache": {
+    "key_prefix": "nextral",
+    "session_ttl_seconds": 7200,
+    "retrieval_ttl_seconds": 120,
+    "policy_ttl_seconds": 300
+  },
+  "service": {
+    "http_bind": "127.0.0.1:8080",
+    "grpc_bind": "127.0.0.1:50051",
+    "graphql_bind": "127.0.0.1:8081"
+  },
+  "auth": {
+    "issuer": "${NEXTRAL_AUTH_ISSUER}",
+    "audience": "${NEXTRAL_AUTH_AUDIENCE}",
+    "jwks_url": "${NEXTRAL_AUTH_JWKS_URL}",
+    "service_token_env": "NEXTRAL_SERVICE_TOKEN"
+  },
+  "observability": {
+    "enabled": false,
+    "otlp_endpoint": null,
+    "prometheus_bind": null
+  }
+}

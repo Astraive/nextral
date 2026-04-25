@@ -1,24 +1,46 @@
 # Quickstart
 
-Version `0.0.1` is an info-only package release for Python and npm publishing surfaces.
+Nextral is a package-first memory runtime. Install the Python or npm package,
+provide production store/provider config, and use the CLI or language bindings
+from your app.
 
-## Inspect available command surfaces
+## Validate Config
 
 ```bash
-python -m nextral --help
-python -m nextral memory --help
-python -m nextral tools --help
-python -m nextral files --help
+nextral config validate examples/config.production.example.json
 ```
 
-## Check architecture docs
+The production backend requires PostgreSQL, Redis, Qdrant, Neo4j, MinIO/S3,
+embedding provider config, extraction provider config, cache policy, auth, and
+retrieval policy. Example values are placeholders; production values must be
+supplied by the host application or deployment environment.
+
+## Inspect Runtime Shapes
+
+```bash
+nextral memory ingest
+nextral memory smoke
+nextral jobs reembed-plan examples/reembed.example.json
+```
+
+`memory smoke` uses the explicit testkit backend. It is not a hidden production
+default.
+
+## Optional Service Modes
+
+```bash
+nextral-api plan http examples/config.production.example.json
+nextral-api plan grpc examples/config.production.example.json
+nextral-api plan graphql examples/config.production.example.json
+nextral-mcp tools
+```
+
+HTTP, gRPC, GraphQL, and MCP are optional package-provided service surfaces over
+the same Rust runtime.
+
+## Architecture Docs
 
 - `docs/architecture/project-structure.md`
 - `docs/memory/README.md`
-
-## Current status
-
-- Canonical Rust core boundaries are scaffolded in `src/`
-- Python and Node FFI adapters are scaffolded in `bindings/`
-- Production runtime features are still planned and not fully implemented
+- `docs/package-production.md`
 

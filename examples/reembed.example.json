@@ -1,0 +1,7 @@
+{
+  "tenant_id": "tenant_1",
+  "source_collection": "memories_v1",
+  "shadow_collection": "memories_v2_shadow",
+  "target_embedding_provider": "${NEXTRAL_EMBEDDING_PROVIDER}",
+  "target_embedding_model": "${NEXTRAL_EMBEDDING_MODEL}"
+}

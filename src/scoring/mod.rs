@@ -52,3 +52,12 @@ pub fn rank_records(records: &[MemoryRecord], query: &str) -> CoreResult<Vec<Sco
     ranked.sort_by(|left, right| right.score.total_cmp(&left.score));
     Ok(ranked)
 }
+
+pub fn retrieval_score(
+    semantic_similarity: f32,
+    recency: f32,
+    importance: f32,
+    access: f32,
+) -> f32 {
+    (0.5 * semantic_similarity) + (0.2 * recency) + (0.2 * importance) + (0.1 * access)
+}

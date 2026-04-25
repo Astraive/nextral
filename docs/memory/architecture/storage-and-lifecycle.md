@@ -8,7 +8,7 @@
 | PostgreSQL | warm transcript, summaries, canonical indexes, reminders | source of record for structured rows |
 | Qdrant | semantic/episodic vectors and payload metadata | nearest-neighbor + hybrid query support |
 | Neo4j | relational graph and edge confidence history | graph traversal for structural context |
-| ClickHouse | event logs, temporal behavior analytics | high-throughput observability/analytics |
+| PostgreSQL event tables | audit, job, event, and timeline rows | durable package runtime operations |
 | MinIO S3 | immutable raw archives | cold durability and replay |
 
 ## 2. Lifecycle tiers
@@ -89,7 +89,7 @@ Forget and redaction operations must propagate to all relevant stores:
 - Qdrant collection size and query latency
 - Neo4j node/edge growth and traversal cost
 - MinIO object growth and retrieval cost
-- ClickHouse ingestion/query cost envelope
+- PostgreSQL event-table and optional observability cost envelope
 
 <!-- memory-expansion-2026-04-10 -->
 

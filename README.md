@@ -1,18 +1,18 @@
 # nextral
 
-`nextral` is a runtime-neutral monorepo with a canonical Rust core and FFI bindings for Python and Node.js.
-
-Current public package bootstrap is **info-only** as `nextral` at version `0.0.1` for both PyPI and npm.
+`nextral` is a package-first memory runtime with a canonical Rust core, Python
+and Node.js bindings, CLI tools, and optional HTTP/gRPC/GraphQL/MCP service
+surfaces.
 
 ## Architecture at a glance
 
 ```text
 nextral/
-├── src/                 # canonical Rust core
+├── src/                 # canonical Rust core and runtime modules
 ├── bindings/
 │   ├── python/          # PyO3 bridge + Python wrappers
 │   └── node/            # napi-rs bridge + TS wrappers
-├── apps/                # native consumers (CLI, MCP, web, examples)
+├── apps/                # native consumers (CLI, API, MCP, examples)
 ├── tests/
 ├── docs/
 ├── scripts/
@@ -26,7 +26,8 @@ nextral/
 ```bash
 cargo build --workspace
 pip install -e bindings/python
-npm install nextral
+npm --workspace bindings/node run build
+nextral memory smoke
 ```
 
 ## Documentation
@@ -34,4 +35,5 @@ npm install nextral
 - Main index: `docs/README.md`
 - Project structure: `docs/architecture/project-structure.md`
 - Memory system docs: `docs/memory/README.md`
+- Package production runtime: `docs/package-production.md`
 

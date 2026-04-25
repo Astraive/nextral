@@ -19,7 +19,7 @@ User says: "Let's use PostgreSQL for Atlas and remind me Friday to check migrati
    - Graphify extracts nodes/edges and merges in Neo4j
 7. Commitment memory path:
    - reminder record created in PostgreSQL
-   - scheduler trigger metadata created for n8n
+   - scheduler trigger metadata created for package callbacks, webhooks, CLI polling, or user-owned schedulers
 8. Memory is now retrievable by:
    - semantic similarity (Qdrant)
    - relationship traversal (Neo4j)

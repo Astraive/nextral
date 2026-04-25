@@ -19,7 +19,7 @@ Procedural memory defines how Tony should behave for this specific user. It shap
 | Source | Backend |
 |---|---|
 | Identity config (voice, preferences, goals) | PostgreSQL, cached to Redis |
-| Learned behavior patterns (habits, rhythms) | ClickHouse analytics |
+| Learned behavior patterns (habits, rhythms) | PostgreSQL event tables and optional observability metrics |
 | Agent-specific system prompts and playbooks | Files on disk |
 
 ## Runtime Use

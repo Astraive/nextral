@@ -1,0 +1,17 @@
+{
+  "bucket": "${NEXTRAL_S3_BUCKET}",
+  "object_prefixes": {
+    "transcripts": "tenants/{tenant_id}/users/{user_id}/sessions/{session_id}/transcripts/",
+    "snapshots": "tenants/{tenant_id}/users/{user_id}/sessions/{session_id}/snapshots/",
+    "sources": "tenants/{tenant_id}/users/{user_id}/memories/{memory_id}/sources/"
+  },
+  "metadata": [
+    "tenant_id",
+    "user_id",
+    "session_id",
+    "memory_id",
+    "content_sha256",
+    "object_kind",
+    "schema_version"
+  ]
+}

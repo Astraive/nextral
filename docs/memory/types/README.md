@@ -14,11 +14,11 @@
 |---|---|---|---|
 | Working | In-flight cognition during one response | LLM context window | Seconds |
 | Session | Active conversation continuity | Redis + PostgreSQL | Session to warm retention window |
-| Episodic | Historical events and timelines | Qdrant + ClickHouse + MinIO | Long-term |
+| Episodic | Historical events and timelines | Qdrant + PostgreSQL events + MinIO | Long-term |
 | Semantic | Stable facts, preferences, decisions | Qdrant (+ PostgreSQL metadata) | Long-term |
 | Relational | Entity and dependency graph | Neo4j via Graphify | Long-term |
-| Procedural | Personalized behavior rules | PostgreSQL + Redis + ClickHouse + filesystem | Persistent |
-| Prospective | Future commitments and follow-ups | PostgreSQL + Redis queue + n8n (+ Qdrant context) | Until resolved |
+| Procedural | Personalized behavior rules | PostgreSQL + Redis + package-managed playbooks | Persistent |
+| Prospective | Future commitments and follow-ups | PostgreSQL + Redis queue + package callbacks/webhooks (+ Qdrant context) | Until resolved |
 
 ## Deep Dives
 

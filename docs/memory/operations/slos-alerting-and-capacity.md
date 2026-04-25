@@ -48,7 +48,7 @@ Adjust to deployment profile after baseline measurements.
 | PostgreSQL | partition growth, index bloat, slow query ratio |
 | Qdrant | query latency, segment count, RAM/disk growth |
 | Neo4j | traversal latency, constraint/index health, tx retries |
-| ClickHouse | ingest lag, query queue length |
+| PostgreSQL event tables | write latency, partition growth, job backlog |
 | MinIO | object count growth, retrieval latency |
 
 ## 5. Dashboard minimums

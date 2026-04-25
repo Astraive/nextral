@@ -53,7 +53,7 @@
 | PostgreSQL index | `id` | user/session/source/content_type/status/privacy/timestamps |
 | Qdrant payload | `id` | user/content_type/privacy/importance/entities/timestamps |
 | Neo4j edge metadata | `source_memory_id=id` | confidence, created_at, last_confirmed_at |
-| ClickHouse event | `memory_id=id` | write/read/delete events and timings |
+| PostgreSQL event/audit rows | `memory_id=id` | write/read/delete events and timings |
 
 ## 4. PostgreSQL schema requirements
 

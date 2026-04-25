@@ -1,0 +1,78 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nextral Package Runtime API",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Runtime process is alive"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Configured providers and stores are reachable"
+          }
+        }
+      }
+    },
+    "/v1/memories": {
+      "post": {
+        "operationId": "ingestMemory",
+        "summary": "Ingest a memory candidate through configured providers and stores",
+        "responses": {
+          "202": { "description": "Memory accepted for durable write path" },
+          "400": { "description": "Invalid request or policy violation" },
+          "503": { "description": "Required provider or store unavailable" }
+        }
+      }
+    },
+    "/v1/retrieval/query": {
+      "post": {
+        "operationId": "retrieveMemory",
+        "summary": "Run dual vector and graph retrieval",
+        "responses": {
+          "200": { "description": "Retrieval response with candidates and telemetry" },
+          "400": { "description": "Invalid request" },
+          "503": { "description": "Retrieval unavailable or degraded beyond policy" }
+        }
+      }
+    },
+    "/v1/memories/{memory_id}/forget": {
+      "post": {
+        "operationId": "forgetMemory",
+        "summary": "Forget or redact a memory across configured stores",
+        "parameters": [
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "202": { "description": "Forget workflow accepted" },
+          "404": { "description": "Memory not found" }
+        }
+      }
+    },
+    "/v1/reminders": {
+      "post": {
+        "operationId": "scheduleReminder",
+        "summary": "Schedule prospective memory through configured queue/dispatch policy",
+        "responses": {
+          "202": { "description": "Reminder scheduled" }
+        }
+      }
+    }
+  }
+}

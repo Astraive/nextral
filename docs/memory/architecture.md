@@ -31,11 +31,11 @@ All architecture docs must remain semantically aligned with these three diagrams
 |---|---|---|---|---|
 | Working | "What is happening right now?" | LLM context | ephemeral only | direct in-call |
 | Session | "What is happening in this conversation?" | Redis + PostgreSQL | real-time append | hot tail + warm summary |
-| Episodic | "What happened and when?" | Qdrant + ClickHouse + MinIO | consolidation lanes | semantic + temporal |
+| Episodic | "What happened and when?" | Qdrant + PostgreSQL events + MinIO | consolidation lanes | semantic + temporal |
 | Semantic | "What is true / preferred / decided?" | Qdrant + PostgreSQL index | realtime + consolidation | vector retrieval |
 | Relational | "How are entities connected?" | Neo4j | Graphify post-write | graph traversal |
-| Procedural | "How should Tony behave for this user?" | PostgreSQL + Redis + ClickHouse + disk prompts | config + analytics loop | pre-response policy load |
-| Prospective | "What must Tony do later?" | PostgreSQL + Redis queue + n8n + Qdrant context | extraction + scheduling | due-trigger + context recall |
+| Procedural | "How should Tony behave for this user?" | PostgreSQL + Redis + package-managed playbooks | config + analytics loop | pre-response policy load |
+| Prospective | "What must Tony do later?" | PostgreSQL + Redis queue + package callbacks/webhooks + Qdrant context | extraction + scheduling | due-trigger + context recall |
 
 ## 4. Storage Architecture and Tiers
 
@@ -62,7 +62,7 @@ All architecture docs must remain semantically aligned with these three diagrams
 - Qdrant stores semantic vectors and payload metadata.
 - Neo4j stores entity graph and relationship evidence.
 - MinIO keeps immutable raw transcript archive.
-- ClickHouse stores event/timeline analytics for episodic/procedural insights.
+- PostgreSQL stores audit, job, event, and timeline rows for episodic/procedural insights; optional observability exports metrics when configured.
 
 ## 5. Write Paths
 

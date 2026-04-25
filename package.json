@@ -9,7 +9,5 @@
   "scripts": {
     "build:node": "npm --workspace bindings/node run build"
   },
-  "dependencies": {
-    "nextral": "^0.0.1"
-  }
+  "dependencies": {}
 }

@@ -20,7 +20,7 @@ Prospective memory tracks what Tony must do in the future: reminders, follow-ups
 |---|---|---|
 | Reminder/follow-up records | PostgreSQL | Durable pending work |
 | Dispatch queue | Redis queue | Near-term trigger execution |
-| Proactive trigger workflows | n8n | Cron/calendar-driven activation |
+| Proactive trigger dispatch | package callbacks, webhooks, CLI polling, or user-owned schedulers | Cron/calendar-driven activation |
 | High-importance commitment context | Qdrant | Semantic recall for commitments (often high importance) |
 
 ## Lifecycle

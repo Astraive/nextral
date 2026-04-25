@@ -1,7 +1,7 @@
 {
   "name": "nextral",
-  "version": "0.0.1",
-  "description": "Info-only npm package for Nextral publishing metadata.",
+  "version": "0.1.0",
+  "description": "Node package for the Nextral production memory runtime.",
   "main": "index.ts",
   "types": "index.ts",
   "scripts": {

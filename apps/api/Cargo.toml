@@ -1,0 +1,8 @@
+[package]
+name = "nextral-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nextral = { path = "../.." }
+serde_json = "1.0"

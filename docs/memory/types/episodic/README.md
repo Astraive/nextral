@@ -19,7 +19,7 @@ Episodic memory stores what happened and when across sessions, so Tony can refer
 | Store | Role |
 |---|---|
 | Qdrant | Embedded conversation episodes for semantic recall |
-| ClickHouse | Event log and temporal analytics |
+| PostgreSQL event tables | Event log and temporal timeline rows |
 | MinIO S3 | Raw transcript archive for full-fidelity replay |
 
 ## Consolidation Flow
@@ -28,7 +28,7 @@ Episodic memory stores what happened and when across sessions, so Tony can refer
 2. Full transcript is loaded from PostgreSQL.
 3. Memory candidates are extracted and scored.
 4. Accepted chunks are embedded and written to Qdrant.
-5. Events are recorded in ClickHouse and raw transcripts archived to MinIO.
+5. Events are recorded in PostgreSQL event tables and raw transcripts are archived to MinIO/S3.
 
 ## Retrieval Characteristics
 

@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package nextral.v1;
+
+service MemoryService {
+  rpc Ingest(IngestMemoryRequest) returns (IngestMemoryResponse);
+  rpc Retrieve(RetrieveMemoryRequest) returns (RetrieveMemoryResponse);
+  rpc Forget(ForgetMemoryRequest) returns (ForgetMemoryResponse);
+}
+
+service ReminderService {
+  rpc Schedule(ScheduleReminderRequest) returns (ScheduleReminderResponse);
+  rpc ListDue(ListDueRemindersRequest) returns (ListDueRemindersResponse);
+}
+
+message IngestMemoryRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  string content = 3;
+  string content_type = 4;
+  string memory_type = 5;
+  string privacy_level = 6;
+}
+
+message IngestMemoryResponse {
+  string memory_id = 1;
+  repeated string receipts = 2;
+}
+
+message RetrieveMemoryRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  string query_text = 3;
+  repeated string privacy_scope = 4;
+  uint32 token_budget = 5;
+}
+
+message RetrieveMemoryResponse {
+  repeated RetrievedMemory items = 1;
+  repeated string degraded_reasons = 2;
+}
+
+message RetrievedMemory {
+  string memory_id = 1;
+  string source_path = 2;
+  float retrieval_score = 3;
+}
+
+message ForgetMemoryRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  string memory_id = 3;
+  string actor_id = 4;
+  string reason = 5;
+  bool redact = 6;
+}
+
+message ForgetMemoryResponse {
+  string workflow_id = 1;
+}
+
+message ScheduleReminderRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  string source_memory_id = 3;
+  string title = 4;
+  string due_at = 5;
+  string timezone = 6;
+}
+
+message ScheduleReminderResponse {
+  string reminder_id = 1;
+}
+
+message ListDueRemindersRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  string due_at_or_before = 3;
+}
+
+message ListDueRemindersResponse {
+  repeated string reminder_ids = 1;
+}
