@@ -10,6 +10,8 @@ type NativeModule = {
   reembedPlan?: (requestJson: string) => string;
   ingest_request_schema?: () => string;
   ingestRequestSchema?: () => string;
+  mcp_call?: (requestJson: string) => string;
+  mcpCall?: (requestJson: string) => string;
 };
 
 let nativeModule: NativeModule | null = null;
@@ -69,4 +71,22 @@ export function ingestRequestSchema(): unknown {
     throw new Error("Nextral native module is missing ingest schema export.");
   }
   return JSON.parse(schema());
+}
+
+export function mcpCall(tool: string, payload: unknown): unknown {
+  if (!nativeModule) {
+    nativeModule = require("./index.node") as NativeModule;
+  }
+  const invoke = nativeModule.mcpCall ?? nativeModule.mcp_call;
+  if (!invoke) {
+    throw new Error("Nextral native module is missing MCP call export.");
+  }
+  return JSON.parse(
+    invoke(
+      JSON.stringify({
+        tool,
+        payload_json: JSON.stringify(payload),
+      })
+    )
+  );
 }

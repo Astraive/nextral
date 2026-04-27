@@ -5,6 +5,7 @@ use crate::{
     prospective::ReminderRecord,
     retrieval::{RetrievalRequest, RetrievedItem},
 };
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,4 +157,102 @@ pub trait RerankerPort {
         request: &RetrievalRequest,
         items: Vec<RetrievedItem>,
     ) -> CoreResult<Vec<RetrievedItem>>;
+}
+
+#[async_trait]
+pub trait AsyncPostgresPort {
+    async fn upsert_memory(&self, record: &MemoryRecord) -> CoreResult<()>;
+    async fn get_memory(
+        &self,
+        scope: &TenantUserScope,
+        memory_id: &str,
+    ) -> CoreResult<Option<MemoryRecord>>;
+    async fn append_session_message(
+        &self,
+        scope: &TenantUserScope,
+        session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> CoreResult<String>;
+    async fn upsert_reminder(&self, reminder: &ReminderRecord) -> CoreResult<()>;
+    async fn write_audit(&self, event: &AuditWrite) -> CoreResult<()>;
+    async fn enqueue_outbox(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+        aggregate_id: &str,
+        payload_json: &str,
+    ) -> CoreResult<String>;
+}
+
+#[async_trait]
+impl<T> AsyncPostgresPort for T
+where
+    T: PostgresPort + Sync,
+{
+    async fn upsert_memory(&self, record: &MemoryRecord) -> CoreResult<()> {
+        PostgresPort::upsert_memory(self, record)
+    }
+    async fn get_memory(
+        &self,
+        scope: &TenantUserScope,
+        memory_id: &str,
+    ) -> CoreResult<Option<MemoryRecord>> {
+        PostgresPort::get_memory(self, scope, memory_id)
+    }
+    async fn append_session_message(
+        &self,
+        scope: &TenantUserScope,
+        session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> CoreResult<String> {
+        PostgresPort::append_session_message(self, scope, session_id, role, content)
+    }
+    async fn upsert_reminder(&self, reminder: &ReminderRecord) -> CoreResult<()> {
+        PostgresPort::upsert_reminder(self, reminder)
+    }
+    async fn write_audit(&self, event: &AuditWrite) -> CoreResult<()> {
+        PostgresPort::write_audit(self, event)
+    }
+    async fn enqueue_outbox(
+        &self,
+        tenant_id: &str,
+        event_type: &str,
+        aggregate_id: &str,
+        payload_json: &str,
+    ) -> CoreResult<String> {
+        PostgresPort::enqueue_outbox(self, tenant_id, event_type, aggregate_id, payload_json)
+    }
+}
+
+#[async_trait]
+pub trait AsyncRedisPort {
+    async fn put_cache(&self, entry: &CacheEntry) -> CoreResult<()>;
+    async fn get_cache(&self, key: &str) -> CoreResult<Option<String>>;
+    async fn invalidate_prefix(&self, prefix: &str) -> CoreResult<()>;
+    async fn acquire_lease(&self, key: &str, owner: &str, ttl_seconds: u64) -> CoreResult<bool>;
+    async fn release_lease(&self, key: &str, owner: &str) -> CoreResult<()>;
+}
+
+#[async_trait]
+impl<T> AsyncRedisPort for T
+where
+    T: RedisPort + Sync,
+{
+    async fn put_cache(&self, entry: &CacheEntry) -> CoreResult<()> {
+        RedisPort::put_cache(self, entry)
+    }
+    async fn get_cache(&self, key: &str) -> CoreResult<Option<String>> {
+        RedisPort::get_cache(self, key)
+    }
+    async fn invalidate_prefix(&self, prefix: &str) -> CoreResult<()> {
+        RedisPort::invalidate_prefix(self, prefix)
+    }
+    async fn acquire_lease(&self, key: &str, owner: &str, ttl_seconds: u64) -> CoreResult<bool> {
+        RedisPort::acquire_lease(self, key, owner, ttl_seconds)
+    }
+    async fn release_lease(&self, key: &str, owner: &str) -> CoreResult<()> {
+        RedisPort::release_lease(self, key, owner)
+    }
 }

@@ -1,11 +1,14 @@
 pub mod consolidation;
+pub mod evaluation;
 pub mod governance;
 pub mod graphify;
 pub mod ingestion;
+pub mod intelligence;
 pub mod reembed;
 pub mod reminders;
 pub mod retrieval;
 pub mod session;
+pub mod prospective;
 
 use crate::{
     contracts::CoreResult,

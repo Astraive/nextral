@@ -30,6 +30,12 @@ fn ingest_request_schema() -> PyResult<String> {
     Ok(nextral::package::ingest_request_schema_json())
 }
 
+#[pyfunction]
+fn mcp_call(request_json: String) -> PyResult<String> {
+    nextral::package::mcp_call_json(&request_json)
+        .map_err(|error| PyRuntimeError::new_err(error.message))
+}
+
 #[pymodule]
 fn _nextral(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(lexical_score, module)?)?;
@@ -37,5 +43,6 @@ fn _nextral(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(e2e_smoke, module)?)?;
     module.add_function(wrap_pyfunction!(reembed_plan, module)?)?;
     module.add_function(wrap_pyfunction!(ingest_request_schema, module)?)?;
+    module.add_function(wrap_pyfunction!(mcp_call, module)?)?;
     Ok(())
 }

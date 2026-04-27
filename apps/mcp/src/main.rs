@@ -1,4 +1,4 @@
-use nextral::package::{e2e_smoke_json, ingest_request_schema_json};
+use nextral::package::{e2e_smoke_json, ingest_request_schema_json, mcp_call_json};
 use std::{env, process};
 
 fn main() {
@@ -19,14 +19,24 @@ fn run() -> Result<(), String> {
                         "nextral.memory.retrieve",
                         "nextral.memory.forget",
                         "nextral.graph.query",
-                        "nextral.reminders.due"
+                        "nextral.reminders.due",
+                        "experiments.create",
+                        "experiments.promote",
+                        "experiments.rollback",
+                        "experiments.status",
+                        "safety.policy.get",
+                        "safety.policy.set"
                     ]
                 })
             );
         }
         Some("schema") => println!("{}", ingest_request_schema_json()),
         Some("smoke") => println!("{}", e2e_smoke_json().map_err(|error| error.message)?),
-        _ => println!("usage: nextral-mcp tools | schema | smoke"),
+        Some("call") => {
+            let request_json = env::args().nth(2).ok_or("missing MCP call request JSON")?;
+            println!("{}", mcp_call_json(&request_json).map_err(|error| error.message)?);
+        }
+        _ => println!("usage: nextral-mcp tools | schema | smoke | call '<json>'"),
     }
     Ok(())
 }

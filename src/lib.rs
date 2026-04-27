@@ -39,7 +39,10 @@ mod tests {
             consolidation::{consolidate_session, ConsolidationLane, ConsolidationRequest},
             governance::{forget_memory, ForgetMemoryRequest},
             reembed::plan_reembed,
-            reminders::{schedule_reminder, ScheduleReminderRequest},
+            reminders::{
+                execute_due_reminders, schedule_reminder, ExecuteDueRemindersRequest,
+                ScheduleReminderRequest,
+            },
             session::{
                 append_session_message, assemble_working_context, AppendSessionMessageRequest,
             },
@@ -167,6 +170,7 @@ mod tests {
 
         let memory_id = response.record_id.unwrap();
         let mut reminder = ReminderRecord::new(
+            "tenant_1",
             "usr_1",
             memory_id,
             crate::prospective::ReminderKind::FollowUp,
@@ -181,7 +185,7 @@ mod tests {
         store.upsert_reminder(reminder).unwrap();
         assert_eq!(
             store
-                .list_due_reminders("usr_1", "9999999999")
+                .list_due_reminders("tenant_1", "usr_1", "9999999999")
                 .unwrap()
                 .len(),
             1
@@ -252,6 +256,8 @@ mod tests {
                 s3_region: "us-east-1".to_string(),
                 s3_access_key_env: "NEXTRAL_S3_ACCESS_KEY".to_string(),
                 s3_secret_key_env: "NEXTRAL_S3_SECRET_KEY".to_string(),
+                transport_profile: Some("baseline".to_string()),
+                enforce_tls: Some(false),
             }),
             embedding: EmbeddingProviderConfig {
                 kind: EmbeddingProviderKind::OpenAiCompatible,
@@ -353,12 +359,14 @@ mod tests {
         let scheduled = schedule_reminder(
             &mut store,
             ScheduleReminderRequest {
+                tenant_id: "tenant_1".to_string(),
                 user_id: "usr_1".to_string(),
                 source_memory_id: memory_id.clone(),
                 kind: crate::prospective::ReminderKind::FollowUp,
                 title: "Check Atlas migration".to_string(),
                 due_at: "9999999999".to_string(),
                 timezone: "configured-by-user".to_string(),
+                trace_id: None,
             },
         )
         .unwrap();
@@ -394,5 +402,132 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.status, "planned");
+    }
+
+    #[test]
+    fn retrieval_telemetry_contains_contract_fields() {
+        let mut store = TestMemoryStore::new();
+        let record = MemoryRecord::new(
+            "mem_telemetry",
+            "tenant_1",
+            "usr_1",
+            "Atlas uses PostgreSQL",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
+        store.upsert_memory(record).unwrap();
+        let response = retrieve(
+            &mut store,
+            RetrievalRequest::test("tenant_1", "usr_1", "PostgreSQL"),
+        )
+        .unwrap();
+        assert!(response.telemetry.vector_candidates >= 1);
+        assert!(response.telemetry.vector_ms <= response.telemetry.vector_ms + 1);
+        assert!(response.telemetry.token_utilization >= 0.0);
+        assert!(response.telemetry.dedupe_ratio >= 0.0);
+    }
+
+    #[test]
+    fn due_reminder_execution_completes_or_retries() {
+        let mut store = TestMemoryStore::new();
+        let ok = schedule_reminder(
+            &mut store,
+            ScheduleReminderRequest {
+                tenant_id: "tenant_1".to_string(),
+                user_id: "usr_1".to_string(),
+                source_memory_id: "mem_1".to_string(),
+                kind: crate::prospective::ReminderKind::FollowUp,
+                title: "Normal reminder".to_string(),
+                due_at: "10".to_string(),
+                timezone: "Asia/Kolkata".to_string(),
+                trace_id: None,
+            },
+        )
+        .unwrap();
+        let failed = schedule_reminder(
+            &mut store,
+            ScheduleReminderRequest {
+                tenant_id: "tenant_1".to_string(),
+                user_id: "usr_1".to_string(),
+                source_memory_id: "mem_2".to_string(),
+                kind: crate::prospective::ReminderKind::FollowUp,
+                title: "fail this reminder".to_string(),
+                due_at: "10".to_string(),
+                timezone: "Asia/Kolkata".to_string(),
+                trace_id: None,
+            },
+        )
+        .unwrap();
+
+        let due = execute_due_reminders(
+            &mut store,
+            ExecuteDueRemindersRequest {
+                tenant_id: "tenant_1".to_string(),
+                user_id: "usr_1".to_string(),
+                due_at_or_before: "10".to_string(),
+                actor: "system".to_string(),
+                retry_delay_seconds: 60,
+                dispatch_policy_version: None,
+                retry_strategy_id: None,
+                trace_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(due.results.len(), 2);
+        assert!(due.results.iter().any(|result| {
+            result.reminder_id == ok.reminder.id
+                && result.status == crate::prospective::ReminderStatus::Completed
+        }));
+        assert!(due.results.iter().any(|result| {
+            result.reminder_id == failed.reminder.id
+                && result.status == crate::prospective::ReminderStatus::RetryScheduled
+        }));
+    }
+
+    #[test]
+    fn experiment_control_and_safety_policy_workflows_operate() {
+        let create = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "experiments.create",
+                "payload_json": serde_json::json!({
+                    "lane": "canary",
+                    "policy_version": "policy-v2",
+                    "description": "ranker tune"
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let created: serde_json::Value = serde_json::from_str(&create).unwrap();
+        let experiment_id = created["id"].as_str().unwrap().to_string();
+
+        let blocked = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "experiments.promote",
+                "payload_json": serde_json::json!({
+                    "experiment_id": experiment_id,
+                    "severity": "destructive"
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let blocked_value: serde_json::Value = serde_json::from_str(&blocked).unwrap();
+        assert_eq!(blocked_value["status"], "blocked_by_replay_gate");
+
+        let policy = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "safety.policy.set",
+                "payload_json": serde_json::json!({
+                    "severity": "warning",
+                    "action": "constrain"
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let policy_value: serde_json::Value = serde_json::from_str(&policy).unwrap();
+        assert_eq!(policy_value["actions"]["warning"], "constrain");
     }
 }

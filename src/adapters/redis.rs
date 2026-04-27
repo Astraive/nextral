@@ -29,36 +29,79 @@ impl RedisAdapter {
     pub fn health(&self) -> AdapterHealth {
         AdapterHealth::configured("redis")
     }
+
+    fn connection(&self) -> CoreResult<redis::Connection> {
+        redis::Client::open(self.url.as_str())
+            .map_err(|error| CoreError::Io(error.to_string()))?
+            .get_connection()
+            .map_err(|error| CoreError::Io(error.to_string()))
+    }
 }
 
 impl RedisPort for RedisAdapter {
-    fn put_cache(&self, _entry: &CacheEntry) -> CoreResult<()> {
-        Err(CoreError::InvalidInput(
-            "redis driver execution is not enabled in this build".to_string(),
-        ))
+    fn put_cache(&self, entry: &CacheEntry) -> CoreResult<()> {
+        let mut connection = self.connection()?;
+        let key = self.namespaced_key(&entry.key);
+        let _: () = redis::cmd("SETEX")
+            .arg(key)
+            .arg(entry.ttl_seconds)
+            .arg(&entry.value_json)
+            .query(&mut connection)
+            .map_err(|error| CoreError::Io(error.to_string()))?;
+        Ok(())
     }
 
-    fn get_cache(&self, _key: &str) -> CoreResult<Option<String>> {
-        Err(CoreError::InvalidInput(
-            "redis driver execution is not enabled in this build".to_string(),
-        ))
+    fn get_cache(&self, key: &str) -> CoreResult<Option<String>> {
+        let mut connection = self.connection()?;
+        let value: Option<String> = redis::cmd("GET")
+            .arg(self.namespaced_key(key))
+            .query(&mut connection)
+            .map_err(|error| CoreError::Io(error.to_string()))?;
+        Ok(value)
     }
 
-    fn invalidate_prefix(&self, _prefix: &str) -> CoreResult<()> {
-        Err(CoreError::InvalidInput(
-            "redis driver execution is not enabled in this build".to_string(),
-        ))
+    fn invalidate_prefix(&self, prefix: &str) -> CoreResult<()> {
+        let mut connection = self.connection()?;
+        let pattern = self.namespaced_key(&format!("{prefix}*"));
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(pattern)
+            .query(&mut connection)
+            .map_err(|error| CoreError::Io(error.to_string()))?;
+        if !keys.is_empty() {
+            let _: () = redis::cmd("DEL")
+                .arg(keys)
+                .query(&mut connection)
+                .map_err(|error| CoreError::Io(error.to_string()))?;
+        }
+        Ok(())
     }
 
-    fn acquire_lease(&self, _key: &str, _owner: &str, _ttl_seconds: u64) -> CoreResult<bool> {
-        Err(CoreError::InvalidInput(
-            "redis driver execution is not enabled in this build".to_string(),
-        ))
+    fn acquire_lease(&self, key: &str, owner: &str, ttl_seconds: u64) -> CoreResult<bool> {
+        let mut connection = self.connection()?;
+        let result: Option<String> = redis::cmd("SET")
+            .arg(self.namespaced_key(key))
+            .arg(owner)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_seconds)
+            .query(&mut connection)
+            .map_err(|error| CoreError::Io(error.to_string()))?;
+        Ok(result.as_deref() == Some("OK"))
     }
 
-    fn release_lease(&self, _key: &str, _owner: &str) -> CoreResult<()> {
-        Err(CoreError::InvalidInput(
-            "redis driver execution is not enabled in this build".to_string(),
-        ))
+    fn release_lease(&self, key: &str, owner: &str) -> CoreResult<()> {
+        let mut connection = self.connection()?;
+        let namespaced = self.namespaced_key(key);
+        let current: Option<String> = redis::cmd("GET")
+            .arg(&namespaced)
+            .query(&mut connection)
+            .map_err(|error| CoreError::Io(error.to_string()))?;
+        if current.as_deref() == Some(owner) {
+            let _: () = redis::cmd("DEL")
+                .arg(namespaced)
+                .query(&mut connection)
+                .map_err(|error| CoreError::Io(error.to_string()))?;
+        }
+        Ok(())
     }
 }

@@ -98,6 +98,8 @@ pub struct StoreConfig {
     pub s3_region: String,
     pub s3_access_key_env: String,
     pub s3_secret_key_env: String,
+    pub transport_profile: Option<String>,
+    pub enforce_tls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,6 +291,26 @@ fn validate_stores(config: &StoreConfig) -> CoreResult<()> {
     require("stores.s3_region", &config.s3_region)?;
     require("stores.s3_access_key_env", &config.s3_access_key_env)?;
     require("stores.s3_secret_key_env", &config.s3_secret_key_env)?;
+    if let Some(profile) = &config.transport_profile {
+        let allowed = ["baseline", "strict"];
+        if !allowed.contains(&profile.as_str()) {
+            return Err(CoreError::InvalidInput(
+                "stores.transport_profile must be baseline or strict".to_string(),
+            ));
+        }
+    }
+    if config.enforce_tls.unwrap_or(false) {
+        for (name, value) in [
+            ("stores.qdrant_url", &config.qdrant_url),
+            ("stores.s3_endpoint", &config.s3_endpoint),
+        ] {
+            if !value.starts_with("https://") {
+                return Err(CoreError::InvalidInput(format!(
+                    "{name} must use https:// when stores.enforce_tls is true"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

@@ -3,6 +3,7 @@ pub mod postgres;
 pub mod qdrant;
 pub mod redis;
 pub mod s3;
+pub mod transport;
 
 use crate::{
     config::StoreConfig,

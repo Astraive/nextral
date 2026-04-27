@@ -59,3 +59,9 @@ the package APIs. They are optional and must not become a separate required SaaS
 
 Structured logs, metrics, and traces are dev-first. Production observability is
 enabled only when configured. Logs must not include raw sensitive memory content.
+
+## Integration Verification
+
+Use `scripts/e2e-docker.ps1` to verify the required production store stack
+locally. The script covers all seven memory systems and checks PostgreSQL,
+Redis, Qdrant, Neo4j, MinIO/S3, CLI, and Node package surfaces.

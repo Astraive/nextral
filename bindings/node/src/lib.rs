@@ -29,3 +29,9 @@ pub fn reembed_plan(request_json: String) -> Result<String> {
 pub fn ingest_request_schema() -> Result<String> {
     Ok(nextral::package::ingest_request_schema_json())
 }
+
+#[napi]
+pub fn mcp_call(request_json: String) -> Result<String> {
+    nextral::package::mcp_call_json(&request_json)
+        .map_err(|error| Error::from_reason(error.message))
+}

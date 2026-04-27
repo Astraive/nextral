@@ -38,6 +38,20 @@ nextral-mcp tools
 HTTP, gRPC, GraphQL, and MCP are optional package-provided service surfaces over
 the same Rust runtime.
 
+## Docker Integration E2E
+
+Run the full local store verification when Docker is available:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\e2e-docker.ps1
+```
+
+The harness starts PostgreSQL, Redis, Qdrant, Neo4j, and MinIO/S3 from
+`docker-compose.integration.yml`; applies migrations/provisioning; writes
+fixtures for working, session, episodic, semantic, relational, procedural, and
+prospective memory; verifies retrieval/storage effects; and runs CLI plus Node
+package smoke checks.
+
 ## Architecture Docs
 
 - `docs/architecture/project-structure.md`

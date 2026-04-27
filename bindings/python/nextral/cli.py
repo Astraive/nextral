@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ._version import __version__
-from .core import e2e_smoke, ingest_request_schema, reembed_plan, validate_config
+from .core import e2e_smoke, ingest_request_schema, mcp_call, reembed_plan, validate_config
 
 
 def _load_json(path: str) -> dict:
@@ -47,13 +47,58 @@ def _handle_reembed_plan(args: argparse.Namespace) -> int:
 
 
 def _handle_service_plan(args: argparse.Namespace) -> int:
+    config = _load_json(args.config)
+    validate_config(config)
     print(
         json.dumps(
             {
                 "mode": args.mode,
-                "status": "configured_by_package_runtime",
+                "status": "configured",
                 "config": args.config,
             },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _handle_graph_query(args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            mcp_call(
+                "nextral.graph.query",
+                {
+                    "tenant_id": args.tenant_id,
+                    "user_id": args.user_id,
+                    "session_id": None,
+                    "query_text": args.query_text,
+                    "entities": args.entities,
+                    "intent_topic": args.intent_topic,
+                    "token_budget": args.token_budget,
+                    "privacy_scope": args.privacy_scope,
+                    "top_k_vector": args.top_k_vector,
+                    "max_graph_hops": args.max_graph_hops,
+                },
+            ),
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _handle_due_reminders(args: argparse.Namespace) -> int:
+    print(
+        json.dumps(
+            mcp_call(
+                "nextral.reminders.due",
+                {
+                    "tenant_id": args.tenant_id,
+                    "user_id": args.user_id,
+                    "due_at_or_before": args.due_at_or_before,
+                    "actor": args.actor,
+                    "retry_delay_seconds": args.retry_delay_seconds,
+                },
+            ),
             indent=2,
         )
     )
@@ -97,14 +142,32 @@ def build_parser() -> argparse.ArgumentParser:
         mode_parser.add_argument("config", help="Path to JSON config.")
         mode_parser.set_defaults(handler=_handle_service_plan, mode=mode)
 
-    for command, help_text in [
-        ("db", "Database migration and provisioning commands."),
-        ("session", "Session append and lifecycle commands."),
-        ("graph", "Graph query commands."),
-        ("reminders", "Prospective memory commands."),
-    ]:
-        reserved = subparsers.add_parser(command, help=help_text)
-        reserved.set_defaults(handler=_handle_e2e_smoke)
+    db_parser = subparsers.add_parser("db", help="Database migration and provisioning commands.")
+    db_parser.add_argument("config", help="Path to JSON config.")
+    db_parser.set_defaults(handler=_handle_config_validate)
+
+    session_parser = subparsers.add_parser("session", help="Session append and lifecycle commands.")
+    session_parser.set_defaults(handler=_handle_e2e_smoke)
+
+    graph_parser = subparsers.add_parser("graph", help="Graph query commands.")
+    graph_parser.add_argument("tenant_id")
+    graph_parser.add_argument("user_id")
+    graph_parser.add_argument("query_text")
+    graph_parser.add_argument("--entities", nargs="*", default=[])
+    graph_parser.add_argument("--intent-topic", default=None)
+    graph_parser.add_argument("--token-budget", type=int, default=1800)
+    graph_parser.add_argument("--privacy-scope", nargs="*", default=["private", "sensitive", "shared"])
+    graph_parser.add_argument("--top-k-vector", type=int, default=12)
+    graph_parser.add_argument("--max-graph-hops", type=int, default=2)
+    graph_parser.set_defaults(handler=_handle_graph_query)
+
+    reminders_parser = subparsers.add_parser("reminders", help="Prospective memory commands.")
+    reminders_parser.add_argument("tenant_id")
+    reminders_parser.add_argument("user_id")
+    reminders_parser.add_argument("due_at_or_before")
+    reminders_parser.add_argument("--actor", default="system")
+    reminders_parser.add_argument("--retry-delay-seconds", type=int, default=300)
+    reminders_parser.set_defaults(handler=_handle_due_reminders)
 
     return parser
 

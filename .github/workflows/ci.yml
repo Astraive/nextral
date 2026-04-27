@@ -56,3 +56,21 @@ jobs:
       - name: Python CLI help
         working-directory: bindings/python
         run: python -m nextral --help
+
+  docker-e2e:
+    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install node binding dependencies
+        working-directory: bindings/node
+        run: npm ci
+      - name: Build node package
+        run: npm --workspace bindings/node run build
+      - name: Run Docker integration E2E
+        run: powershell -ExecutionPolicy Bypass -File scripts\e2e-docker.ps1

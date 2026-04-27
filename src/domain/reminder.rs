@@ -37,6 +37,7 @@ pub enum ReminderStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReminderRecord {
     pub id: String,
+    pub tenant_id: String,
     pub user_id: String,
     pub source_memory_id: String,
     pub kind: ReminderKind,
@@ -66,6 +67,7 @@ pub struct ReminderTransition {
 
 impl ReminderRecord {
     pub fn new(
+        tenant_id: impl Into<String>,
         user_id: impl Into<String>,
         source_memory_id: impl Into<String>,
         kind: ReminderKind,
@@ -73,23 +75,27 @@ impl ReminderRecord {
         due_at: impl Into<String>,
         timezone: impl Into<String>,
     ) -> CoreResult<Self> {
+        let tenant_id = tenant_id.into();
         let user_id = user_id.into();
         let source_memory_id = source_memory_id.into();
         let title = title.into();
         let due_at = due_at.into();
-        if user_id.trim().is_empty()
+        if tenant_id.trim().is_empty()
+            || user_id.trim().is_empty()
             || source_memory_id.trim().is_empty()
             || title.trim().is_empty()
         {
             return Err(CoreError::InvalidInput(
-                "user_id, source_memory_id, and title are required".to_string(),
+                "tenant_id, user_id, source_memory_id, and title are required".to_string(),
             ));
         }
         let kind_text = format!("{:?}", kind);
-        let dedupe_key = deterministic_id(&[&user_id, &source_memory_id, &kind_text, &due_at]);
+        let dedupe_key =
+            deterministic_id(&[&tenant_id, &user_id, &source_memory_id, &kind_text, &due_at]);
         let now = now_timestamp();
         Ok(Self {
             id: deterministic_id(&[&dedupe_key, "reminder"]),
+            tenant_id,
             user_id,
             source_memory_id,
             kind,

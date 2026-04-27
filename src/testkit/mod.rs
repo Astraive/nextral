@@ -39,6 +39,7 @@ pub trait ReminderStore {
     fn upsert_reminder(&mut self, reminder: ReminderRecord) -> CoreResult<()>;
     fn list_due_reminders(
         &self,
+        tenant_id: &str,
         user_id: &str,
         due_at_or_before: &str,
     ) -> CoreResult<Vec<ReminderRecord>>;
@@ -273,12 +274,14 @@ impl ReminderStore for TestMemoryStore {
 
     fn list_due_reminders(
         &self,
+        tenant_id: &str,
         user_id: &str,
         due_at_or_before: &str,
     ) -> CoreResult<Vec<ReminderRecord>> {
         Ok(self
             .reminders
             .iter()
+            .filter(|reminder| reminder.tenant_id == tenant_id)
             .filter(|reminder| reminder.user_id == user_id)
             .filter(|reminder| {
                 reminder

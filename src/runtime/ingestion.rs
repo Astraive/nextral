@@ -29,6 +29,7 @@ pub struct IngestMemoryRequest {
     pub privacy_level: PrivacyLevel,
     pub graph_hints: Vec<GraphHint>,
     pub policy: IngestionPolicy,
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub enum IngestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngestMemoryResponse {
     pub status: IngestStatus,
+    pub trace_id: String,
     pub record_id: Option<String>,
     pub validation_errors: Vec<String>,
     pub write_receipts: Vec<String>,
@@ -73,6 +75,7 @@ impl IngestMemoryRequest {
             privacy_level: PrivacyLevel::Private,
             graph_hints: Vec::new(),
             policy,
+            trace_id: None,
         }
     }
 }
@@ -84,6 +87,14 @@ pub fn ingest_memory<T>(
 where
     T: MemoryIndexStore + AuditSink + GraphStore,
 {
+    let trace_id = request.trace_id.clone().unwrap_or_else(|| {
+        deterministic_id(&[
+            &request.tenant_id,
+            &request.user_id,
+            &request.content,
+            "ingest_trace",
+        ])
+    });
     let attempt_id = deterministic_id(&[&request.user_id, &request.content, "write_attempt"]);
     store.emit_audit(AuditEvent {
         id: attempt_id,
@@ -95,7 +106,7 @@ where
         target_id: request.id.clone(),
         reason: "ingest requested".to_string(),
         request_id: None,
-        trace_id: None,
+        trace_id: Some(trace_id.clone()),
         metadata_json: "{}".to_string(),
         created_at: now_timestamp(),
     })?;
@@ -121,12 +132,13 @@ where
             target_id: None,
             reason: errors.join("; "),
             request_id: None,
-            trace_id: None,
+            trace_id: Some(trace_id.clone()),
             metadata_json: "{}".to_string(),
             created_at: now_timestamp(),
         })?;
         return Ok(IngestMemoryResponse {
             status: IngestStatus::Rejected,
+            trace_id,
             record_id: None,
             validation_errors: errors,
             write_receipts: Vec::new(),
@@ -172,13 +184,14 @@ where
         target_id: Some(id.clone()),
         reason: "memory accepted".to_string(),
         request_id: None,
-        trace_id: None,
+        trace_id: Some(trace_id.clone()),
         metadata_json: "{}".to_string(),
         created_at: now_timestamp(),
     })?;
 
     Ok(IngestMemoryResponse {
         status: IngestStatus::Accepted,
+        trace_id,
         record_id: Some(id),
         validation_errors: Vec::new(),
         write_receipts: vec![
