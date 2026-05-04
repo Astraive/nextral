@@ -75,10 +75,22 @@ impl TestMemoryStore {
 impl MemoryIndexStore for TestMemoryStore {
     fn upsert_memory(&mut self, record: MemoryRecord) -> CoreResult<()> {
         record.validate()?;
+        if self.memories.iter().any(|memory| {
+            memory.id == record.id
+                && (memory.tenant_id != record.tenant_id || memory.user_id != record.user_id)
+        }) {
+            return Err(CoreError::Conflict(
+                "memory id is already in use by a different tenant/user scope".to_string(),
+            ));
+        }
         if let Some(existing) = self
             .memories
             .iter_mut()
-            .find(|memory| memory.id == record.id)
+            .find(|memory| {
+                memory.id == record.id
+                    && memory.tenant_id == record.tenant_id
+                    && memory.user_id == record.user_id
+            })
         {
             *existing = record;
             return Ok(());
