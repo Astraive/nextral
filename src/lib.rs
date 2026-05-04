@@ -404,6 +404,43 @@ mod tests {
         assert_eq!(plan.status, "planned");
     }
 
+
+    #[test]
+    fn session_idempotency_is_scoped_per_tenant_user_session() {
+        let mut store = TestMemoryStore::new();
+
+        append_session_message(
+            &mut store,
+            AppendSessionMessageRequest {
+                tenant_id: "tenant_1".to_string(),
+                user_id: "usr_1".to_string(),
+                session_id: "sess_1".to_string(),
+                role: "user".to_string(),
+                content: "first".to_string(),
+                idempotency_key: Some("same-key".to_string()),
+            },
+            20,
+        )
+        .unwrap();
+
+        let appended = append_session_message(
+            &mut store,
+            AppendSessionMessageRequest {
+                tenant_id: "tenant_2".to_string(),
+                user_id: "usr_2".to_string(),
+                session_id: "sess_2".to_string(),
+                role: "user".to_string(),
+                content: "second".to_string(),
+                idempotency_key: Some("same-key".to_string()),
+            },
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(appended.hot_tail_count, 1);
+        assert_eq!(store.session_messages.len(), 2);
+    }
+
     #[test]
     fn retrieval_telemetry_contains_contract_fields() {
         let mut store = TestMemoryStore::new();
