@@ -68,8 +68,8 @@ impl S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         Ok(serde_json::json!({
             "status": response.status().as_u16(),
             "bucket": self.bucket,
@@ -98,15 +98,15 @@ impl ObjectArchivePort for S3Adapter {
             self.hardening.token_env.as_deref(),
         )
         .body(object.bytes.clone())
-            .header("x-amz-meta-tenant-id", object.tenant_id.clone())
-            .header("x-amz-meta-user-id", object.user_id.clone())
-            .header(
-                "x-amz-meta-memory-id",
-                object.memory_id.clone().unwrap_or_default(),
-            )
-            .header("x-amz-meta-content-sha256", object.content_sha256.clone())
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .header("x-amz-meta-tenant-id", object.tenant_id.clone())
+        .header("x-amz-meta-user-id", object.user_id.clone())
+        .header(
+            "x-amz-meta-memory-id",
+            object.memory_id.clone().unwrap_or_default(),
+        )
+        .header("x-amz-meta-content-sha256", object.content_sha256.clone())
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 put_object failed: {}",
@@ -120,12 +120,13 @@ impl ObjectArchivePort for S3Adapter {
         })
     }
 
-    fn tombstone_object(
-        &self,
-        _tenant_id: &str,
-        object_key: &str,
-        _reason: &str,
-    ) -> CoreResult<()> {
+    fn tombstone_object(&self, tenant_id: &str, object_key: &str, _reason: &str) -> CoreResult<()> {
+        let tenant_prefix = format!("tenants/{}/", tenant_id);
+        if !object_key.starts_with(&tenant_prefix) {
+            return Err(CoreError::InvalidInput(
+                "object_key is outside tenant scope".to_string(),
+            ));
+        }
         let response = maybe_add_bearer_auth(
             Client::new().delete(format!(
                 "{}/{}/{}",
@@ -135,8 +136,8 @@ impl ObjectArchivePort for S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 tombstone_object failed: {}",

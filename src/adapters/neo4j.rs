@@ -24,7 +24,8 @@ impl Neo4jAdapter {
         }
         let hardening = TransportHardeningProfile::baseline(Some("NEXTRAL_NEO4J_API_KEY"));
         validate_transport_url(
-            &url.replace("neo4j://", "http://").replace("bolt://", "http://"),
+            &url.replace("neo4j://", "http://")
+                .replace("bolt://", "http://"),
             hardening.require_tls,
         )
         .map_err(CoreError::InvalidInput)?;
@@ -64,8 +65,8 @@ impl Neo4jAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "neo4j request failed: {}",
@@ -141,7 +142,7 @@ impl Neo4jPort for Neo4jAdapter {
         }
         let statement = format!(
             r#"
-            MATCH (n:NextralEntity {{user_id:$user_id}})
+            MATCH (n:NextralEntity {{tenant_id:$tenant_id, user_id:$user_id}})
             WHERE any(term in $query_entities WHERE toLower(n.name) CONTAINS toLower(term))
             MATCH p=(n)-[r:NEXTRAL_RELATES_TO*1..{}]-()
             UNWIND relationships(p) as rel
@@ -154,6 +155,7 @@ impl Neo4jPort for Neo4jAdapter {
         let body = self.cypher(
             &statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "query_entities": query_entities,
             }),
@@ -171,7 +173,7 @@ impl Neo4jPort for Neo4jAdapter {
 
     fn redact_memory_edges(&self, scope: &TenantUserScope, memory_id: &str) -> CoreResult<()> {
         let statement = r#"
-            MATCH ()-[r:NEXTRAL_RELATES_TO {user_id:$user_id}]-()
+            MATCH ()-[r:NEXTRAL_RELATES_TO {tenant_id:$tenant_id, user_id:$user_id}]-()
             WHERE any(id in r.source_memory_ids WHERE id = $memory_id)
             SET r.source_memory_ids = [id IN r.source_memory_ids WHERE id <> $memory_id]
             WITH r
@@ -181,6 +183,7 @@ impl Neo4jPort for Neo4jAdapter {
         self.cypher(
             statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "memory_id": memory_id
             }),
