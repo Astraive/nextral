@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphNode {
+    pub tenant_id: String,
     pub user_id: String,
     pub label: String,
     pub name: String,
@@ -18,6 +19,7 @@ pub struct GraphNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphEdge {
+    pub tenant_id: String,
     pub user_id: String,
     pub from_key: String,
     pub relationship_type: String,
@@ -62,10 +64,11 @@ pub struct GraphifyOutput {
 }
 
 impl GraphNode {
-    pub fn new(user_id: &str, label: &str, name: &str, confidence: f32) -> CoreResult<Self> {
+    pub fn new(tenant_id: &str, user_id: &str, label: &str, name: &str, confidence: f32) -> CoreResult<Self> {
         validate_score("confidence", confidence)?;
         let canonical_name = canonicalize(name);
         Ok(Self {
+            tenant_id: tenant_id.to_string(),
             user_id: user_id.to_string(),
             label: label.to_string(),
             name: name.trim().to_string(),
@@ -79,6 +82,7 @@ impl GraphNode {
 
 impl GraphEdge {
     pub fn new(
+        tenant_id: &str,
         user_id: &str,
         from_key: &str,
         relationship_type: &str,
@@ -89,6 +93,7 @@ impl GraphEdge {
         validate_score("confidence", confidence)?;
         let now = now_timestamp();
         Ok(Self {
+            tenant_id: tenant_id.to_string(),
             user_id: user_id.to_string(),
             from_key: from_key.to_string(),
             relationship_type: relationship_type.trim().to_uppercase(),
@@ -106,7 +111,7 @@ pub fn graphify_record(record: &MemoryRecord, hints: &[GraphHint]) -> CoreResult
     let mut contradictions = Vec::new();
     for entity in &record.entities {
         if !entity.trim().is_empty() {
-            nodes.push(GraphNode::new(&record.user_id, infer_label(entity), entity, 0.8)?);
+            nodes.push(GraphNode::new(&record.tenant_id, &record.user_id, infer_label(entity), entity, 0.8)?);
         }
     }
 
@@ -116,18 +121,21 @@ pub fn graphify_record(record: &MemoryRecord, hints: &[GraphHint]) -> CoreResult
     for hint in &all_hints {
         validate_graph_hint(hint)?;
         let from = GraphNode::new(
+            &record.tenant_id,
             &record.user_id,
             &hint.from_label,
             &hint.from_name,
             hint.confidence,
         )?;
         let to = GraphNode::new(
+            &record.tenant_id,
             &record.user_id,
             &hint.to_label,
             &hint.to_name,
             hint.confidence,
         )?;
         relationships.push(GraphEdge::new(
+            &record.tenant_id,
             &record.user_id,
             &from.key,
             &hint.relationship_type,
@@ -177,10 +185,10 @@ pub fn canonicalize(name: &str) -> String {
     name.trim().to_lowercase().replace(' ', "_")
 }
 
-pub fn connect(edges: &mut Vec<GraphEdge>, from: impl Into<String>, to: impl Into<String>) {
+pub fn connect(edges: &mut Vec<GraphEdge>, tenant_id: &str, from: impl Into<String>, to: impl Into<String>) {
     let from = from.into();
     let to = to.into();
-    if let Ok(edge) = GraphEdge::new("default", &from, "RELATED_TO", &to, 0.5, "legacy") {
+    if let Ok(edge) = GraphEdge::new(tenant_id, "default", &from, "RELATED_TO", &to, 0.5, "legacy") {
         edges.push(edge);
     }
 }

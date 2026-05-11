@@ -291,6 +291,7 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
         },
     )?;
     neo4j.merge_node(&crate::graph::GraphNode::new(
+        &request.tenant_id,
         &request.user_id,
         "Entity",
         &request.memory_id,
