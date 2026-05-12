@@ -63,15 +63,26 @@ impl RedisPort for RedisAdapter {
     fn invalidate_prefix(&self, prefix: &str) -> CoreResult<()> {
         let mut connection = self.connection()?;
         let pattern = self.namespaced_key(&format!("{prefix}*"));
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query(&mut connection)
-            .map_err(|error| CoreError::Io(error.to_string()))?;
-        if !keys.is_empty() {
-            let _: () = redis::cmd("DEL")
-                .arg(keys)
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
                 .query(&mut connection)
                 .map_err(|error| CoreError::Io(error.to_string()))?;
+            if !keys.is_empty() {
+                let _: () = redis::cmd("DEL")
+                    .arg(keys)
+                    .query(&mut connection)
+                    .map_err(|error| CoreError::Io(error.to_string()))?;
+            }
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
         }
         Ok(())
     }

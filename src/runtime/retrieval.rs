@@ -1,4 +1,5 @@
 use crate::{
+    config::ScoringWeights,
     contracts::{CoreError, CoreResult},
     memory::{estimate_tokens, MemoryRecord, PrivacyLevel},
     runtime::intelligence::{
@@ -26,6 +27,7 @@ pub struct RetrievalRequest {
     pub lane: Option<RuntimeLane>,
     pub policy_version: Option<String>,
     pub trace_id: Option<String>,
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +118,12 @@ impl RetrievalRequest {
             lane: None,
             policy_version: None,
             trace_id: None,
+            scoring_weights: Some(ScoringWeights {
+                semantic_similarity: 0.5,
+                recency: 0.2,
+                importance: 0.2,
+                access: 0.1,
+            }),
         }
     }
 }
@@ -140,6 +148,12 @@ where
     if request.query_text.trim().is_empty() {
         return Err(CoreError::InvalidInput("query cannot be empty".to_string()));
     }
+    let scoring_weights = request.scoring_weights.clone().unwrap_or(ScoringWeights {
+        semantic_similarity: 0.5,
+        recency: 0.2,
+        importance: 0.2,
+        access: 0.1,
+    });
     let trace_id = request.trace_id.clone().unwrap_or_else(|| {
         crate::memory::deterministic_id(&[
             &request.tenant_id,
@@ -240,7 +254,7 @@ where
     for (record, semantic_similarity) in &vector_items {
         merged.insert(
             record.id.clone(),
-            item_from_record(record, SourcePath::Vector, *semantic_similarity),
+            item_from_record(record, SourcePath::Vector, *semantic_similarity, &scoring_weights),
         );
     }
     for memory_id in &graph_ids {
@@ -253,6 +267,7 @@ where
                         record,
                         SourcePath::Graph,
                         lexical_score(&record.content, &request.query_text),
+                        &scoring_weights,
                     )
                 });
         }
@@ -360,6 +375,7 @@ fn item_from_record(
     record: &MemoryRecord,
     source_path: SourcePath,
     semantic_similarity: f32,
+    weights: &ScoringWeights,
 ) -> RetrievedItem {
     let access = (record.access_count as f32 / 10.0).min(1.0);
     let recency = 1.0;
@@ -368,6 +384,7 @@ fn item_from_record(
         recency,
         record.importance_score,
         access,
+        weights,
     );
     RetrievedItem {
         memory_id: record.id.clone(),
