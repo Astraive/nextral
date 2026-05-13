@@ -117,6 +117,11 @@ fn control_plane() -> &'static Mutex<RuntimeControlPlane> {
     INSTANCE.get_or_init(|| Mutex::new(RuntimeControlPlane::default()))
 }
 
+fn shared_store() -> &'static Mutex<TestMemoryStore> {
+    static INSTANCE: OnceLock<Mutex<TestMemoryStore>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(TestMemoryStore::new()))
+}
+
 pub fn e2e_smoke_json() -> Result<String, PackageError> {
     let mut store = TestMemoryStore::new();
     let appended = append_session_message(

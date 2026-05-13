@@ -103,16 +103,19 @@ impl RedisPort for RedisAdapter {
     fn release_lease(&self, key: &str, owner: &str) -> CoreResult<()> {
         let mut connection = self.connection()?;
         let namespaced = self.namespaced_key(key);
-        let current: Option<String> = redis::cmd("GET")
-            .arg(&namespaced)
-            .query(&mut connection)
+        // Atomic check-and-delete using Lua script to prevent TOCTOU race condition
+        let script = redis::Script::new(
+            r#"if redis.call("GET", KEYS[1]) == ARGV[1] then
+                return redis.call("DEL", KEYS[1])
+            else
+                return 0
+            end"#,
+        );
+        let _: i32 = script
+            .key(&namespaced)
+            .arg(owner)
+            .invoke(&mut connection)
             .map_err(|error| CoreError::Io(error.to_string()))?;
-        if current.as_deref() == Some(owner) {
-            let _: () = redis::cmd("DEL")
-                .arg(namespaced)
-                .query(&mut connection)
-                .map_err(|error| CoreError::Io(error.to_string()))?;
-        }
         Ok(())
     }
 }
