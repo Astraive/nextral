@@ -378,7 +378,17 @@ fn item_from_record(
     weights: &ScoringWeights,
 ) -> RetrievedItem {
     let access = (record.access_count as f32 / 10.0).min(1.0);
-    let recency = 1.0;
+    // Calculate recency based on how recently the record was created
+    // Decay factor: 1.0 for recent, decreasing over time (half-life ~30 days)
+    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
+    let created = record.created_at.parse::<u64>().unwrap_or(0);
+    let age_seconds = now.saturating_sub(created);
+    let half_life_seconds = 30 * 24 * 60 * 60; // 30 days
+    let recency = if age_seconds == 0 {
+        1.0
+    } else {
+        (0.5_f32).powf(age_seconds as f32 / half_life_seconds as f32)
+    };
     let score = retrieval_score(
         semantic_similarity,
         recency,

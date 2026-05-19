@@ -27,8 +27,14 @@ pub trait MemoryIndexStore {
 pub trait GraphStore {
     fn merge_node(&mut self, node: GraphNode) -> CoreResult<()>;
     fn merge_edge(&mut self, edge: GraphEdge) -> CoreResult<()>;
-    fn graph_memory_ids(&self, user_id: &str, query: &str, max_hops: u8)
-        -> CoreResult<Vec<String>>;
+    fn graph_memory_ids(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        query: &str,
+        max_hops: u8,
+        privacy_scope: &[PrivacyLevel],
+    ) -> CoreResult<Vec<String>>;
 }
 
 pub trait AuditSink {

@@ -67,7 +67,7 @@ where
                     _ = ticker.tick() => {
                         let due_now = crate::memory::now_timestamp();
                         let mut guard = store.lock().await;
-                        let _ = execute_due_reminders(
+                        if let Err(error) = execute_due_reminders(
                             &mut *guard,
                             ExecuteDueRemindersRequest {
                                 tenant_id: tenant_id.clone(),
@@ -79,7 +79,9 @@ where
                                 retry_strategy_id: None,
                                 trace_id: None,
                             },
-                        );
+                        ) {
+                            eprintln!("ProspectiveScheduler: failed to execute due reminders: {error}");
+                        }
                     }
                 }
             }

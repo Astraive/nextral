@@ -375,14 +375,18 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
         "nextral.memory.forget" => {
             let payload: ForgetMemoryRequest =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = TestMemoryStore::new();
-            Ok(serde_json::to_string(&forget_memory(&mut store, payload)?).map_err(CoreError::from)?)
+            let mut store = shared_store()
+                .lock()
+                .map_err(|error| CoreError::Conflict(error.to_string()))?;
+            Ok(serde_json::to_string(&forget_memory(&mut *store, payload)?).map_err(CoreError::from)?)
         }
         "nextral.reminders.due" => {
             let payload: ExecuteDueRemindersRequest =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = TestMemoryStore::new();
-            Ok(serde_json::to_string(&execute_due_reminders(&mut store, payload)?).map_err(CoreError::from)?)
+            let mut store = shared_store()
+                .lock()
+                .map_err(|error| CoreError::Conflict(error.to_string()))?;
+            Ok(serde_json::to_string(&execute_due_reminders(&mut *store, payload)?).map_err(CoreError::from)?)
         }
         "experiments.create" => {
             let payload: ExperimentCreateRequest =
@@ -487,8 +491,10 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
         "nextral.graph.query" => {
             let payload: RetrievalRequest =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = TestMemoryStore::new();
-            let response = crate::runtime::retrieval::retrieve(&mut store, payload)?;
+            let mut store = shared_store()
+                .lock()
+                .map_err(|error| CoreError::Conflict(error.to_string()))?;
+            let response = crate::runtime::retrieval::retrieve(&mut *store, payload)?;
             let graph_only: Vec<_> = response
                 .items
                 .into_iter()
