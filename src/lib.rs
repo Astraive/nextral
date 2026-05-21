@@ -423,7 +423,7 @@ mod tests {
         )
         .unwrap();
         assert!(response.telemetry.vector_candidates >= 1);
-        assert!(response.telemetry.vector_ms <= response.telemetry.vector_ms + 1);
+        assert!(response.telemetry.vector_ms < 10000, "vector search took too long: {}ms", response.telemetry.vector_ms);
         assert!(response.telemetry.token_utilization >= 0.0);
         assert!(response.telemetry.dedupe_ratio >= 0.0);
     }
