@@ -4,8 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
+    hash::Hash,
     time::{SystemTime, UNIX_EPOCH},
 };
 

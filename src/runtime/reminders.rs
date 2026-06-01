@@ -33,6 +33,7 @@ pub struct ExecuteDueRemindersRequest {
     pub due_at_or_before: String,
     pub actor: String,
     pub retry_delay_seconds: u64,
+    pub max_retries: Option<u32>,
     pub dispatch_policy_version: Option<String>,
     pub retry_strategy_id: Option<String>,
     pub trace_id: Option<String>,
@@ -167,7 +168,8 @@ pub fn execute_due_reminders(
 
         let _ = reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
         let _ = reminder.transition(ReminderStatus::Failed, &request.actor, "dispatch failed")?;
-        if reminder.attempt_count < 3 {
+        let max_retries = request.max_retries.unwrap_or(3);
+        if reminder.attempt_count < max_retries {
             let _ = reminder.transition(
                 ReminderStatus::RetryScheduled,
                 &request.actor,

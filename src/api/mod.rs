@@ -62,6 +62,20 @@ pub fn startup_plan(config: &NextralConfig, mode: ServiceMode) -> CoreResult<Ser
 
 pub fn run_service_hosts(config: &NextralConfig, mode: ServiceMode) -> CoreResult<ServiceRuntimeReport> {
     let plan = startup_plan(config, mode)?;
+
+    // Check readiness matrix before starting services
+    let readiness = startup_readiness_matrix(config)?;
+    if readiness.fail_fast {
+        let unavailable: Vec<&str> = readiness.backends.iter()
+            .filter(|b| b.status == "unavailable")
+            .map(|b| b.backend.as_str())
+            .collect();
+        return Err(crate::contracts::CoreError::InvalidInput(format!(
+            "Cannot start services: required backends unavailable: {:?}",
+            unavailable
+        )));
+    }
+
     let mut binds = Vec::new();
     let mut handles = Vec::new();
     for active_mode in plan.modes {
@@ -88,7 +102,9 @@ pub fn run_service_hosts(config: &NextralConfig, mode: ServiceMode) -> CoreResul
         }
     }
     for handle in handles {
-        let _ = handle.join();
+        if let Err(error) = handle.join() {
+            eprintln!("Service listener thread panicked: {:?}", error);
+        }
     }
     Ok(ServiceRuntimeReport {
         status: "stopped".to_string(),
@@ -169,5 +185,10 @@ fn spawn_listener(bind: String, mode: &'static str) -> thread::JoinHandle<()> {
 
 fn write_response(stream: &mut TcpStream, mode: &str) -> std::io::Result<()> {
     let body = format!("nextral {mode} service alive");
-    stream.write_all(body.as_bytes())
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())
 }

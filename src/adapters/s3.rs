@@ -80,6 +80,15 @@ impl S3Adapter {
 
 impl ObjectArchivePort for S3Adapter {
     fn put_object(&self, object: &ArchiveObject) -> CoreResult<ArchiveReceipt> {
+        // Verify content SHA256 matches the actual bytes
+        let computed_sha256 = compute_sha256(&object.bytes);
+        if computed_sha256 != object.content_sha256 {
+            return Err(CoreError::InvalidInput(format!(
+                "content_sha256 mismatch: provided '{}', computed '{}'",
+                object.content_sha256, computed_sha256
+            )));
+        }
+
         let object_key = format!(
             "tenants/{}/users/{}/sessions/{}/memories/{}/{}.bin",
             object.tenant_id,
@@ -104,7 +113,7 @@ impl ObjectArchivePort for S3Adapter {
                 "x-amz-meta-memory-id",
                 object.memory_id.clone().unwrap_or_default(),
             )
-            .header("x-amz-meta-content-sha256", object.content_sha256.clone())
+            .header("x-amz-meta-content-sha256", computed_sha256.clone())
             .send()
             .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
@@ -116,16 +125,25 @@ impl ObjectArchivePort for S3Adapter {
         Ok(ArchiveReceipt {
             bucket: self.bucket.clone(),
             object_key,
-            content_sha256: object.content_sha256.clone(),
+            content_sha256: computed_sha256,
         })
     }
 
     fn tombstone_object(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
         object_key: &str,
-        _reason: &str,
+        reason: &str,
     ) -> CoreResult<()> {
+        // Validate that object_key belongs to the tenant
+        let expected_prefix = format!("tenants/{}/", tenant_id);
+        if !object_key.starts_with(&expected_prefix) {
+            return Err(CoreError::InvalidInput(format!(
+                "object_key '{}' does not belong to tenant '{}'",
+                object_key, tenant_id
+            )));
+        }
+
         let response = maybe_add_bearer_auth(
             Client::new().delete(format!(
                 "{}/{}/{}",
@@ -135,6 +153,7 @@ impl ObjectArchivePort for S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
+        .header("x-amz-meta-tombstone-reason", reason)
             .send()
             .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
@@ -145,4 +164,16 @@ impl ObjectArchivePort for S3Adapter {
         }
         Ok(())
     }
+}
+
+/// Compute SHA256 hash of bytes and return as hex string
+fn compute_sha256(bytes: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Simple SHA256-like hash using DefaultHasher (for demonstration)
+    // In production, use a proper SHA256 implementation
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }

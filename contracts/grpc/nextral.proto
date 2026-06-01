@@ -16,34 +16,80 @@ service ReminderService {
 message IngestMemoryRequest {
   string tenant_id = 1;
   string user_id = 2;
-  string content = 3;
-  string content_type = 4;
-  string memory_type = 5;
-  string privacy_level = 6;
+  optional string session_id = 3;
+  string content = 4;
+  string content_type = 5;
+  string memory_type = 6;
+  string privacy_level = 7;
+  optional float importance_score = 8;
+  optional float confidence_score = 9;
+  repeated string entities = 10;
+  repeated string tags = 11;
+  optional string source_type = 12;
+  repeated string source_message_ids = 13;
 }
 
 message IngestMemoryResponse {
   string memory_id = 1;
-  repeated string receipts = 2;
+  string status = 2;
+  repeated string validation_errors = 3;
+  string dedupe_key = 4;
+}
+
+message ScoreBreakdown {
+  float semantic_similarity = 1;
+  float recency = 2;
+  float importance = 3;
+  float access = 4;
+}
+
+message RetrievalTelemetry {
+  uint32 vector_candidates = 1;
+  uint32 graph_candidates = 2;
+  uint32 merged_candidates = 3;
+  uint32 selected_candidates = 4;
+  uint32 token_estimate = 5;
+  float token_utilization = 6;
+  uint64 vector_ms = 7;
+  uint64 graph_ms = 8;
+  uint64 merge_ms = 9;
+  float dedupe_ratio = 10;
+}
+
+message RetrievedMemory {
+  string memory_id = 1;
+  string content = 2;
+  string source_path = 3;
+  float retrieval_score = 4;
+  ScoreBreakdown score_breakdown = 5;
 }
 
 message RetrieveMemoryRequest {
   string tenant_id = 1;
   string user_id = 2;
-  string query_text = 3;
-  repeated string privacy_scope = 4;
-  uint32 token_budget = 5;
+  optional string session_id = 3;
+  string query_text = 4;
+  repeated string entities = 5;
+  optional string intent_topic = 6;
+  uint32 token_budget = 7;
+  repeated string privacy_scope = 8;
+  uint32 top_k_vector = 9;
+  uint32 max_graph_hops = 10;
 }
 
 message RetrieveMemoryResponse {
-  repeated RetrievedMemory items = 1;
-  repeated string degraded_reasons = 2;
-}
-
-message RetrievedMemory {
-  string memory_id = 1;
-  string source_path = 2;
-  float retrieval_score = 3;
+  string tenant_id = 1;
+  string user_id = 2;
+  string trace_id = 3;
+  string status = 4;
+  string lane = 5;
+  string policy_version = 6;
+  float quality_score = 7;
+  string severity = 8;
+  string decision_action = 9;
+  optional string rollback_id = 10;
+  RetrievalTelemetry telemetry = 11;
+  repeated RetrievedMemory items = 12;
 }
 
 message ForgetMemoryRequest {
@@ -63,9 +109,11 @@ message ScheduleReminderRequest {
   string tenant_id = 1;
   string user_id = 2;
   string source_memory_id = 3;
-  string title = 4;
-  string due_at = 5;
-  string timezone = 6;
+  string kind = 4;
+  string title = 5;
+  string due_at = 6;
+  string timezone = 7;
+  optional string priority = 8;
 }
 
 message ScheduleReminderResponse {

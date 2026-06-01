@@ -81,11 +81,13 @@ export function mcpCall(tool: string, payload: unknown): unknown {
   if (!invoke) {
     throw new Error("Nextral native module is missing MCP call export.");
   }
+  // If payload is already a string, use it directly to avoid double-serialization
+  const payloadJson = typeof payload === 'string' ? payload : JSON.stringify(payload);
   return JSON.parse(
     invoke(
       JSON.stringify({
         tool,
-        payload_json: JSON.stringify(payload),
+        payload_json: payloadJson,
       })
     )
   );
