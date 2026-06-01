@@ -15,4 +15,5 @@ node_modules/
 *.tgz
 .maturin/
 /package-lock.json
-
+.agents
+.claude

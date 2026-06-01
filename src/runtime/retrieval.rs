@@ -12,7 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
     pub tenant_id: String,
     pub user_id: String,
@@ -193,8 +193,13 @@ where
     let vector_ms = vector_start.elapsed().as_millis() as u64;
 
     let graph_start = Instant::now();
-    let graph_result =
-        store.graph_memory_ids(&request.user_id, &request.query_text, request.max_graph_hops);
+    let graph_result = store.graph_memory_ids(
+        &request.tenant_id,
+        &request.user_id,
+        &request.query_text,
+        request.max_graph_hops,
+        &privacy_scope,
+    );
     let graph_ms = graph_start.elapsed().as_millis() as u64;
 
     let mut degraded_reasons = Vec::new();

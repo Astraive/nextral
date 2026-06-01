@@ -11,19 +11,27 @@ pub struct TransportHardeningProfile {
 
 impl TransportHardeningProfile {
     pub fn strict(token_env: Option<&str>) -> Self {
+        Self::strict_with_timeouts(token_env, 2000, 4000)
+    }
+
+    pub fn strict_with_timeouts(token_env: Option<&str>, connect_timeout_ms: u64, request_timeout_ms: u64) -> Self {
         Self {
             require_tls: true,
-            connect_timeout_ms: 2000,
-            request_timeout_ms: 4000,
+            connect_timeout_ms,
+            request_timeout_ms,
             token_env: token_env.map(|value| value.to_string()),
         }
     }
 
     pub fn baseline(token_env: Option<&str>) -> Self {
+        Self::baseline_with_timeouts(token_env, 2000, 4000)
+    }
+
+    pub fn baseline_with_timeouts(token_env: Option<&str>, connect_timeout_ms: u64, request_timeout_ms: u64) -> Self {
         Self {
             require_tls: false,
-            connect_timeout_ms: 2000,
-            request_timeout_ms: 4000,
+            connect_timeout_ms,
+            request_timeout_ms,
             token_env: token_env.map(|value| value.to_string()),
         }
     }
