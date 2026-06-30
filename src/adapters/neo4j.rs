@@ -104,8 +104,8 @@ impl Neo4jPort for Neo4jAdapter {
 
     fn merge_edge(&self, edge: &GraphEdge) -> CoreResult<()> {
         let statement = r#"
-            MATCH (a:NextralEntity {user_id:$user_id, key:$from_key})
-            MATCH (b:NextralEntity {user_id:$user_id, key:$to_key})
+            MATCH (a:NextralEntity {tenant_id:$tenant_id, user_id:$user_id, key:$from_key})
+            MATCH (b:NextralEntity {tenant_id:$tenant_id, user_id:$user_id, key:$to_key})
             MERGE (a)-[r:NEXTRAL_RELATES_TO {tenant_id:$tenant_id, user_id:$user_id, relationship_type:$relationship_type, from_key:$from_key, to_key:$to_key}]->(b)
             ON CREATE SET r.confidence=$confidence, r.source_memory_ids=$source_memory_ids, r.created_at=$created_at, r.last_confirmed_at=$last_confirmed_at
             ON MATCH SET r.confidence=CASE WHEN r.confidence > $confidence THEN r.confidence ELSE $confidence END,
@@ -141,9 +141,10 @@ impl Neo4jPort for Neo4jAdapter {
         }
         let statement = format!(
             r#"
-            MATCH (n:NextralEntity {{user_id:$user_id}})
+            MATCH (n:NextralEntity {{tenant_id:$tenant_id, user_id:$user_id}})
             WHERE any(term in $query_entities WHERE toLower(n.name) CONTAINS toLower(term))
             MATCH p=(n)-[r:NEXTRAL_RELATES_TO*1..{}]-()
+            WHERE all(rel in relationships(p) WHERE rel.tenant_id = $tenant_id AND rel.user_id = $user_id)
             UNWIND relationships(p) as rel
             UNWIND rel.source_memory_ids as memory_id
             RETURN DISTINCT memory_id
@@ -154,6 +155,7 @@ impl Neo4jPort for Neo4jAdapter {
         let body = self.cypher(
             &statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "query_entities": query_entities,
             }),
@@ -171,7 +173,7 @@ impl Neo4jPort for Neo4jAdapter {
 
     fn redact_memory_edges(&self, scope: &TenantUserScope, memory_id: &str) -> CoreResult<()> {
         let statement = r#"
-            MATCH ()-[r:NEXTRAL_RELATES_TO {user_id:$user_id}]-()
+            MATCH ()-[r:NEXTRAL_RELATES_TO {tenant_id:$tenant_id, user_id:$user_id}]-()
             WHERE any(id in r.source_memory_ids WHERE id = $memory_id)
             SET r.source_memory_ids = [id IN r.source_memory_ids WHERE id <> $memory_id]
             WITH r
@@ -181,6 +183,7 @@ impl Neo4jPort for Neo4jAdapter {
         self.cypher(
             statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "memory_id": memory_id
             }),
