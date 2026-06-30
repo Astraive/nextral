@@ -136,6 +136,54 @@ mod tests {
     }
 
     #[test]
+    fn local_store_upsert_scopes_caller_supplied_ids_to_tenant_and_user() {
+        let mut store = TestMemoryStore::new();
+        let policy = IngestionPolicy {
+            min_importance_score: 0.0,
+            min_confidence_score: 0.0,
+        };
+
+        let mut victim_request = IngestMemoryRequest::new(
+            "tenant_1",
+            "victim_user",
+            "victim private fact",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+            policy.clone(),
+        );
+        victim_request.id = Some("known_memory_id".to_string());
+        victim_request.confidence_score = Some(1.0);
+        ingest_memory(&mut store, victim_request).unwrap();
+
+        let mut attacker_request = IngestMemoryRequest::new(
+            "tenant_1",
+            "attacker_user",
+            "attacker controlled replacement",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+            policy,
+        );
+        attacker_request.id = Some("known_memory_id".to_string());
+        attacker_request.confidence_score = Some(1.0);
+        ingest_memory(&mut store, attacker_request).unwrap();
+
+        let victim_memory = store
+            .get_memory("tenant_1", "victim_user", "known_memory_id")
+            .unwrap()
+            .expect("victim memory should remain visible to the victim");
+        assert_eq!(victim_memory.content, "victim private fact");
+
+        let attacker_memory = store
+            .get_memory("tenant_1", "attacker_user", "known_memory_id")
+            .unwrap()
+            .expect("attacker memory should be stored separately");
+        assert_eq!(attacker_memory.content, "attacker controlled replacement");
+        assert_eq!(store.memories.len(), 2);
+    }
+
+    #[test]
     fn ingestion_retrieval_graph_and_reminders_work() {
         let mut store = TestMemoryStore::new();
         let mut request = IngestMemoryRequest::new(
@@ -423,7 +471,11 @@ mod tests {
         )
         .unwrap();
         assert!(response.telemetry.vector_candidates >= 1);
-        assert!(response.telemetry.vector_ms < 10000, "vector search took too long: {}ms", response.telemetry.vector_ms);
+        assert!(
+            response.telemetry.vector_ms < 10000,
+            "vector search took too long: {}ms",
+            response.telemetry.vector_ms
+        );
         assert!(response.telemetry.token_utilization >= 0.0);
         assert!(response.telemetry.dedupe_ratio >= 0.0);
     }

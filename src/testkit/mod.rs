@@ -81,11 +81,11 @@ impl TestMemoryStore {
 impl MemoryIndexStore for TestMemoryStore {
     fn upsert_memory(&mut self, record: MemoryRecord) -> CoreResult<()> {
         record.validate()?;
-        if let Some(existing) = self
-            .memories
-            .iter_mut()
-            .find(|memory| memory.id == record.id)
-        {
+        if let Some(existing) = self.memories.iter_mut().find(|memory| {
+            memory.tenant_id == record.tenant_id
+                && memory.user_id == record.user_id
+                && memory.id == record.id
+        }) {
             *existing = record;
             return Ok(());
         }
