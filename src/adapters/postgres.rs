@@ -73,7 +73,7 @@ impl PostgresPort for PostgresAdapter {
         let last_accessed_at =
             optional_epoch_seconds(record.last_accessed_at.as_deref(), "last_accessed_at")?;
 
-        client
+        let affected_rows = client
             .execute(
                 r#"
                 INSERT INTO nextral_memories (
@@ -111,6 +111,8 @@ impl PostgresPort for PostgresAdapter {
                     access_count = EXCLUDED.access_count,
                     status = EXCLUDED.status,
                     schema_version = EXCLUDED.schema_version
+                WHERE nextral_memories.tenant_id = EXCLUDED.tenant_id
+                    AND nextral_memories.user_id = EXCLUDED.user_id
                 "#,
                 &[
                     &record.id,
@@ -140,6 +142,11 @@ impl PostgresPort for PostgresAdapter {
                 ],
             )
             .map_err(|error| CoreError::Io(error.to_string()))?;
+        if affected_rows == 0 {
+            return Err(CoreError::Conflict(
+                "memory id already exists for a different tenant or user".to_string(),
+            ));
+        }
         Ok(())
     }
 
