@@ -63,15 +63,26 @@ impl RedisPort for RedisAdapter {
     fn invalidate_prefix(&self, prefix: &str) -> CoreResult<()> {
         let mut connection = self.connection()?;
         let pattern = self.namespaced_key(&format!("{prefix}*"));
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query(&mut connection)
-            .map_err(|error| CoreError::Io(error.to_string()))?;
-        if !keys.is_empty() {
-            let _: () = redis::cmd("DEL")
-                .arg(keys)
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
                 .query(&mut connection)
                 .map_err(|error| CoreError::Io(error.to_string()))?;
+            if !keys.is_empty() {
+                let _: () = redis::cmd("DEL")
+                    .arg(keys)
+                    .query(&mut connection)
+                    .map_err(|error| CoreError::Io(error.to_string()))?;
+            }
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
         }
         Ok(())
     }
@@ -92,16 +103,19 @@ impl RedisPort for RedisAdapter {
     fn release_lease(&self, key: &str, owner: &str) -> CoreResult<()> {
         let mut connection = self.connection()?;
         let namespaced = self.namespaced_key(key);
-        let current: Option<String> = redis::cmd("GET")
-            .arg(&namespaced)
-            .query(&mut connection)
+        // Atomic check-and-delete using Lua script to prevent TOCTOU race condition
+        let script = redis::Script::new(
+            r#"if redis.call("GET", KEYS[1]) == ARGV[1] then
+                return redis.call("DEL", KEYS[1])
+            else
+                return 0
+            end"#,
+        );
+        let _: i32 = script
+            .key(&namespaced)
+            .arg(owner)
+            .invoke(&mut connection)
             .map_err(|error| CoreError::Io(error.to_string()))?;
-        if current.as_deref() == Some(owner) {
-            let _: () = redis::cmd("DEL")
-                .arg(namespaced)
-                .query(&mut connection)
-                .map_err(|error| CoreError::Io(error.to_string()))?;
-        }
         Ok(())
     }
 }

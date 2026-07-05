@@ -1,4 +1,5 @@
 use crate::{
+    config::ScoringWeights,
     contracts::{CoreError, CoreResult},
     memory::{estimate_tokens, MemoryRecord, PrivacyLevel},
     runtime::intelligence::{
@@ -11,7 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
     pub tenant_id: String,
     pub user_id: String,
@@ -26,6 +27,7 @@ pub struct RetrievalRequest {
     pub lane: Option<RuntimeLane>,
     pub policy_version: Option<String>,
     pub trace_id: Option<String>,
+    pub scoring_weights: Option<ScoringWeights>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +118,12 @@ impl RetrievalRequest {
             lane: None,
             policy_version: None,
             trace_id: None,
+            scoring_weights: Some(ScoringWeights {
+                semantic_similarity: 0.5,
+                recency: 0.2,
+                importance: 0.2,
+                access: 0.1,
+            }),
         }
     }
 }
@@ -140,6 +148,12 @@ where
     if request.query_text.trim().is_empty() {
         return Err(CoreError::InvalidInput("query cannot be empty".to_string()));
     }
+    let scoring_weights = request.scoring_weights.clone().unwrap_or(ScoringWeights {
+        semantic_similarity: 0.5,
+        recency: 0.2,
+        importance: 0.2,
+        access: 0.1,
+    });
     let trace_id = request.trace_id.clone().unwrap_or_else(|| {
         crate::memory::deterministic_id(&[
             &request.tenant_id,
@@ -179,8 +193,13 @@ where
     let vector_ms = vector_start.elapsed().as_millis() as u64;
 
     let graph_start = Instant::now();
-    let graph_result =
-        store.graph_memory_ids(&request.user_id, &request.query_text, request.max_graph_hops);
+    let graph_result = store.graph_memory_ids(
+        &request.tenant_id,
+        &request.user_id,
+        &request.query_text,
+        request.max_graph_hops,
+        &privacy_scope,
+    );
     let graph_ms = graph_start.elapsed().as_millis() as u64;
 
     let mut degraded_reasons = Vec::new();
@@ -240,7 +259,7 @@ where
     for (record, semantic_similarity) in &vector_items {
         merged.insert(
             record.id.clone(),
-            item_from_record(record, SourcePath::Vector, *semantic_similarity),
+            item_from_record(record, SourcePath::Vector, *semantic_similarity, &scoring_weights),
         );
     }
     for memory_id in &graph_ids {
@@ -253,6 +272,7 @@ where
                         record,
                         SourcePath::Graph,
                         lexical_score(&record.content, &request.query_text),
+                        &scoring_weights,
                     )
                 });
         }
@@ -360,14 +380,26 @@ fn item_from_record(
     record: &MemoryRecord,
     source_path: SourcePath,
     semantic_similarity: f32,
+    weights: &ScoringWeights,
 ) -> RetrievedItem {
     let access = (record.access_count as f32 / 10.0).min(1.0);
-    let recency = 1.0;
+    // Calculate recency based on how recently the record was created
+    // Decay factor: 1.0 for recent, decreasing over time (half-life ~30 days)
+    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
+    let created = record.created_at.parse::<u64>().unwrap_or(0);
+    let age_seconds = now.saturating_sub(created);
+    let half_life_seconds = 30 * 24 * 60 * 60; // 30 days
+    let recency = if age_seconds == 0 {
+        1.0
+    } else {
+        (0.5_f32).powf(age_seconds as f32 / half_life_seconds as f32)
+    };
     let score = retrieval_score(
         semantic_similarity,
         recency,
         record.importance_score,
         access,
+        weights,
     );
     RetrievedItem {
         memory_id: record.id.clone(),

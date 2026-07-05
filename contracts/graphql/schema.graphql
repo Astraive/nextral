@@ -2,22 +2,60 @@ type Memory {
   id: ID!
   tenantId: String!
   userId: String!
+  content: String!
   contentType: String!
   memoryType: String!
   privacyLevel: String!
   status: String!
+  importanceScore: Float!
+  confidenceScore: Float
+  accessCount: Int!
   createdAt: String!
+  updatedAt: String!
+}
+
+type ScoreBreakdown {
+  semanticSimilarity: Float!
+  recency: Float!
+  importance: Float!
+  access: Float!
 }
 
 type RetrievedMemory {
   memoryId: ID!
+  content: String!
   sourcePath: String!
   retrievalScore: Float!
+  scoreBreakdown: ScoreBreakdown!
+}
+
+type RetrievalTelemetry {
+  vectorCandidates: Int!
+  graphCandidates: Int!
+  mergedCandidates: Int!
+  selectedCandidates: Int!
+  tokenEstimate: Int!
+  tokenUtilization: Float!
+  vectorMs: Int!
+  graphMs: Int!
+  mergeMs: Int!
+  dedupeRatio: Float!
+  degradedReasons: [String!]!
 }
 
 type RetrievalResponse {
+  tenantId: String!
+  userId: String!
+  traceId: String!
+  status: String!
+  lane: String!
+  policyVersion: String!
+  qualityScore: Float!
+  severity: String!
+  decisionAction: String!
+  rollbackId: String
+  telemetry: RetrievalTelemetry!
   items: [RetrievedMemory!]!
-  degradedReasons: [String!]!
 }
 
 type Reminder {
@@ -25,19 +63,40 @@ type Reminder {
   tenantId: String!
   userId: String!
   sourceMemoryId: ID!
+  kind: String!
   title: String!
+  details: String!
   dueAt: String!
+  timezone: String!
+  priority: String!
   status: String!
+  attemptCount: Int!
+  lastAttemptAt: String
+  nextAttemptAt: String
+  dedupeKey: String!
+  createdAt: String!
+  updatedAt: String!
 }
 
 type Query {
   memory(tenantId: String!, userId: String!, id: ID!): Memory
-  retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!): RetrievalResponse!
+  retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!, topKVector: Int, maxGraphHops: Int): RetrievalResponse!
   reminders(tenantId: String!, userId: String!, dueAtOrBefore: String): [Reminder!]!
 }
 
 type Mutation {
-  ingestMemory(tenantId: String!, userId: String!, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!): ID!
-  forgetMemory(tenantId: String!, userId: String!, memoryId: ID!, actorId: String!, reason: String!, redact: Boolean!): ID!
-  scheduleReminder(tenantId: String!, userId: String!, sourceMemoryId: ID!, title: String!, dueAt: String!, timezone: String!): ID!
+  ingestMemory(tenantId: String!, userId: String!, sessionId: String, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!, importanceScore: Float, confidenceScore: Float, entities: [String!], tags: [String!], sourceType: String): IngestMemoryResponse!
+  forgetMemory(tenantId: String!, userId: String!, memoryId: ID!, actorId: String!, reason: String!, redact: Boolean!): ForgetMemoryResponse!
+  scheduleReminder(tenantId: String!, userId: String!, sourceMemoryId: ID!, kind: String!, title: String!, dueAt: String!, timezone: String!, priority: String): ID!
+}
+
+type IngestMemoryResponse {
+  memoryId: ID!
+  status: String!
+  validationErrors: [String!]!
+  dedupeKey: String!
+}
+
+type ForgetMemoryResponse {
+  workflowId: ID!
 }

@@ -4,8 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
+    hash::Hash,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -254,15 +253,26 @@ pub fn validate_score(name: &str, score: f32) -> CoreResult<()> {
 pub fn now_timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .expect("System time is before UNIX epoch (1970-01-01). Check system clock.")
         .as_secs()
         .to_string()
 }
 
 pub fn deterministic_id(parts: &[&str]) -> String {
-    let mut hasher = DefaultHasher::new();
-    parts.hash(&mut hasher);
-    format!("mem_{:016x}", hasher.finish())
+    // Use FNV-1a hash which is stable across Rust versions and has good distribution
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        // Add separator to prevent "ab"+"c" == "a"+"bc" collisions
+        hash ^= 0xFF;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("mem_{:016x}", hash)
 }
 
 pub fn estimate_tokens(text: &str) -> u32 {

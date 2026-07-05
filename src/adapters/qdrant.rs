@@ -43,12 +43,16 @@ impl QdrantAdapter {
         AdapterHealth::configured("qdrant")
     }
 
-    pub fn readiness(&self) -> CoreResult<Value> {
-        let client = Client::builder()
+    fn hardened_client(&self) -> CoreResult<Client> {
+        Client::builder()
             .connect_timeout(Duration::from_millis(self.hardening.connect_timeout_ms))
             .timeout(Duration::from_millis(self.hardening.request_timeout_ms))
             .build()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()))
+    }
+
+    pub fn readiness(&self) -> CoreResult<Value> {
+        let client = self.hardened_client()?;
         let response = maybe_add_bearer_auth(
             client.get(format!("{}/collections", self.url.trim_end_matches('/'))),
             self.hardening.token_env.as_deref(),
@@ -79,7 +83,7 @@ impl QdrantPort for QdrantAdapter {
                 "distance": distance.to_uppercase(),
             }
         });
-        let client = Client::new();
+        let client = self.hardened_client()?;
         let response = maybe_add_bearer_auth(
             client.put(format!(
                 "{}/collections/{}",
@@ -117,7 +121,7 @@ impl QdrantPort for QdrantAdapter {
             }]
         });
         let response = maybe_add_bearer_auth(
-            Client::new().put(format!(
+            self.hardened_client()?.put(format!(
                 "{}/collections/{}/points",
                 self.url.trim_end_matches('/'),
                 collection
@@ -155,7 +159,7 @@ impl QdrantPort for QdrantAdapter {
             }
         });
         let response = maybe_add_bearer_auth(
-            Client::new().post(format!(
+            self.hardened_client()?.post(format!(
                 "{}/collections/{}/points/search",
                 self.url.trim_end_matches('/'),
                 collection
@@ -199,7 +203,7 @@ impl QdrantPort for QdrantAdapter {
             }
         });
         let response = maybe_add_bearer_auth(
-            Client::new().post(format!(
+            self.hardened_client()?.post(format!(
                 "{}/collections/{}/points/delete",
                 self.url.trim_end_matches('/'),
                 collection

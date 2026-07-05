@@ -1,4 +1,5 @@
 use crate::{
+    config::ScoringWeights,
     contracts::{CoreError, CoreResult},
     memory::MemoryRecord,
 };
@@ -58,6 +59,10 @@ pub fn retrieval_score(
     recency: f32,
     importance: f32,
     access: f32,
+    weights: &ScoringWeights,
 ) -> f32 {
-    (0.5 * semantic_similarity) + (0.2 * recency) + (0.2 * importance) + (0.1 * access)
+    (weights.semantic_similarity * semantic_similarity)
+        + (weights.recency * recency)
+        + (weights.importance * importance)
+        + (weights.access * access)
 }

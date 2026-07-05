@@ -90,7 +90,7 @@ impl Neo4jPort for Neo4jAdapter {
         self.cypher(
             statement,
             json!({
-                "tenant_id": "configured-by-user",
+                "tenant_id": node.tenant_id,
                 "user_id": node.user_id,
                 "label": node.label,
                 "canonical_name": node.canonical_name,
@@ -117,7 +117,7 @@ impl Neo4jPort for Neo4jAdapter {
         self.cypher(
             statement,
             json!({
-                "tenant_id": "configured-by-user",
+                "tenant_id": edge.tenant_id,
                 "user_id": edge.user_id,
                 "from_key": edge.from_key,
                 "to_key": edge.to_key,
