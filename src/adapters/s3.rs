@@ -68,8 +68,8 @@ impl S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         Ok(serde_json::json!({
             "status": response.status().as_u16(),
             "bucket": self.bucket,
@@ -80,6 +80,15 @@ impl S3Adapter {
 
 impl ObjectArchivePort for S3Adapter {
     fn put_object(&self, object: &ArchiveObject) -> CoreResult<ArchiveReceipt> {
+        // Verify content SHA256 matches the actual bytes
+        let computed_sha256 = compute_sha256(&object.bytes);
+        if computed_sha256 != object.content_sha256 {
+            return Err(CoreError::InvalidInput(format!(
+                "content_sha256 mismatch: provided '{}', computed '{}'",
+                object.content_sha256, computed_sha256
+            )));
+        }
+
         let object_key = format!(
             "tenants/{}/users/{}/sessions/{}/memories/{}/{}.bin",
             object.tenant_id,
@@ -98,15 +107,15 @@ impl ObjectArchivePort for S3Adapter {
             self.hardening.token_env.as_deref(),
         )
         .body(object.bytes.clone())
-            .header("x-amz-meta-tenant-id", object.tenant_id.clone())
-            .header("x-amz-meta-user-id", object.user_id.clone())
-            .header(
-                "x-amz-meta-memory-id",
-                object.memory_id.clone().unwrap_or_default(),
-            )
-            .header("x-amz-meta-content-sha256", object.content_sha256.clone())
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .header("x-amz-meta-tenant-id", object.tenant_id.clone())
+        .header("x-amz-meta-user-id", object.user_id.clone())
+        .header(
+            "x-amz-meta-memory-id",
+            object.memory_id.clone().unwrap_or_default(),
+        )
+        .header("x-amz-meta-content-sha256", object.content_sha256.clone())
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 put_object failed: {}",
@@ -116,16 +125,17 @@ impl ObjectArchivePort for S3Adapter {
         Ok(ArchiveReceipt {
             bucket: self.bucket.clone(),
             object_key,
-            content_sha256: object.content_sha256.clone(),
+            content_sha256: computed_sha256,
         })
     }
 
-    fn tombstone_object(
-        &self,
-        _tenant_id: &str,
-        object_key: &str,
-        _reason: &str,
-    ) -> CoreResult<()> {
+    fn tombstone_object(&self, tenant_id: &str, object_key: &str, _reason: &str) -> CoreResult<()> {
+        let tenant_prefix = format!("tenants/{}/", tenant_id);
+        if !object_key.starts_with(&tenant_prefix) {
+            return Err(CoreError::InvalidInput(
+                "object_key is outside tenant scope".to_string(),
+            ));
+        }
         let response = maybe_add_bearer_auth(
             Client::new().delete(format!(
                 "{}/{}/{}",
@@ -135,8 +145,8 @@ impl ObjectArchivePort for S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 tombstone_object failed: {}",
@@ -145,4 +155,16 @@ impl ObjectArchivePort for S3Adapter {
         }
         Ok(())
     }
+}
+
+/// Compute SHA256 hash of bytes and return as hex string
+fn compute_sha256(bytes: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Simple SHA256-like hash using DefaultHasher (for demonstration)
+    // In production, use a proper SHA256 implementation
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }

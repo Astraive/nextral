@@ -47,10 +47,30 @@ pub fn forget_memory(
                 "mark_deleted_or_redacted",
                 Some(request.memory_id.clone()),
             ),
-            StoreReceipt::ok("qdrant", "delete_point", Some(request.memory_id.clone())),
-            StoreReceipt::ok("neo4j", "redact_edges", Some(request.memory_id.clone())),
-            StoreReceipt::ok("redis", "invalidate_cache", Some(request.memory_id.clone())),
-            StoreReceipt::ok("s3", "append_tombstone_manifest", Some(request.memory_id)),
+            StoreReceipt {
+                backend: "qdrant".to_string(),
+                operation: "delete_point".to_string(),
+                target_id: Some(request.memory_id.clone()),
+                status: "not_implemented".to_string(),
+            },
+            StoreReceipt {
+                backend: "neo4j".to_string(),
+                operation: "redact_edges".to_string(),
+                target_id: Some(request.memory_id.clone()),
+                status: "not_implemented".to_string(),
+            },
+            StoreReceipt {
+                backend: "redis".to_string(),
+                operation: "invalidate_cache".to_string(),
+                target_id: Some(request.memory_id.clone()),
+                status: "not_implemented".to_string(),
+            },
+            StoreReceipt {
+                backend: "s3".to_string(),
+                operation: "append_tombstone_manifest".to_string(),
+                target_id: Some(request.memory_id),
+                status: "not_implemented".to_string(),
+            },
         ],
     })
 }

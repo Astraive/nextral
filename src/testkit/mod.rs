@@ -27,8 +27,14 @@ pub trait MemoryIndexStore {
 pub trait GraphStore {
     fn merge_node(&mut self, node: GraphNode) -> CoreResult<()>;
     fn merge_edge(&mut self, edge: GraphEdge) -> CoreResult<()>;
-    fn graph_memory_ids(&self, user_id: &str, query: &str, max_hops: u8)
-        -> CoreResult<Vec<String>>;
+    fn graph_memory_ids(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        query: &str,
+        max_hops: u8,
+        privacy_scope: &[PrivacyLevel],
+    ) -> CoreResult<Vec<String>>;
 }
 
 pub trait AuditSink {
@@ -182,19 +188,31 @@ impl GraphStore for TestMemoryStore {
 
     fn graph_memory_ids(
         &self,
+        tenant_id: &str,
         user_id: &str,
         query: &str,
         _max_hops: u8,
+        privacy_scope: &[PrivacyLevel],
     ) -> CoreResult<Vec<String>> {
         let normalized = query.trim().to_lowercase();
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
+        // Get memory IDs that match privacy scope for filtering
+        let allowed_memory_ids: std::collections::HashSet<String> = self
+            .memories
+            .iter()
+            .filter(|m| m.tenant_id == tenant_id && m.user_id == user_id)
+            .filter(|m| privacy_scope.contains(&m.privacy_level))
+            .map(|m| m.id.clone())
+            .collect();
+
         let node_keys: Vec<String> = self
             .graph_nodes
             .iter()
             .filter(|node| {
-                node.user_id == user_id
+                node.tenant_id == tenant_id
+                    && node.user_id == user_id
                     && (node.name.to_lowercase().contains(&normalized)
                         || normalized.contains(&node.name.to_lowercase()))
             })
@@ -204,10 +222,16 @@ impl GraphStore for TestMemoryStore {
         for edge in self
             .graph_edges
             .iter()
-            .filter(|edge| edge.user_id == user_id)
+            .filter(|edge| edge.tenant_id == tenant_id && edge.user_id == user_id)
         {
             if node_keys.contains(&edge.from_key) || node_keys.contains(&edge.to_key) {
-                ids.extend(edge.source_memory_ids.iter().cloned());
+                // Only include memory IDs that pass privacy filter
+                ids.extend(
+                    edge.source_memory_ids
+                        .iter()
+                        .filter(|id| allowed_memory_ids.contains(*id))
+                        .cloned(),
+                );
             }
         }
         ids.sort();

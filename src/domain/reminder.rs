@@ -80,6 +80,7 @@ impl ReminderRecord {
         let source_memory_id = source_memory_id.into();
         let title = title.into();
         let due_at = due_at.into();
+        let timezone = timezone.into();
         if tenant_id.trim().is_empty()
             || user_id.trim().is_empty()
             || source_memory_id.trim().is_empty()
@@ -87,6 +88,18 @@ impl ReminderRecord {
         {
             return Err(CoreError::InvalidInput(
                 "tenant_id, user_id, source_memory_id, and title are required".to_string(),
+            ));
+        }
+        // Validate due_at is parseable as epoch seconds
+        if due_at.parse::<u64>().is_err() {
+            return Err(CoreError::InvalidInput(
+                "due_at must be a valid epoch timestamp in seconds".to_string(),
+            ));
+        }
+        // Validate timezone is non-empty (basic IANA format check)
+        if timezone.trim().is_empty() || !timezone.contains('/') {
+            return Err(CoreError::InvalidInput(
+                "timezone must be a valid IANA timezone (e.g., 'America/New_York', 'Asia/Kolkata')".to_string(),
             ));
         }
         let kind_text = format!("{:?}", kind);
@@ -102,7 +115,7 @@ impl ReminderRecord {
             title,
             details: String::new(),
             due_at: due_at.clone(),
-            timezone: timezone.into(),
+            timezone,
             priority: ReminderPriority::Normal,
             status: ReminderStatus::Scheduled,
             attempt_count: 0,

@@ -1,5 +1,8 @@
 use crate::{
-    adapters::{transport::{maybe_add_bearer_auth, validate_transport_url, TransportHardeningProfile}, AdapterHealth},
+    adapters::{
+        transport::{maybe_add_bearer_auth, validate_transport_url, TransportHardeningProfile},
+        AdapterHealth,
+    },
     contracts::{CoreError, CoreResult},
     ports::{QdrantPort, VectorPoint, VectorSearchHit, VectorSearchRequest},
 };
@@ -24,9 +27,12 @@ impl QdrantAdapter {
             ));
         }
         let hardening = TransportHardeningProfile::baseline(Some("NEXTRAL_QDRANT_API_KEY"));
-        validate_transport_url(&url, hardening.require_tls)
-            .map_err(CoreError::InvalidInput)?;
-        Ok(Self { url, collection, hardening })
+        validate_transport_url(&url, hardening.require_tls).map_err(CoreError::InvalidInput)?;
+        Ok(Self {
+            url,
+            collection,
+            hardening,
+        })
     }
 
     pub fn collection_schema_json(&self) -> &'static str {
@@ -37,18 +43,22 @@ impl QdrantAdapter {
         AdapterHealth::configured("qdrant")
     }
 
-    pub fn readiness(&self) -> CoreResult<Value> {
-        let client = Client::builder()
+    fn hardened_client(&self) -> CoreResult<Client> {
+        Client::builder()
             .connect_timeout(Duration::from_millis(self.hardening.connect_timeout_ms))
             .timeout(Duration::from_millis(self.hardening.request_timeout_ms))
             .build()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()))
+    }
+
+    pub fn readiness(&self) -> CoreResult<Value> {
+        let client = self.hardened_client()?;
         let response = maybe_add_bearer_auth(
             client.get(format!("{}/collections", self.url.trim_end_matches('/'))),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         let status = response.status();
         let body = response
             .json::<Value>()
@@ -73,7 +83,7 @@ impl QdrantPort for QdrantAdapter {
                 "distance": distance.to_uppercase(),
             }
         });
-        let client = Client::new();
+        let client = self.hardened_client()?;
         let response = maybe_add_bearer_auth(
             client.put(format!(
                 "{}/collections/{}",
@@ -83,8 +93,8 @@ impl QdrantPort for QdrantAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "qdrant ensure_collection failed: {}",
@@ -111,7 +121,7 @@ impl QdrantPort for QdrantAdapter {
             }]
         });
         let response = maybe_add_bearer_auth(
-            Client::new().put(format!(
+            self.hardened_client()?.put(format!(
                 "{}/collections/{}/points",
                 self.url.trim_end_matches('/'),
                 collection
@@ -119,8 +129,8 @@ impl QdrantPort for QdrantAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "qdrant upsert_point failed: {}",
@@ -144,11 +154,12 @@ impl QdrantPort for QdrantAdapter {
                     { "key": "tenant_id", "match": { "value": request.scope.tenant_id }},
                     { "key": "user_id", "match": { "value": request.scope.user_id }},
                     { "key": "status", "match": { "value": "active" }},
+                    { "key": "privacy_level", "match": { "any": request.privacy_scope }},
                 ]
             }
         });
         let response = maybe_add_bearer_auth(
-            Client::new().post(format!(
+            self.hardened_client()?.post(format!(
                 "{}/collections/{}/points/search",
                 self.url.trim_end_matches('/'),
                 collection
@@ -156,8 +167,8 @@ impl QdrantPort for QdrantAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "qdrant search failed: {}",
@@ -182,12 +193,7 @@ impl QdrantPort for QdrantAdapter {
         Ok(hits)
     }
 
-    fn delete_point(
-        &self,
-        collection: &str,
-        tenant_id: &str,
-        memory_id: &str,
-    ) -> CoreResult<()> {
+    fn delete_point(&self, collection: &str, tenant_id: &str, memory_id: &str) -> CoreResult<()> {
         let payload = json!({
             "points": [memory_id],
             "filter": {
@@ -197,7 +203,7 @@ impl QdrantPort for QdrantAdapter {
             }
         });
         let response = maybe_add_bearer_auth(
-            Client::new().post(format!(
+            self.hardened_client()?.post(format!(
                 "{}/collections/{}/points/delete",
                 self.url.trim_end_matches('/'),
                 collection
@@ -205,8 +211,8 @@ impl QdrantPort for QdrantAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "qdrant delete_point failed: {}",

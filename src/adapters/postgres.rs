@@ -89,8 +89,6 @@ impl PostgresPort for PostgresAdapter {
                     $22, $23, $24
                 )
                 ON CONFLICT (id) DO UPDATE SET
-                    tenant_id = EXCLUDED.tenant_id,
-                    user_id = EXCLUDED.user_id,
                     session_id = EXCLUDED.session_id,
                     content = EXCLUDED.content,
                     content_type = EXCLUDED.content_type,
@@ -143,9 +141,10 @@ impl PostgresPort for PostgresAdapter {
             )
             .map_err(|error| CoreError::Io(error.to_string()))?;
         if rows_affected == 0 {
-            return Err(CoreError::Conflict(
-                "memory id is already in use by a different tenant/user scope".to_string(),
-            ));
+            return Err(CoreError::Conflict(format!(
+                "memory id '{}' already exists in a different tenant/user scope",
+                record.id
+            )));
         }
         Ok(())
     }

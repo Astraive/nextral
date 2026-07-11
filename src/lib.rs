@@ -405,7 +405,7 @@ mod tests {
                 kind: crate::prospective::ReminderKind::FollowUp,
                 title: "Check Atlas migration".to_string(),
                 due_at: "9999999999".to_string(),
-                timezone: "configured-by-user".to_string(),
+                timezone: "America/New_York".to_string(),
                 trace_id: None,
             },
         )
@@ -463,7 +463,7 @@ mod tests {
         )
         .unwrap();
         assert!(response.telemetry.vector_candidates >= 1);
-        assert!(response.telemetry.vector_ms <= response.telemetry.vector_ms + 1);
+        assert!(response.telemetry.vector_ms < 10000, "vector search took too long: {}ms", response.telemetry.vector_ms);
         assert!(response.telemetry.token_utilization >= 0.0);
         assert!(response.telemetry.dedupe_ratio >= 0.0);
     }
@@ -508,6 +508,7 @@ mod tests {
                 due_at_or_before: "10".to_string(),
                 actor: "system".to_string(),
                 retry_delay_seconds: 60,
+                max_retries: Some(3),
                 dispatch_policy_version: None,
                 retry_strategy_id: None,
                 trace_id: None,
