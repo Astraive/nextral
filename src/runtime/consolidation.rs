@@ -75,6 +75,21 @@ where
     ingest.source_message_ids = messages.iter().map(|message| message.id.clone()).collect();
     ingest.importance_score = 1.0;
     ingest.confidence_score = Some(1.0);
+
+    let memory_id = deterministic_id(&[
+        &request.tenant_id,
+        &request.user_id,
+        &request.session_id,
+        &ingest.content,
+    ]);
+    if let Some(existing) = store.get_memory(&request.tenant_id, &request.user_id, &memory_id)? {
+        if existing.status != crate::memory::MemoryStatus::Active {
+            return Err(CoreError::InvalidInput(
+                "cannot consolidate into a non-active forgotten memory".to_string(),
+            ));
+        }
+    }
+
     let accepted = vec![ingest_memory(store, ingest)?];
     let now = now_timestamp();
     let job = RuntimeJob {
