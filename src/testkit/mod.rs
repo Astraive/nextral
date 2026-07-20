@@ -249,11 +249,12 @@ impl AuditSink for TestMemoryStore {
 
 impl SessionStore for TestMemoryStore {
     fn append_session_message(&mut self, message: SessionMessage) -> CoreResult<()> {
-        if self
-            .session_messages
-            .iter()
-            .any(|existing| existing.idempotency_key == message.idempotency_key)
-        {
+        if self.session_messages.iter().any(|existing| {
+            existing.tenant_id == message.tenant_id
+                && existing.user_id == message.user_id
+                && existing.session_id == message.session_id
+                && existing.idempotency_key == message.idempotency_key
+        }) {
             return Ok(());
         }
         self.session_messages.push(message);
