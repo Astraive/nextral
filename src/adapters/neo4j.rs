@@ -105,8 +105,8 @@ impl Neo4jPort for Neo4jAdapter {
 
     fn merge_edge(&self, edge: &GraphEdge) -> CoreResult<()> {
         let statement = r#"
-            MATCH (a:NextralEntity {user_id:$user_id, key:$from_key})
-            MATCH (b:NextralEntity {user_id:$user_id, key:$to_key})
+            MATCH (a:NextralEntity {tenant_id:$tenant_id, user_id:$user_id, key:$from_key})
+            MATCH (b:NextralEntity {tenant_id:$tenant_id, user_id:$user_id, key:$to_key})
             MERGE (a)-[r:NEXTRAL_RELATES_TO {tenant_id:$tenant_id, user_id:$user_id, relationship_type:$relationship_type, from_key:$from_key, to_key:$to_key}]->(b)
             ON CREATE SET r.confidence=$confidence, r.source_memory_ids=$source_memory_ids, r.created_at=$created_at, r.last_confirmed_at=$last_confirmed_at
             ON MATCH SET r.confidence=CASE WHEN r.confidence > $confidence THEN r.confidence ELSE $confidence END,
@@ -145,6 +145,7 @@ impl Neo4jPort for Neo4jAdapter {
             MATCH (n:NextralEntity {{tenant_id:$tenant_id, user_id:$user_id}})
             WHERE any(term in $query_entities WHERE toLower(n.name) CONTAINS toLower(term))
             MATCH p=(n)-[r:NEXTRAL_RELATES_TO*1..{}]-()
+            WHERE all(rel in relationships(p) WHERE rel.tenant_id = $tenant_id AND rel.user_id = $user_id)
             UNWIND relationships(p) as rel
             UNWIND rel.source_memory_ids as memory_id
             RETURN DISTINCT memory_id

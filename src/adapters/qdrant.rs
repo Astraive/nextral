@@ -145,6 +145,11 @@ impl QdrantPort for QdrantAdapter {
         collection: &str,
         request: &VectorSearchRequest,
     ) -> CoreResult<Vec<VectorSearchHit>> {
+        let privacy_levels: Vec<Value> = request
+            .privacy_scope
+            .iter()
+            .map(|level| json!(level))
+            .collect();
         let payload = json!({
             "vector": request.query_vector,
             "limit": request.top_k,
@@ -153,6 +158,7 @@ impl QdrantPort for QdrantAdapter {
                 "must": [
                     { "key": "tenant_id", "match": { "value": request.scope.tenant_id }},
                     { "key": "user_id", "match": { "value": request.scope.user_id }},
+                    { "key": "privacy_level", "match": { "any": privacy_levels }},
                     { "key": "status", "match": { "value": "active" }},
                     { "key": "privacy_level", "match": { "any": request.privacy_scope }},
                 ]
