@@ -7,6 +7,9 @@
 - Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
 - Exposed binding experiment/safety controls, restoring prior runtime state on reasoned active-experiment rollback.
 - Added explicit private-CA JWKS trust and provenance-aware archive cleanup with same-key tombstones, immutable uploads and scrubbed-job fencing.
+- Replaced the yanked transitive ChaCha release with compatible `0.10.2`.
+- Required the corrected async-trait macro and portable bundled-TLS wheel builds.
+- Added applied-policy replay validation and persisted canonical contradiction evidence.
 
 ## 0.1.0
 
