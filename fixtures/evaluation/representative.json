@@ -1,6 +1,6 @@
 {
   "id": "representative-memory",
-  "revision": "v2",
+  "revision": "v3",
   "cases": [
     {
       "id": "retrieval-relevant-and-distractor",
@@ -43,6 +43,7 @@
       "id": "contradiction-positive",
       "request": {
         "operation": "contradiction",
+        "embedding": [1,0,0,0],
         "graph_hints": [
           {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
           {"from_label":"Project","from_name":"Atlas","relationship_type":"NOT_USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95}
@@ -54,6 +55,7 @@
       "id": "contradiction-negative",
       "request": {
         "operation": "contradiction",
+        "embedding": [1,0,0,0],
         "graph_hints": [
           {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
           {"from_label":"Project","from_name":"Atlas","relationship_type":"NOT_USES","to_label":"Technology","to_name":"Redis","confidence":0.95}
@@ -65,6 +67,7 @@
       "id": "compatible-relationships",
       "request": {
         "operation": "contradiction",
+        "embedding": [1,0,0,0],
         "graph_hints": [
           {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
           {"from_label":"Project","from_name":"Atlas","relationship_type":"OWNS","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95}

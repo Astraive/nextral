@@ -5,11 +5,15 @@ use nextral::{
     config::{NextralConfig, RuntimeBackend},
     contracts::{CoreError, CoreResult},
     domain::GraphHint,
-    memory::{ContentType, MemoryRecord, MemoryType, SourceType},
+    memory::PrivacyLevel,
     package,
-    runtime::evaluation::{ReminderOutcome, ReplayOutcome},
+    runtime::{
+        evaluation::{ReminderOutcome, ReplayOutcome},
+        retrieval::{retrieve, RetrievalRequest, RetrievalStatus},
+        storage::RuntimeStore,
+    },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     io::{self, Read},
@@ -22,6 +26,19 @@ use std::{
 };
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostRequest {
+    policy_version: String,
+    request: Request,
+}
+
+#[derive(Serialize)]
+struct HostResponse {
+    policy_version: String,
+    outcome: ReplayOutcome,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Retrieval {
@@ -30,11 +47,12 @@ enum Request {
         records: Vec<Snapshot>,
         query: String,
         query_vector: Vec<f32>,
-        privacy_scope: Vec<String>,
+        privacy_scope: Vec<PrivacyLevel>,
         top_k: usize,
     },
     Contradiction {
         graph_hints: Vec<GraphHint>,
+        embedding: Vec<f32>,
     },
     Reminder {
         source_memory_id: String,
@@ -88,6 +106,27 @@ fn write_memory(
     if result["status"] != "accepted" {
         return Err(CoreError::Conflict(
             "research fixture write was rejected".into(),
+        ));
+    }
+    require_write_receipts(&result, &["postgres:memory+audit+outbox:committed"])?;
+    Ok(())
+}
+
+fn require_write_receipts(response: &Value, required: &[&str]) -> CoreResult<()> {
+    let receipts = response["write_receipts"]
+        .as_array()
+        .ok_or_else(|| CoreError::Conflict("research write receipts missing".into()))?;
+    if required.iter().any(|required| {
+        !receipts
+            .iter()
+            .any(|receipt| receipt.as_str() == Some(*required))
+    }) || !receipts.iter().any(|receipt| {
+        receipt
+            .as_str()
+            .is_some_and(|receipt| receipt.starts_with("outbox:") && receipt.ends_with(":durable"))
+    }) {
+        return Err(CoreError::Conflict(
+            "research write lacks required production acknowledgements".into(),
         ));
     }
     Ok(())
@@ -202,7 +241,7 @@ impl Drop for Webhook {
     }
 }
 
-fn run() -> CoreResult<ReplayOutcome> {
+fn run() -> CoreResult<HostResponse> {
     let path = std::env::var("NEXTRAL_CONFIG").map_err(|_| {
         CoreError::InvalidInput("NEXTRAL_CONFIG must name a production-store config".into())
     })?;
@@ -224,7 +263,15 @@ fn run() -> CoreResult<ReplayOutcome> {
             "research input exceeds 10 MiB".into(),
         ));
     }
-    let request: Request = serde_json::from_str(&input)?;
+    let HostRequest {
+        policy_version,
+        request,
+    } = serde_json::from_str(&input)?;
+    if policy_version.trim().is_empty() {
+        return Err(CoreError::InvalidInput(
+            "research policy version must be nonempty".into(),
+        ));
+    }
     let scope = format!(
         "research_{}_{}",
         std::process::id(),
@@ -233,7 +280,7 @@ fn run() -> CoreResult<ReplayOutcome> {
             .map_err(|_| CoreError::Io("clock before epoch".into()))?
             .as_nanos()
     );
-    match request {
+    let outcome = match request {
         Request::Retrieval {
             tenant_id,
             user_id,
@@ -272,54 +319,90 @@ fn run() -> CoreResult<ReplayOutcome> {
                     }
                 }
             }
+            let mut store = RuntimeStore::configured(config.clone())?;
             let before = destructive_count(&config, &tenants)?;
-            let response = call(
-                "nextral.memory.retrieve",
-                json!({"tenant_id":format!("{scope}_{tenant_id}"),"user_id":user_id,"session_id":null,"query_text":query,"entities":[],"intent_topic":null,"token_budget":1800,"privacy_scope":privacy_scope,"top_k_vector":top_k,"max_graph_hops":2,"lane":null,"policy_version":null,"trace_id":null,"scoring_weights":null,"query_vector":query_vector}),
+            // Package dispatch reports the active controller policy, not a replay selection.
+            let response = retrieve(
+                &mut store,
+                RetrievalRequest {
+                    tenant_id: format!("{scope}_{tenant_id}"),
+                    user_id,
+                    session_id: None,
+                    query_text: query,
+                    query_vector: Some(query_vector),
+                    entities: Vec::new(),
+                    intent_topic: None,
+                    token_budget: 1800,
+                    privacy_scope,
+                    top_k_vector: top_k,
+                    max_graph_hops: 2,
+                    lane: None,
+                    policy_version: Some(policy_version.clone()),
+                    trace_id: None,
+                    scoring_weights: None,
+                },
             )?;
-            if response["status"] != "ok" {
+            if response.status != RetrievalStatus::Ok {
                 return Err(CoreError::Conflict(
                     "reference research retrieval was degraded or unavailable".into(),
                 ));
             }
-            let items = response["items"].as_array().ok_or_else(|| {
-                CoreError::InvalidInput("retrieval response missing items".into())
-            })?;
-            let retrieved_ids = items
-                .iter()
-                .map(|item| {
-                    item["memory_id"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| {
-                            CoreError::InvalidInput("retrieval item missing memory ID".into())
-                        })
-                })
-                .collect::<CoreResult<Vec<_>>>()?;
+            if response.policy_version != policy_version {
+                return Err(CoreError::Conflict(
+                    "retrieval did not apply the requested research policy".into(),
+                ));
+            }
+            let retrieved_ids = response
+                .items
+                .into_iter()
+                .map(|item| item.memory_id)
+                .collect();
             let destructive_events = destructive_count(&config, &tenants)?.saturating_sub(before);
-            Ok(ReplayOutcome::Retrieval {
+            ReplayOutcome::Retrieval {
                 retrieved_ids,
                 destructive_events,
-            })
+            }
         }
-        Request::Contradiction { graph_hints } => {
-            let record = MemoryRecord::new(
-                "research-graph",
+        Request::Contradiction {
+            graph_hints,
+            embedding,
+        } => {
+            let user = "research-user";
+            let memory_id = "research-graph";
+            write_memory(
                 &scope,
-                "research-user",
+                user,
+                memory_id,
                 "Host relationship evidence",
-                ContentType::Fact,
-                MemoryType::Relational,
-                SourceType::Manual,
-            );
-            let tenants = vec![scope];
+                "private",
+                embedding,
+            )?;
+            let tenants = vec![scope.clone()];
             let before = destructive_count(&config, &tenants)?;
-            let output = nextral::domain::graphify_record(&record, &graph_hints)?;
+            let output = call(
+                "nextral.graph.graphify",
+                json!({"tenant_id":scope,"user_id":user,"memory_id":memory_id,"hints":graph_hints}),
+            )?;
+            if output["status"] != "accepted" {
+                return Err(CoreError::Conflict(
+                    "reference research graph replay was not accepted".into(),
+                ));
+            }
+            require_write_receipts(
+                &output,
+                &[
+                    "postgres:graph+audit+outbox:committed",
+                    "neo4j:source:replaced",
+                ],
+            )?;
+            let contradictions = output["contradictions"].as_array().ok_or_else(|| {
+                CoreError::InvalidInput("graph replay response missing contradictions".into())
+            })?;
             let destructive_events = destructive_count(&config, &tenants)?.saturating_sub(before);
-            Ok(ReplayOutcome::Contradiction {
-                detected: !output.contradictions.is_empty(),
+            ReplayOutcome::Contradiction {
+                detected: !contradictions.is_empty(),
                 destructive_events,
-            })
+            }
         }
         Request::Reminder {
             source_memory_id,
@@ -370,10 +453,20 @@ fn run() -> CoreResult<ReplayOutcome> {
             }
             let tenants = vec![scope.clone()];
             let before = destructive_count(&config, &tenants)?;
-            call(
+            let dispatch = call(
                 "nextral.reminders.due",
-                json!({"tenant_id":scope,"user_id":user,"due_at_or_before":now,"actor":"research_host","retry_delay_seconds":60,"max_retries":3,"dispatch_policy_version":null,"retry_strategy_id":null,"trace_id":null,"privacy_scope":["private"],"lease_seconds":300}),
+                json!({"tenant_id":scope,"user_id":user,"due_at_or_before":now,"actor":"research_host","retry_delay_seconds":60,"max_retries":3,"dispatch_policy_version":policy_version,"retry_strategy_id":null,"trace_id":null,"privacy_scope":["private"],"lease_seconds":300}),
             )?;
+            let results = dispatch["results"].as_array().ok_or_else(|| {
+                CoreError::InvalidInput("reminder dispatch response missing results".into())
+            })?;
+            if results.iter().any(|result| {
+                result["dispatch_policy_version"].as_str() != Some(policy_version.as_str())
+            }) {
+                return Err(CoreError::Conflict(
+                    "reminder dispatch did not apply the requested research policy".into(),
+                ));
+            }
             let reminders = call(
                 "nextral.reminders.list",
                 json!({"tenant_id":scope,"user_id":user}),
@@ -383,6 +476,14 @@ fn run() -> CoreResult<ReplayOutcome> {
                 .and_then(|items| items.iter().find(|item| item["id"] == id))
                 .ok_or_else(|| CoreError::Conflict("stored reminder outcome missing".into()))?;
             let outcome: ReminderOutcome = serde_json::from_value(reminder["status"].clone())?;
+            // Forget can cancel the fixture before the due scan, leaving no dispatch.
+            if outcome != ReminderOutcome::Cancelled
+                && !results.iter().any(|result| result["reminder_id"] == id)
+            {
+                return Err(CoreError::Conflict(
+                    "stored reminder lacks a policy-verified dispatch result".into(),
+                ));
+            }
             if matches!(
                 outcome,
                 ReminderOutcome::Completed | ReminderOutcome::RetryScheduled
@@ -393,12 +494,16 @@ fn run() -> CoreResult<ReplayOutcome> {
                 ));
             }
             let destructive_events = destructive_count(&config, &tenants)?.saturating_sub(before);
-            Ok(ReplayOutcome::Reminder {
+            ReplayOutcome::Reminder {
                 outcome,
                 destructive_events,
-            })
+            }
         }
-    }
+    };
+    Ok(HostResponse {
+        policy_version,
+        outcome,
+    })
 }
 
 fn main() {

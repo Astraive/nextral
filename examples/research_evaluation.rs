@@ -1,7 +1,8 @@
 //! Run with `cargo run --release --example research_evaluation -- SUITE HOST REVISION POLICY RUN HOST_ID LATENCY_BUDGET_NS [BASELINE]`.
-//! SUITE may be `representative`. HOST is a real executable receiving one request JSON
-//! on stdin and returning a serialized ReplayOutcome on stdout. It must run isolated
-//! fixture setup, real operations and audited event counting, not echo golden answers.
+//! SUITE may be `representative`. HOST receives {policy_version, request} JSON on
+//! stdin and returns {policy_version, outcome}, where outcome is a ReplayOutcome.
+//! It must apply the requested policy to every policy-bearing runtime operation,
+//! verify runtime policy receipts and run isolated real fixtures, not echo goldens.
 //! For the representative suite, delivery_transport describes a controlled HTTP server
 //! response; the host must exercise its actual delivery adapter against that server.
 //! Startup/setup are included in process-roundtrip latency. No performance SLO is implied.
@@ -13,13 +14,31 @@ use nextral::{
         ReplayCase, ReplayOutcome, RunMetadata,
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
     process::{Command, Stdio},
 };
 
-fn execute_host(executable: &str, case: &ReplayCase) -> CoreResult<ReplayOutcome> {
+#[derive(Serialize)]
+struct HostRequest<'a> {
+    policy_version: &'a str,
+    request: &'a serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostResponse {
+    policy_version: String,
+    outcome: ReplayOutcome,
+}
+
+fn execute_host(
+    executable: &str,
+    policy_version: &str,
+    case: &ReplayCase,
+) -> CoreResult<ReplayOutcome> {
     let mut process = Command::new(executable)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -31,7 +50,13 @@ fn execute_host(executable: &str, case: &ReplayCase) -> CoreResult<ReplayOutcome
         .ok_or_else(|| CoreError::Io("research host stdin unavailable".into()))?;
     let write_result = (|| -> CoreResult<()> {
         let mut input = input;
-        serde_json::to_writer(&mut input, &case.request)?;
+        serde_json::to_writer(
+            &mut input,
+            &HostRequest {
+                policy_version,
+                request: &case.request,
+            },
+        )?;
         input.write_all(b"\n")?;
         Ok(())
     })();
@@ -47,9 +72,15 @@ fn execute_host(executable: &str, case: &ReplayCase) -> CoreResult<ReplayOutcome
         ));
     }
     // Host stderr and result contents are deliberately absent from diagnostics.
-    serde_json::from_slice(&output.stdout).map_err(|_| {
-        CoreError::InvalidInput("research host returned an invalid ReplayOutcome".into())
-    })
+    let response: HostResponse = serde_json::from_slice(&output.stdout).map_err(|_| {
+        CoreError::InvalidInput("research host returned an invalid policy replay response".into())
+    })?;
+    if response.policy_version != policy_version {
+        return Err(CoreError::Conflict(
+            "research host did not apply the requested policy".into(),
+        ));
+    }
+    Ok(response.outcome)
 }
 
 fn run() -> CoreResult<()> {
@@ -80,7 +111,7 @@ fn run() -> CoreResult<()> {
         latency_scope: "process-roundtrip".into(),
     };
     let report = run_golden_replay(&suite, metadata, latency_budget_ns, |case| {
-        execute_host(&args[1], case)
+        execute_host(&args[1], &args[3], case)
     })?;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
