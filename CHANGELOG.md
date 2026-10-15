@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
+- Restored the local five-store stack with pinned reachable images, loopback-only ports, and a working MinIO readiness probe.
 
 ## 0.1.0
 
