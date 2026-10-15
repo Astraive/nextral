@@ -23,7 +23,6 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-MC_IMAGE = "quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
 POLICY = {"min_importance_score": 0.35, "min_confidence_score": 0.6}
 
 
@@ -241,10 +240,9 @@ def exercise_lifecycles(py_call, node_call, scope, ids, query, compose, env):
     if archived["job"]["status"] != "completed" or len(archive_receipts) != 1:
         raise AssertionError("deep consolidation lacks an archive acknowledgement")
     archive_key = archive_receipts[0]["target_id"]
-    archive = json_run(["docker", "run", "--rm", "--network",
-                        env.get("COMPOSE_PROJECT_NAME", "nextral") + "_default",
+    archive = json_run(compose + ["run", "--rm", "--no-deps", "-T",
                         "-e", "NEXTRAL_S3_ACCESS_KEY", "-e", "NEXTRAL_S3_SECRET_KEY",
-                        "--entrypoint", "/bin/sh", MC_IMAGE, "-c",
+                        "--entrypoint", "/bin/sh", "mc", "-c",
                         'mc alias set local http://minio:9000 "$NEXTRAL_S3_ACCESS_KEY" "$NEXTRAL_S3_SECRET_KEY" >/dev/null && mc cat "local/nextral-memory/$1"',
                         "nextral-archive-check", archive_key], env=env)
     if (archive["tenant_id"] != scope["tenant_id"] or archive["user_id"] != scope["user_id"]
@@ -449,9 +447,8 @@ def main():
         wait_ready("Qdrant", lambda: http("http://127.0.0.1:6333/readyz"))
         wait_ready("Neo4j", lambda: run(compose + ["exec", "-T", "neo4j", "cypher-shell", "-u", "neo4j", "-p", "nextraldev", "RETURN 1;"], env=env))
         wait_ready("MinIO", lambda: http("http://127.0.0.1:9000/minio/health/ready"))
-        network = env.get("COMPOSE_PROJECT_NAME", "nextral") + "_default"
-        run(["docker", "run", "--rm", "--network", network, "-e", "NEXTRAL_S3_ACCESS_KEY", "-e", "NEXTRAL_S3_SECRET_KEY",
-             "--entrypoint", "/bin/sh", MC_IMAGE, "-c",
+        run(compose + ["run", "--rm", "--no-deps", "-T", "-e", "NEXTRAL_S3_ACCESS_KEY", "-e", "NEXTRAL_S3_SECRET_KEY",
+             "--entrypoint", "/bin/sh", "mc", "-c",
              'mc alias set local http://minio:9000 "$NEXTRAL_S3_ACCESS_KEY" "$NEXTRAL_S3_SECRET_KEY" >/dev/null && mc mb --ignore-existing local/nextral-memory'], env=env)
         run(compose + ["exec", "-T", "neo4j", "cypher-shell", "-u", "neo4j", "-p", "nextraldev"],
             input=(ROOT / "migrations/neo4j/0001_graph_schema.cypher").read_text(), env=env)
@@ -475,7 +472,7 @@ def main():
                       env=env, timeout=900), file=sys.stderr)
             wheel_dir = args.wheel_dir or work / "wheels"
             if args.wheel_dir is None:
-                run([sys.executable, "-m", "maturin", "build", "--manifest-path", ROOT / "bindings/python/Cargo.toml", "--locked", "--out", wheel_dir], env=env, timeout=1800)
+                run([sys.executable, "-m", "maturin", "build", "--manifest-path", ROOT / "bindings/python/Cargo.toml", "--locked", "--target-dir", target / "python-native", "--out", wheel_dir], env=env, timeout=1800)
             run([sys.executable, "-m", "venv", work / "venv"], env=env)
             python = work / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             run([python, "-m", "pip", "install", "--no-index", "--find-links", wheel_dir,

@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ github.workspace }}/../nextral-target
+  CARGO_TARGET_DIR: ${{ github.workspace }}-target
   CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
@@ -203,11 +203,11 @@ jobs:
       - name: Package publishable crates together with locked dependencies
         run: python scripts/verify-release.py crate-package
       - name: Exercise clean Rust consumer and compile packaged examples and API
-        run: python scripts/verify-release.py crate-smoke "${{ env.CARGO_TARGET_DIR }}/package"
+        run: python scripts/verify-release.py crate-smoke "${{ env.CARGO_TARGET_DIR }}/crate-package/package"
       - uses: actions/upload-artifact@v6
         with:
           name: rust-crate
-          path: ${{ env.CARGO_TARGET_DIR }}/package/nextral-*.crate
+          path: ${{ env.CARGO_TARGET_DIR }}/crate-package/package/nextral-*.crate
           if-no-files-found: error
 
   release-artifacts:
@@ -258,6 +258,8 @@ jobs:
           path: artifacts/npm
       - name: Build CLI, MCP and API hosts
         run: cargo build --locked -p nextral-cli -p nextral-mcp -p nextral-api
+      - name: Build pinned upstream MinIO server and fixture client
+        run: docker compose -f docker-compose.integration.yml --profile tooling build minio mc
       - name: Exercise genuine production persistence and protocol operations
         run: bash scripts/e2e-docker.sh --skip-build --wheel-dir artifacts/wheels --npm-package artifacts/npm/*.tgz
       - name: Retain measured replay and native control evidence

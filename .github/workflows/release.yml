@@ -149,7 +149,7 @@ jobs:
       name: crates-io
       url: https://crates.io/crates/nextral
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/../nextral-target
+      CARGO_TARGET_DIR: ${{ github.workspace }}-target
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v5
