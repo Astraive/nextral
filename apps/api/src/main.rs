@@ -37,7 +37,8 @@ fn run() -> Result<(), String> {
             let path = args.next().ok_or("missing config path")?;
             let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
             let config: nextral::config::NextralConfig =
-                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+                serde_json::from_str(&nextral::config::resolve_env_vars(&json))
+                    .map_err(|error| error.to_string())?;
             let plan = startup_plan(&config, mode).map_err(|error| error.to_string())?;
             println!(
                 "{}",
@@ -62,7 +63,8 @@ fn run() -> Result<(), String> {
             let path = args.next().ok_or("missing config path")?;
             let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
             let config: nextral::config::NextralConfig =
-                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+                serde_json::from_str(&nextral::config::resolve_env_vars(&json))
+                    .map_err(|error| error.to_string())?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -75,7 +77,8 @@ fn run() -> Result<(), String> {
             let path = args.next().ok_or("missing config path")?;
             let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
             let config: nextral::config::NextralConfig =
-                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+                serde_json::from_str(&nextral::config::resolve_env_vars(&json))
+                    .map_err(|error| error.to_string())?;
             let matrix = startup_readiness_matrix(&config).map_err(|error| error.to_string())?;
             println!(
                 "{}",
