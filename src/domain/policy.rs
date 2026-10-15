@@ -25,18 +25,10 @@ impl ProceduralPolicy {
     ) -> crate::contracts::CoreResult<Self> {
         let tenant_id = tenant_id.into();
         let user_id = user_id.into();
+        crate::store::validate_scope_component(&tenant_id, "tenant_id")?;
+        crate::store::validate_scope_component(&user_id, "user_id")?;
         let name = name.into();
         let body = body.into();
-        if tenant_id.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput(
-                "tenant_id is required".to_string(),
-            ));
-        }
-        if user_id.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput(
-                "user_id is required".to_string(),
-            ));
-        }
         if name.trim().is_empty() {
             return Err(crate::contracts::CoreError::InvalidInput(
                 "name is required".to_string(),
@@ -59,5 +51,34 @@ impl ProceduralPolicy {
             created_at: now.clone(),
             updated_at: now,
         })
+    }
+
+    pub fn is_visible_to(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        privacy_scope: &[PrivacyLevel],
+    ) -> bool {
+        self.enabled
+            && self.tenant_id == tenant_id
+            && self.user_id == user_id
+            && privacy_scope.contains(&self.privacy_level)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn enabled_policy_never_crosses_user_scope() {
+        let policy = ProceduralPolicy::new(
+            "tenant",
+            "alice",
+            "format",
+            "Use bullet points",
+            PrivacyLevel::Private,
+        )
+        .unwrap();
+        assert!(!policy.is_visible_to("tenant", "bob", &[PrivacyLevel::Private]));
     }
 }

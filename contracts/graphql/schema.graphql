@@ -80,12 +80,12 @@ type Reminder {
 
 type Query {
   memory(tenantId: String!, userId: String!, id: ID!): Memory
-  retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!, topKVector: Int, maxGraphHops: Int): RetrievalResponse!
+  retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!, topKVector: Int, maxGraphHops: Int, queryVector: [Float!], sessionId: String, entities: [String!], intentTopic: String): RetrievalResponse!
   reminders(tenantId: String!, userId: String!, dueAtOrBefore: String): [Reminder!]!
 }
 
 type Mutation {
-  ingestMemory(tenantId: String!, userId: String!, sessionId: String, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!, importanceScore: Float, confidenceScore: Float, entities: [String!], tags: [String!], sourceType: String): IngestMemoryResponse!
+  ingestMemory(tenantId: String!, userId: String!, sessionId: String, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!, importanceScore: Float, confidenceScore: Float, entities: [String!], tags: [String!], sourceType: String, sourceMessageIds: [String!], embedding: [Float!], graphHints: [GraphHintInput!]): IngestMemoryResponse!
   forgetMemory(tenantId: String!, userId: String!, memoryId: ID!, actorId: String!, reason: String!, redact: Boolean!): ForgetMemoryResponse!
   scheduleReminder(tenantId: String!, userId: String!, sourceMemoryId: ID!, kind: String!, title: String!, dueAt: String!, timezone: String!, priority: String): ID!
 }
@@ -99,4 +99,13 @@ type IngestMemoryResponse {
 
 type ForgetMemoryResponse {
   workflowId: ID!
+}
+
+input GraphHintInput {
+  fromLabel: String!
+  fromName: String!
+  relationshipType: String!
+  toLabel: String!
+  toName: String!
+  confidence: Float!
 }

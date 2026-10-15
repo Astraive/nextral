@@ -27,6 +27,18 @@ message IngestMemoryRequest {
   repeated string tags = 11;
   optional string source_type = 12;
   repeated string source_message_ids = 13;
+  repeated float embedding = 14;
+  optional string id = 15;
+  repeated GraphHint graph_hints = 16;
+}
+
+message GraphHint {
+  string from_label = 1;
+  string from_name = 2;
+  string relationship_type = 3;
+  string to_label = 4;
+  string to_name = 5;
+  float confidence = 6;
 }
 
 message IngestMemoryResponse {
@@ -54,6 +66,7 @@ message RetrievalTelemetry {
   uint64 graph_ms = 8;
   uint64 merge_ms = 9;
   float dedupe_ratio = 10;
+  repeated string degraded_reasons = 11;
 }
 
 message RetrievedMemory {
@@ -75,6 +88,7 @@ message RetrieveMemoryRequest {
   repeated string privacy_scope = 8;
   uint32 top_k_vector = 9;
   uint32 max_graph_hops = 10;
+  repeated float query_vector = 11;
 }
 
 message RetrieveMemoryResponse {

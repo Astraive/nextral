@@ -1,0 +1,116 @@
+{
+  "id": "representative-memory",
+  "revision": "v2",
+  "cases": [
+    {
+      "id": "retrieval-relevant-and-distractor",
+      "request": {
+        "operation": "retrieval",
+        "tenant_id": "golden-tenant",
+        "user_id": "golden-user",
+        "records": [
+          {"id": "atlas-db", "content": "Atlas uses PostgreSQL for durable memory", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "private", "embedding": [1,0,0,0]},
+          {"id": "atlas-cache", "content": "Atlas uses Redis for its cache", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "private", "embedding": [0.1,1,0,0]},
+          {"id": "garden", "content": "Water the garden tomorrow", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "private", "embedding": [0,0,1,0]}
+        ],
+        "query": "Atlas PostgreSQL",
+        "query_vector": [1,0,0,0],
+        "privacy_scope": ["private"],
+        "top_k": 2
+      },
+      "expected": {"kind": "retrieval", "relevant_ids": ["atlas-db"], "forbidden_ids": []}
+    },
+    {
+      "id": "retrieval-scope-and-forgetting",
+      "request": {
+        "operation": "retrieval",
+        "tenant_id": "golden-tenant",
+        "user_id": "golden-user",
+        "records": [
+          {"id": "current-choice", "content": "Atlas database is PostgreSQL", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "private", "embedding": [1,0,0,0]},
+          {"id": "forgotten-choice", "content": "Atlas database was SQLite", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "forgotten", "privacy_level": "private", "embedding": [1,0,0,0]},
+          {"id": "other-tenant", "content": "Atlas database secret", "tenant_id": "other-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "private", "embedding": [1,0,0,0]},
+          {"id": "sensitive-choice", "content": "Atlas database password", "tenant_id": "golden-tenant", "user_id": "golden-user", "status": "active", "privacy_level": "sensitive", "embedding": [1,0,0,0]}
+        ],
+        "query": "Atlas database",
+        "query_vector": [1,0,0,0],
+        "privacy_scope": ["private"],
+        "top_k": 4
+      },
+      "expected": {"kind": "retrieval", "relevant_ids": ["current-choice"], "forbidden_ids": ["forgotten-choice", "other-tenant", "sensitive-choice"]}
+    },
+    {
+      "id": "contradiction-positive",
+      "request": {
+        "operation": "contradiction",
+        "graph_hints": [
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"NOT_USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95}
+        ]
+      },
+      "expected": {"kind": "contradiction", "detected": true}
+    },
+    {
+      "id": "contradiction-negative",
+      "request": {
+        "operation": "contradiction",
+        "graph_hints": [
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"NOT_USES","to_label":"Technology","to_name":"Redis","confidence":0.95}
+        ]
+      },
+      "expected": {"kind": "contradiction", "detected": false}
+    },
+    {
+      "id": "compatible-relationships",
+      "request": {
+        "operation": "contradiction",
+        "graph_hints": [
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"USES","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95},
+          {"from_label":"Project","from_name":"Atlas","relationship_type":"OWNS","to_label":"Technology","to_name":"PostgreSQL","confidence":0.95}
+        ]
+      },
+      "expected": {"kind": "contradiction", "detected": false}
+    },
+    {
+      "id": "reminder-delivery-acknowledged",
+      "request": {
+        "operation": "reminder",
+        "source_memory_id": "atlas-db",
+        "title": "Review Atlas database decision",
+        "due_at": "2000000000",
+        "now": "2000000000",
+        "initial_status": "scheduled",
+        "delivery_transport": {"protocol": "http", "response_status": 204}
+      },
+      "expected": {"kind": "reminder", "outcome": "completed"}
+    },
+    {
+      "id": "reminder-delivery-retry",
+      "request": {
+        "operation": "reminder",
+        "source_memory_id": "atlas-db",
+        "title": "Review Atlas database decision",
+        "due_at": "2000000000",
+        "now": "2000000000",
+        "initial_status": "scheduled",
+        "delivery_transport": {"protocol": "http", "response_status": 503}
+      },
+      "expected": {"kind": "reminder", "outcome": "retry_scheduled"}
+    },
+    {
+      "id": "reminder-source-forgotten",
+      "request": {
+        "operation": "reminder",
+        "source_memory_id": "forgotten-choice",
+        "source_status": "forgotten",
+        "title": "Review obsolete database decision",
+        "due_at": "2000000000",
+        "now": "2000000000",
+        "initial_status": "scheduled",
+        "delivery_transport": {"protocol": "http", "response_status": 204}
+      },
+      "expected": {"kind": "reminder", "outcome": "cancelled"}
+    }
+  ]
+}

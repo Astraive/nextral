@@ -31,7 +31,11 @@ impl SessionMessage {
         let idempotency_key = idempotency_key.into();
         const MAX_MESSAGE_CONTENT: usize = 100_000;
         if content.len() > MAX_MESSAGE_CONTENT {
-            content.truncate(MAX_MESSAGE_CONTENT);
+            let mut boundary = MAX_MESSAGE_CONTENT;
+            while !content.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            content.truncate(boundary);
         }
         let id = deterministic_id(&[
             &tenant_id,
@@ -74,4 +78,8 @@ pub struct WorkingContext {
     pub session_tail: Vec<SessionMessage>,
     pub retrieved_memory_ids: Vec<String>,
     pub procedural_policy_ids: Vec<String>,
+    pub procedural_policies: Vec<crate::domain::ProceduralPolicy>,
+    pub session_summary: Option<SessionSummary>,
+    pub retrieved_memories: Vec<crate::retrieval::RetrievedItem>,
+    pub token_estimate: u32,
 }

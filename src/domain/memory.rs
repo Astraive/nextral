@@ -88,6 +88,8 @@ pub struct MemoryRecord {
     pub embedding_provider: Option<String>,
     pub embedding_model: Option<String>,
     pub embedding_dim: Option<u32>,
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
     pub extraction_provider: Option<String>,
     pub extraction_model: Option<String>,
     pub entities: Vec<String>,
@@ -137,6 +139,7 @@ impl MemoryRecord {
             embedding_provider: None,
             embedding_model: None,
             embedding_dim: None,
+            embedding: None,
             extraction_provider: None,
             extraction_model: None,
             entities: Vec::new(),
@@ -152,6 +155,27 @@ impl MemoryRecord {
     }
 
     pub fn validate(&self) -> CoreResult<()> {
+        crate::store::validate_scope_component(&self.id, "memory id")?;
+        crate::store::validate_scope_component(&self.tenant_id, "tenant_id")?;
+        crate::store::validate_scope_component(&self.user_id, "user_id")?;
+        if let Some(session) = &self.session_id {
+            crate::store::validate_scope_component(session, "session_id")?;
+        }
+        crate::runtime::lifecycle::timestamp_nanos(&self.created_at)?;
+        crate::runtime::lifecycle::timestamp_nanos(&self.updated_at)?;
+        if let Some(accessed) = &self.last_accessed_at {
+            crate::runtime::lifecycle::timestamp_nanos(accessed)?;
+        }
+        if let Some(vector) = &self.embedding {
+            if vector.is_empty()
+                || vector.iter().any(|v| !v.is_finite())
+                || self.embedding_dim != Some(vector.len() as u32)
+            {
+                return Err(CoreError::InvalidInput(
+                    "embedding must be finite and match embedding_dim".into(),
+                ));
+            }
+        }
         const MAX_CONTENT_LENGTH: usize = 1_000_000;
         const MAX_ID_LENGTH: usize = 256;
         const MAX_ENTITIES: usize = 1000;
@@ -235,8 +259,10 @@ impl MemoryRecord {
         let from = self.status.clone();
         let allowed = matches!(
             (&from, &to),
-            (MemoryStatus::Active, MemoryStatus::SoftDeleted)
-                | (MemoryStatus::SoftDeleted, MemoryStatus::Redacted)
+            (
+                MemoryStatus::Active | MemoryStatus::Archived,
+                MemoryStatus::SoftDeleted
+            ) | (MemoryStatus::SoftDeleted, MemoryStatus::Redacted)
                 | (MemoryStatus::Active, MemoryStatus::Archived)
         );
         if !allowed {
@@ -252,6 +278,7 @@ impl MemoryRecord {
             self.content = "[redacted]".to_string();
             self.entities.clear();
             self.tags.clear();
+            self.embedding = None;
         }
         Ok(TransitionMetadata {
             memory_id: self.id.clone(),

@@ -13,13 +13,10 @@ use crate::{
     },
     retrieval::RetrievalRequest,
     runtime::{
-        consolidation::{consolidate_session, ConsolidationLane, ConsolidationRequest},
-        evaluation::{canary_replay_gate, report_from_severity},
+        consolidation::{consolidate_session, ConsolidationRequest},
+        evaluation::PromotionEvidence,
         governance::{forget_memory, ForgetMemoryRequest},
-        intelligence::{
-            classify_severity, decision_for, ExperimentRegistry, RuntimeLane, SafetyPolicy,
-            Severity,
-        },
+        intelligence::{decision_for, ExperimentRegistry, RuntimeLane, SafetyPolicy, Severity},
         reembed::plan_reembed,
         reminders::{
             execute_due_reminders, schedule_reminder, ExecuteDueRemindersRequest,
@@ -27,8 +24,8 @@ use crate::{
         },
         session::{append_session_message, assemble_working_context, AppendSessionMessageRequest},
     },
-    store::TestMemoryStore,
-    testkit::MemoryIndexStore,
+    runtime::{lifecycle::LifecycleStore, storage::RuntimeStore},
+    store::{MemoryIndexStore, TestMemoryStore},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
@@ -89,10 +86,10 @@ pub struct ExperimentCreateRequest {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExperimentPromoteRequest {
     pub experiment_id: String,
-    pub severity: Severity,
+    pub evidence: PromotionEvidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +122,16 @@ pub struct BatchForgetRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphifyRequest {
+    tenant_id: String,
+    user_id: String,
+    memory_id: String,
+    #[serde(default)]
+    hints: Vec<crate::graph::GraphHint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BatchResponse {
     pub total: usize,
@@ -134,144 +141,148 @@ pub struct BatchResponse {
     pub results: Vec<serde_json::Value>,
 }
 
-const IDEMPOTENCY_MAX_ENTRIES: usize = 10_000;
-const IDEMPOTENCY_TTL_SECONDS: u64 = 3600;
-
-struct IdempotencyEntry {
-    response: String,
-    expires_at: u64,
-}
-
-fn idempotency_store() -> &'static Mutex<std::collections::HashMap<String, IdempotencyEntry>> {
-    static INSTANCE: OnceLock<Mutex<std::collections::HashMap<String, IdempotencyEntry>>> =
-        OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn evict_expired(store: &mut std::collections::HashMap<String, IdempotencyEntry>) {
-    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-    store.retain(|_, entry| entry.expires_at > now);
-    if store.len() > IDEMPOTENCY_MAX_ENTRIES {
-        let mut entries: Vec<_> = store
-            .iter()
-            .map(|(k, v)| (k.clone(), v.expires_at))
-            .collect();
-        entries.sort_by_key(|(_, expires)| *expires);
-        let to_remove = store.len() - IDEMPOTENCY_MAX_ENTRIES;
-        for (key, _) in entries.into_iter().take(to_remove) {
-            store.remove(&key);
-        }
-    }
-}
-
-fn check_idempotency(key: &str) -> Option<String> {
-    let mut store = idempotency_store().lock().ok()?;
-    evict_expired(&mut store);
-    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-    store
-        .get(key)
-        .filter(|e| e.expires_at > now)
-        .map(|e| e.response.clone())
-}
-
-fn store_idempotency(key: &str, response: &str) {
-    if let Ok(mut store) = idempotency_store().lock() {
-        evict_expired(&mut store);
-        let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-        store.insert(
-            key.to_string(),
-            IdempotencyEntry {
-                response: response.to_string(),
-                expires_at: now.saturating_add(IDEMPOTENCY_TTL_SECONDS),
-            },
-        );
-    }
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct RuntimeControlPlane {
     registry: ExperimentRegistry,
     safety_policy: SafetyPolicy,
 }
 
-fn control_plane() -> &'static Mutex<RuntimeControlPlane> {
-    static INSTANCE: OnceLock<Mutex<RuntimeControlPlane>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(RuntimeControlPlane::default()))
+fn load_control(store: &RuntimeStore) -> CoreResult<RuntimeControlPlane> {
+    store
+        .lifecycle_load("__nextral_control", "control-plane")?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(CoreError::from)
+        .map(|value| value.unwrap_or_default())
 }
 
-pub fn shared_store() -> &'static Mutex<TestMemoryStore> {
-    static INSTANCE: OnceLock<Mutex<TestMemoryStore>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(TestMemoryStore::new()))
+fn with_control(
+    store: &mut RuntimeStore,
+    operation: impl FnOnce(&mut RuntimeControlPlane) -> CoreResult<serde_json::Value>,
+) -> CoreResult<serde_json::Value> {
+    let owner = crate::runtime::lifecycle::worker_owner();
+    if !store.lifecycle_claim(
+        "__nextral_control",
+        "control-lease",
+        &owner,
+        crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,
+        300,
+    )? {
+        return Err(CoreError::Conflict(
+            "control plane is leased by another worker".into(),
+        ));
+    }
+    let result = (|| {
+        let mut control = load_control(store)?;
+        let result = operation(&mut control)?;
+        let receipt = store.lifecycle_save(
+            "__nextral_control",
+            "control-plane",
+            &serde_json::to_value(control)?,
+        )?;
+        if !crate::runtime::lifecycle::acknowledged(&receipt) {
+            return Err(CoreError::Io(
+                "control plane persistence was not acknowledged".into(),
+            ));
+        }
+        Ok(result)
+    })();
+    let release = store.lifecycle_release("__nextral_control", "control-lease", &owner);
+    match result {
+        Ok(value) => {
+            release?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = release;
+            Err(error)
+        }
+    }
+}
+
+static RUNTIME: OnceLock<Mutex<RuntimeStore>> = OnceLock::new();
+
+pub fn configure_runtime_json(config_json: &str) -> Result<String, PackageError> {
+    let config: crate::config::NextralConfig =
+        serde_json::from_str(&crate::config::resolve_env_vars(config_json))
+            .map_err(CoreError::from)?;
+    config.validate()?;
+    crate::runtime::observability::configure(&config.observability)?;
+    let backend = serde_json::to_value(&config.backend).map_err(CoreError::from)?;
+    let configured = RuntimeStore::configured(config)?;
+    if let Some(current) = RUNTIME.get() {
+        *current
+            .lock()
+            .map_err(|e| CoreError::Conflict(e.to_string()))? = configured;
+    } else {
+        RUNTIME
+            .set(Mutex::new(configured))
+            .map_err(|_| CoreError::Conflict("runtime was configured concurrently".into()))?;
+    }
+    Ok(serde_json::json!({"backend":backend,"status":"configured"}).to_string())
+}
+
+fn runtime_store() -> CoreResult<&'static Mutex<RuntimeStore>> {
+    if let Some(store) = RUNTIME.get() {
+        return Ok(store);
+    }
+    if let Ok(path) = std::env::var("NEXTRAL_CONFIG") {
+        let config = std::fs::read_to_string(path).map_err(|e| CoreError::Io(e.to_string()))?;
+        configure_runtime_json(&config).map_err(|e| CoreError::InvalidInput(e.message))?;
+    } else {
+        #[cfg(test)]
+        {
+            let _ = RUNTIME.set(Mutex::new(RuntimeStore::Test(Box::default())));
+        }
+        #[cfg(not(test))]
+        {
+            return Err(CoreError::InvalidInput(
+                "configure_runtime_json or NEXTRAL_CONFIG is required".into(),
+            ));
+        }
+    }
+    RUNTIME
+        .get()
+        .ok_or_else(|| CoreError::Conflict("runtime initialization failed".into()))
+}
+
+pub fn runtime_readiness_json() -> Result<String, PackageError> {
+    Ok(runtime_store()?
+        .lock()
+        .map_err(|e| CoreError::Conflict(e.to_string()))?
+        .readiness()
+        .to_string())
+}
+
+pub fn run_service_hosts_json(config_json: &str, modes_json: &str) -> Result<String, PackageError> {
+    crate::api::run_service_hosts_json(config_json, modes_json).map_err(PackageError::from)
 }
 
 pub fn e2e_smoke_json() -> Result<String, PackageError> {
     let mut store = TestMemoryStore::new();
-    let appended = append_session_message(
-        &mut store,
-        AppendSessionMessageRequest {
-            tenant_id: "test_tenant".to_string(),
-            user_id: "test_user".to_string(),
-            session_id: "test_session".to_string(),
-            role: "user".to_string(),
-            content: "Use PostgreSQL for Atlas and remind me Friday".to_string(),
-            idempotency_key: Some("testkit-message".to_string()),
+    let mut request = IngestMemoryRequest::new(
+        "test_tenant",
+        "test_user",
+        "Host supplied PostgreSQL memory",
+        ContentType::Fact,
+        MemoryType::Semantic,
+        SourceType::Manual,
+        IngestionPolicy {
+            min_importance_score: 0.0,
+            min_confidence_score: 0.0,
         },
-        20,
-    )?;
-    let consolidated = consolidate_session(
+    );
+    request.importance_score = 0.9;
+    request.confidence_score = Some(0.9);
+    let ingested = crate::ingestion::ingest_memory(&mut store, request)?;
+    let retrieved = crate::retrieval::retrieve(
         &mut store,
-        ConsolidationRequest {
-            tenant_id: "test_tenant".to_string(),
-            user_id: "test_user".to_string(),
-            session_id: "test_session".to_string(),
-            lane: ConsolidationLane::Fast,
-            policy: IngestionPolicy {
-                min_importance_score: 0.1,
-                min_confidence_score: 0.1,
-            },
-        },
+        RetrievalRequest::test("test_tenant", "test_user", "PostgreSQL"),
     )?;
-    let memory_id = consolidated.accepted[0]
-        .record_id
-        .clone()
-        .unwrap_or_default();
-    let scheduled = schedule_reminder(
-        &mut store,
-        ScheduleReminderRequest {
-            tenant_id: "test_tenant".to_string(),
-            user_id: "test_user".to_string(),
-            source_memory_id: memory_id.clone(),
-            kind: crate::prospective::ReminderKind::FollowUp,
-            title: "Check Atlas migration".to_string(),
-            due_at: "9999999999".to_string(),
-            timezone: "configured-by-user".to_string(),
-            trace_id: None,
-        },
-    )?;
-    let mut retrieval = RetrievalRequest::test("test_tenant", "test_user", "PostgreSQL");
-    retrieval.session_id = Some("test_session".to_string());
-    let context = assemble_working_context(&mut store, retrieval, 20)?;
-    let forgotten = forget_memory(
-        &mut store,
-        ForgetMemoryRequest {
-            tenant_id: "test_tenant".to_string(),
-            user_id: "test_user".to_string(),
-            memory_id,
-            actor: "test_user".to_string(),
-            reason: "testkit redaction".to_string(),
-            redact: true,
-        },
-    )?;
-    let payload = serde_json::json!({
-        "status": "ok",
-        "backend": "testkit",
-        "message_id": appended.message_id,
-        "consolidation_job": consolidated.job.id,
-        "reminder_id": scheduled.reminder.id,
-        "working_context_items": context.retrieved_memory_ids.len(),
-        "redacted": forgotten.redaction_transition.is_some()
-    });
-    Ok(payload.to_string())
+    Ok(
+        serde_json::json!({"backend":"test_memory","ingested":ingested,"retrieved":retrieved})
+            .to_string(),
+    )
 }
 
 pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
@@ -332,6 +343,7 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
     )?;
     postgres.upsert_reminder(&reminder)?;
     postgres.write_audit(&AuditWrite {
+        id: None,
         tenant_id: request.tenant_id.clone(),
         user_id: Some(request.user_id.clone()),
         actor_id: request.user_id.clone(),
@@ -441,6 +453,8 @@ fn validate_tenant_user(payload: &serde_json::Value) -> Result<(), PackageError>
         .get("user_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    crate::store::validate_scope_component(tenant_id, "tenant_id")?;
+    crate::store::validate_scope_component(user_id, "user_id")?;
     if tenant_id.trim().is_empty() || user_id.trim().is_empty() {
         return Err(PackageError {
             code: "invalid_input".into(),
@@ -457,326 +471,96 @@ fn validate_tenant_user(payload: &serde_json::Value) -> Result<(), PackageError>
 }
 
 pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
+    let mut span = crate::runtime::observability::start_span("nextral.dispatch");
+    let result = mcp_call_impl(request_json);
+    if result.is_err() {
+        span.fail();
+    }
+    result
+}
+
+fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
     if request_json.len() > MAX_PAYLOAD_BYTES {
-        return Err(PackageError {
-            code: "invalid_input".into(),
-            message: format!(
-                "request payload exceeds maximum {} bytes",
-                MAX_PAYLOAD_BYTES
-            ),
-        });
+        return Err(CoreError::InvalidInput("request exceeds maximum payload size".into()).into());
     }
     let request: McpCallRequest = serde_json::from_str(request_json).map_err(CoreError::from)?;
     if request.payload_json.len() > MAX_PAYLOAD_BYTES {
-        return Err(PackageError {
-            code: "invalid_input".into(),
-            message: format!("tool payload exceeds maximum {} bytes", MAX_PAYLOAD_BYTES),
-        });
+        return Err(CoreError::InvalidInput("tool payload exceeds maximum size".into()).into());
     }
-    let needs_tenant_user = matches!(
-        request.tool.as_str(),
-        "nextral.memory.ingest"
-            | "nextral.memory.retrieve"
-            | "nextral.memory.forget"
-            | "nextral.memory.update"
-            | "nextral.memory.list"
-            | "nextral.memory.stats"
-            | "nextral.memory.search_by_tag"
-            | "nextral.memory.search_by_entity"
-            | "nextral.session.append"
-            | "nextral.session.context"
-            | "nextral.consolidation.run"
-            | "nextral.reminders.due"
-            | "nextral.reminders.schedule"
-            | "nextral.graph.query"
-            | "nextral.graph.graphify"
-    );
-    if needs_tenant_user {
-        let payload: serde_json::Value =
-            serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
+    if request.tool == "nextral.health" {
+        return runtime_readiness_json();
+    }
+    let mut guard = runtime_store()?
+        .lock()
+        .map_err(|e| CoreError::Conflict(e.to_string()))?;
+    let store = &mut *guard;
+    if request.tool.starts_with("nextral.")
+        && !matches!(
+            request.tool.as_str(),
+            "nextral.database.migrate"
+                | "nextral.reembed.plan"
+                | "nextral.jobs.reembed.execute"
+                | "nextral.outbox.run"
+                | "nextral.batch.ingest"
+                | "nextral.batch.retrieve"
+                | "nextral.batch.forget"
+        )
+    {
         validate_tenant_user(&payload)?;
     }
-    match request.tool.as_str() {
+    let tenant = payload["tenant_id"].as_str().unwrap_or("");
+    let user = payload["user_id"].as_str().unwrap_or("");
+    let string_field = |name: &str| -> CoreResult<&str> {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| CoreError::InvalidInput(format!("{name} required")))
+    };
+    macro_rules! decode {
+        ($ty:ty) => {
+            serde_json::from_value::<$ty>(payload.clone())
+                .map_err(|_| CoreError::InvalidInput("invalid input format".into()))?
+        };
+    }
+    macro_rules! value {
+        ($expr:expr) => {
+            serde_json::to_value($expr).map_err(CoreError::from)?
+        };
+    }
+    let result = match request.tool.as_str() {
+        "nextral.database.migrate" => store.migrate()?,
+        "nextral.outbox.run" => store.drain_outbox(string_field("tenant_id")?)?,
         "nextral.memory.ingest" => {
-            let payload: IngestMemoryRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let idempotency_key = payload
-                .id
-                .clone()
-                .filter(|id| !id.is_empty())
-                .map(|id| format!("ingest:{id}"));
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            if let Some(ref key) = idempotency_key {
-                let idem_store = idempotency_store()
-                    .lock()
-                    .map_err(|e| CoreError::Conflict(e.to_string()))?;
-                let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-                if let Some(entry) = idem_store.get(key) {
-                    if entry.expires_at > now {
-                        return Ok(entry.response.clone());
-                    }
-                }
-                drop(idem_store);
-            }
-            let response =
-                serde_json::to_string(&crate::ingestion::ingest_memory(&mut *store, payload)?)
-                    .map_err(CoreError::from)?;
-            if let Some(key) = idempotency_key {
-                drop(store);
-                store_idempotency(&key, &response);
-            }
-            Ok(response)
+            let result = crate::ingestion::ingest_memory(store, decode!(IngestMemoryRequest))?;
+            value!(result)
         }
-        "nextral.memory.retrieve" => {
-            let payload: RetrievalRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let mut response = crate::runtime::retrieval::retrieve(&mut *store, payload)?;
-            let control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let severity = classify_severity(
-                response.quality_score,
-                if response.items.is_empty() { 1.0 } else { 0.0 },
-                !response.telemetry.degraded_reasons.is_empty(),
-            );
-            response.severity = severity.clone();
-            response.decision_action = decision_for(&control.safety_policy, &severity);
-            response.lane = control.registry.current_lane.clone();
-            response.policy_version = control.registry.active_policy_version.clone();
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
-        }
-        "nextral.memory.forget" => {
-            let payload: ForgetMemoryRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let idempotency_key = format!("forget:{}:{}", payload.tenant_id, payload.memory_id);
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            {
-                let idem_store = idempotency_store()
-                    .lock()
-                    .map_err(|e| CoreError::Conflict(e.to_string()))?;
-                let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-                if let Some(entry) = idem_store.get(&idempotency_key) {
-                    if entry.expires_at > now {
-                        return Ok(entry.response.clone());
-                    }
-                }
-            }
-            let response = serde_json::to_string(&forget_memory(&mut *store, payload)?)
-                .map_err(CoreError::from)?;
-            drop(store);
-            store_idempotency(&idempotency_key, &response);
-            Ok(response)
-        }
-        "nextral.reminders.due" => {
-            let payload: ExecuteDueRemindersRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            Ok(
-                serde_json::to_string(&execute_due_reminders(&mut *store, payload)?)
-                    .map_err(CoreError::from)?,
-            )
-        }
-        "experiments.create" => {
-            let payload: ExperimentCreateRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let experiment =
-                control
-                    .registry
-                    .create(payload.lane, payload.policy_version, payload.description);
-            Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
-        }
-        "experiments.promote" => {
-            let payload: ExperimentPromoteRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let report = report_from_severity(&payload.severity);
-            if !canary_replay_gate(&report) {
-                let quarantined = control
-                    .registry
-                    .promote(&payload.experiment_id, Severity::Destructive)
-                    .ok_or_else(|| {
-                        CoreError::NotFound(format!(
-                            "experiment {} not found",
-                            payload.experiment_id
-                        ))
-                    })?;
-                return Ok(serde_json::to_string(&serde_json::json!({
-                    "status": "blocked_by_replay_gate",
-                    "report": report,
-                    "experiment": quarantined
-                }))
-                .map_err(CoreError::from)?);
-            }
-            let experiment = control
-                .registry
-                .promote(&payload.experiment_id, payload.severity)
-                .ok_or_else(|| {
-                    CoreError::NotFound(format!("experiment {} not found", payload.experiment_id))
-                })?;
-            Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
-        }
-        "experiments.rollback" => {
-            let payload: ExperimentRollbackRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let experiment = control
-                .registry
-                .rollback(&payload.experiment_id, &payload.reason)
-                .ok_or_else(|| {
-                    CoreError::NotFound(format!("experiment {} not found", payload.experiment_id))
-                })?;
-            Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
-        }
-        "experiments.status" => {
-            let id = if request.payload_json.trim().is_empty() {
-                None
-            } else {
-                Some(
-                    serde_json::from_str::<serde_json::Value>(&request.payload_json)
-                        .map_err(CoreError::from)?
-                        .get("experiment_id")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                )
-            };
-            let control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let status = control.registry.status(id.as_deref());
-            Ok(serde_json::to_string(&status).map_err(CoreError::from)?)
-        }
-        "safety.policy.get" => {
-            let control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            Ok(serde_json::to_string(&control.safety_policy).map_err(CoreError::from)?)
-        }
-        "safety.policy.set" => {
-            let payload: SafetyPolicySetRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut control = control_plane()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            control
-                .safety_policy
-                .actions
-                .insert(payload.severity, payload.action);
-            Ok(serde_json::to_string(&control.safety_policy).map_err(CoreError::from)?)
+        "nextral.memory.retrieve" | "nextral.runtime.scored_search" => {
+            let mut result = crate::retrieval::retrieve(store, decode!(RetrievalRequest))?;
+            let control = load_control(store)?;
+            result.decision_action = decision_for(&control.safety_policy, &result.severity);
+            result.lane = control.registry.current_lane.clone();
+            result.policy_version = control.registry.active_policy_version.clone();
+            value!(result)
         }
         "nextral.graph.query" => {
-            let payload: RetrievalRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = crate::runtime::retrieval::retrieve(&mut *store, payload)?;
-            let graph_only: Vec<_> = response
-                .items
-                .into_iter()
-                .filter(|item| !matches!(item.source_path, crate::retrieval::SourcePath::Vector))
-                .collect();
-            Ok(
-                serde_json::to_string(&serde_json::json!({ "items": graph_only }))
-                    .map_err(CoreError::from)?,
-            )
+            let response = crate::retrieval::retrieve(store, decode!(RetrievalRequest))?;
+            serde_json::json!({"items":response.items.into_iter().filter(|i|!matches!(i.source_path,crate::retrieval::SourcePath::Vector)).collect::<Vec<_>>()})
         }
-        "nextral.session.append" => {
-            let payload: AppendSessionMessageRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = append_session_message(&mut *store, payload, 20)?;
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
+        "nextral.memory.get" => {
+            value!(store.get_memory(tenant, user, string_field("memory_id")?)?)
         }
-        "nextral.session.context" => {
-            let payload: RetrievalRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = assemble_working_context(&mut *store, payload, 20)?;
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
-        }
-        "nextral.consolidation.run" => {
-            let payload: ConsolidationRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = consolidate_session(&mut *store, payload)?;
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
-        }
-        "nextral.reminders.schedule" => {
-            let payload: ScheduleReminderRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = schedule_reminder(&mut *store, payload)?;
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
-        }
-        "nextral.reembed.plan" => {
-            let payload: ReembedPlanRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let plan = plan_reembed(
-                &payload.tenant_id,
-                &payload.source_collection,
-                &payload.shadow_collection,
-                &payload.target_embedding_provider,
-                &payload.target_embedding_model,
-            )?;
-            Ok(serde_json::to_string(&plan).map_err(CoreError::from)?)
-        }
-        "nextral.graph.graphify" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let record: MemoryRecord =
-                serde_json::from_value(payload.get("record").cloned().unwrap_or_default())
-                    .map_err(CoreError::from)?;
-            let hints: Vec<crate::graph::GraphHint> = serde_json::from_value(
-                payload
-                    .get("hints")
-                    .cloned()
-                    .unwrap_or(serde_json::json!([])),
-            )
-            .map_err(CoreError::from)?;
-            let output = crate::graph::graphify_record(&record, &hints)?;
-            Ok(serde_json::to_string(&output).map_err(CoreError::from)?)
-        }
-        "nextral.memory.list" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"].as_str().unwrap_or("");
-            let user_id = payload["user_id"].as_str().unwrap_or("");
-            let include_inactive = payload["include_inactive"].as_bool().unwrap_or(false);
-            let privacy_scope: Vec<crate::memory::PrivacyLevel> = payload["privacy_scope"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .filter_map(|s| {
-                            serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-                        })
-                        .collect()
-                })
+        "nextral.memory.forget" => value!(forget_memory(store, decode!(ForgetMemoryRequest))?),
+        "nextral.memory.list"
+        | "nextral.memory.search_by_tag"
+        | "nextral.memory.search_by_entity" => {
+            let privacy = payload
+                .get("privacy_scope")
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()
+                .map_err(CoreError::from)?
                 .unwrap_or_else(|| {
                     vec![
                         crate::memory::PrivacyLevel::Private,
@@ -784,359 +568,436 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                         crate::memory::PrivacyLevel::Sensitive,
                     ]
                 });
-            let store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records =
-                store.list_memories(tenant_id, user_id, &privacy_scope, include_inactive)?;
-            Ok(serde_json::to_string(&records).map_err(CoreError::from)?)
+            let mut records = store.list_memories(
+                tenant,
+                user,
+                &privacy,
+                payload["include_inactive"].as_bool().unwrap_or(false),
+            )?;
+            if request.tool == "nextral.memory.search_by_tag" {
+                let tag = string_field("tag")?;
+                records.retain(|r| r.has_tag(tag));
+            }
+            if request.tool == "nextral.memory.search_by_entity" {
+                let entity = string_field("entity")?;
+                records.retain(|r| r.has_entity(entity));
+            }
+            value!(records)
         }
         "nextral.memory.update" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"]
-                .as_str()
-                .ok_or_else(|| CoreError::InvalidInput("tenant_id required".into()))?;
-            let user_id = payload["user_id"]
-                .as_str()
-                .ok_or_else(|| CoreError::InvalidInput("user_id required".into()))?;
-            let memory_id = payload["memory_id"]
-                .as_str()
-                .ok_or_else(|| CoreError::InvalidInput("memory_id required".into()))?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
             let mut record = store
-                .get_memory(tenant_id, user_id, memory_id)?
+                .get_memory(tenant, user, string_field("memory_id")?)?
                 .ok_or_else(|| CoreError::NotFound("memory not found".into()))?;
             record.patch(
                 payload
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                    .map(str::to_owned),
                 payload
                     .get("content_type")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| {
-                        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-                    }),
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .transpose()
+                    .map_err(CoreError::from)?,
                 payload
                     .get("importance_score")
                     .and_then(|v| v.as_f64())
-                    .map(|s| s as f32),
+                    .map(|v| v as f32),
                 payload
                     .get("confidence_score")
-                    .map(|v| v.as_f64().map(|s| s as f32)),
+                    .map(|v| v.as_f64().map(|v| v as f32)),
                 payload
                     .get("privacy_level")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| {
-                        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-                    }),
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .transpose()
+                    .map_err(CoreError::from)?,
             )?;
-            if let Some(add_tags) = payload.get("add_tags").and_then(|v| v.as_array()) {
-                for tag in add_tags {
-                    if let Some(t) = tag.as_str() {
-                        record.add_tag(t);
+            for (name, add, entity) in [
+                ("add_tags", true, false),
+                ("remove_tags", false, false),
+                ("add_entities", true, true),
+                ("remove_entities", false, true),
+            ] {
+                if let Some(values) = payload.get(name) {
+                    for item in serde_json::from_value::<Vec<String>>(values.clone())
+                        .map_err(CoreError::from)?
+                    {
+                        match (add, entity) {
+                            (true, false) => record.add_tag(item),
+                            (false, false) => {
+                                record.remove_tag(&item);
+                            }
+                            (true, true) => record.add_entity(item),
+                            (false, true) => {
+                                record.remove_entity(&item);
+                            }
+                        }
                     }
                 }
             }
-            if let Some(remove_tags) = payload.get("remove_tags").and_then(|v| v.as_array()) {
-                for tag in remove_tags {
-                    if let Some(t) = tag.as_str() {
-                        record.remove_tag(t);
-                    }
-                }
+            if payload.get("content").is_some() || payload.get("embedding").is_some() {
+                let embedding = payload
+                    .get("embedding")
+                    .map(|v| serde_json::from_value::<Vec<f32>>(v.clone()))
+                    .transpose()
+                    .map_err(CoreError::from)?;
+                store.prepare_embedding(&mut record, embedding.as_deref())?;
             }
-            if let Some(add_entities) = payload.get("add_entities").and_then(|v| v.as_array()) {
-                for entity in add_entities {
-                    if let Some(e) = entity.as_str() {
-                        record.add_entity(e);
-                    }
-                }
+            store.update_memory(record.clone())?;
+            value!(record)
+        }
+        "nextral.policy.upsert" => {
+            let privacy = serde_json::from_value::<crate::memory::PrivacyLevel>(
+                payload["privacy_level"].clone(),
+            )
+            .map_err(CoreError::from)?;
+            let mut policy = crate::domain::ProceduralPolicy::new(
+                tenant,
+                user,
+                string_field("name")?,
+                string_field("body")?,
+                privacy,
+            )?;
+            if let Some(id) = payload.get("policy_id") {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| CoreError::InvalidInput("policy_id must be a string".into()))?;
+                crate::store::validate_scope_component(id, "policy_id")?;
+                policy.id = id.into();
             }
-            if let Some(remove_entities) = payload.get("remove_entities").and_then(|v| v.as_array())
-            {
-                for entity in remove_entities {
-                    if let Some(e) = entity.as_str() {
-                        record.remove_entity(e);
-                    }
-                }
-            }
-            store.upsert_memory(record.clone())?;
-            Ok(serde_json::to_string(&record).map_err(CoreError::from)?)
+            policy.enabled = payload
+                .get("enabled")
+                .map(|v| serde_json::from_value::<bool>(v.clone()))
+                .transpose()
+                .map_err(CoreError::from)?
+                .unwrap_or(true);
+            let (policy, receipts) = store.policy_upsert(policy)?;
+            serde_json::json!({"policy":policy,"receipts":receipts})
+        }
+        "nextral.policy.list" => {
+            let requested = payload
+                .get("privacy_scope")
+                .map(|v| serde_json::from_value::<Vec<crate::memory::PrivacyLevel>>(v.clone()))
+                .transpose()
+                .map_err(CoreError::from)?;
+            let privacy = store.policy_privacy_scope(requested);
+            let include_disabled = payload
+                .get("include_disabled")
+                .map(|v| serde_json::from_value::<bool>(v.clone()))
+                .transpose()
+                .map_err(CoreError::from)?
+                .unwrap_or(false);
+            let mut policies = store.lifecycle_policies(tenant, user)?;
+            policies.retain(|p| {
+                p.tenant_id == tenant
+                    && p.user_id == user
+                    && privacy.contains(&p.privacy_level)
+                    && (include_disabled || p.enabled)
+            });
+            policies.sort_by(|a, b| a.id.cmp(&b.id));
+            value!(policies)
+        }
+        "nextral.policy.remove" => {
+            let id = string_field("policy_id")?;
+            crate::store::validate_scope_component(id, "policy_id")?;
+            serde_json::json!({"policy_id":id,"status":"removed","receipts":store.policy_remove(tenant,user,id)?})
         }
         "nextral.memory.stats" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"].as_str().unwrap_or("");
-            let user_id = payload["user_id"].as_str().unwrap_or("");
-            let store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let total = store.count_memories(tenant_id, user_id, false)?;
-            let all = store.count_memories(tenant_id, user_id, true)?;
-            let entities = store.list_entities(tenant_id, user_id)?;
-            let tags = store.list_tags(tenant_id, user_id)?;
             let records = store.list_memories(
-                tenant_id,
-                user_id,
+                tenant,
+                user,
                 &[
                     crate::memory::PrivacyLevel::Private,
-                    crate::memory::PrivacyLevel::Shared,
                     crate::memory::PrivacyLevel::Sensitive,
+                    crate::memory::PrivacyLevel::Shared,
                     crate::memory::PrivacyLevel::Restricted,
                 ],
                 true,
             )?;
-            let mut by_type: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            let mut by_content_type: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            let mut total_importance = 0.0f32;
+            let mut by_type = std::collections::BTreeMap::new();
+            let mut by_content = std::collections::BTreeMap::new();
             for r in &records {
-                *by_type.entry(format!("{:?}", r.memory_type)).or_insert(0) += 1;
-                *by_content_type
+                *by_type
+                    .entry(format!("{:?}", r.memory_type))
+                    .or_insert(0usize) += 1;
+                *by_content
                     .entry(format!("{:?}", r.content_type))
-                    .or_insert(0) += 1;
-                total_importance += r.importance_score;
+                    .or_insert(0usize) += 1;
             }
-            let avg_importance = if records.is_empty() {
-                0.0
+            serde_json::json!({"tenant_id":tenant,"user_id":user,"active_count":store.count_memories(tenant,user,false)?,"total_count":records.len(),"entity_count":store.list_entities(tenant,user)?.len(),"tag_count":store.list_tags(tenant,user)?.len(),"avg_importance":if records.is_empty(){0.0}else{records.iter().map(|r|r.importance_score).sum::<f32>()/records.len() as f32},"by_memory_type":by_type,"by_content_type":by_content})
+        }
+        "nextral.session.append" => value!(append_session_message(
+            store,
+            decode!(AppendSessionMessageRequest),
+            20
+        )?),
+        "nextral.session.context" => value!(assemble_working_context(
+            store,
+            decode!(RetrievalRequest),
+            20
+        )?),
+        "nextral.consolidation.run" => {
+            value!(consolidate_session(store, decode!(ConsolidationRequest))?)
+        }
+        "nextral.reminders.schedule" => {
+            value!(schedule_reminder(store, decode!(ScheduleReminderRequest))?)
+        }
+        "nextral.reminders.due" => value!(execute_due_reminders(
+            store,
+            decode!(ExecuteDueRemindersRequest)
+        )?),
+        "nextral.reminders.list" => value!(store.reminders(tenant, user)?),
+        "nextral.jobs.reembed.execute" => value!(crate::runtime::reembed::execute_reembed(
+            store,
+            decode!(crate::runtime::reembed::ReembedExecutionRequest)
+        )?),
+        "nextral.jobs.enqueue" => value!(crate::runtime::prospective::enqueue_lifecycle_job(
+            store,
+            decode!(crate::runtime::prospective::LifecycleJobRequest)
+        )?),
+        "nextral.jobs.run" => value!(crate::runtime::prospective::execute_lifecycle_jobs(
+            store,
+            decode!(crate::runtime::prospective::RunLifecycleJobsRequest)
+        )?),
+        "nextral.jobs.list" => {
+            let mut jobs = store.lifecycle_list(tenant, &format!("scheduled-job/{user}/"))?;
+            for checkpoint in store.lifecycle_list(tenant, &format!("reembed/{user}/"))? {
+                let report = checkpoint["report"].clone();
+                jobs.push(serde_json::json!({"id":report["plan_id"],"job_type":"reembed","status":report["status"],"report":report}));
+            }
+            value!(jobs)
+        }
+        "nextral.jobs.get" => {
+            let id = string_field("job_id")?;
+            crate::store::validate_scope_component(id, "job_id")?;
+            if let Some(job) =
+                store.lifecycle_load(tenant, &format!("scheduled-job/{user}/{id}"))?
+            {
+                job
+            } else if let Some(checkpoint) =
+                store.lifecycle_load(tenant, &format!("reembed/{user}/{id}"))?
+            {
+                let report = checkpoint["report"].clone();
+                serde_json::json!({"id":report["plan_id"],"job_type":"reembed","status":report["status"],"report":report})
             } else {
-                total_importance / records.len() as f32
+                serde_json::Value::Null
+            }
+        }
+        "nextral.reembed.plan" => {
+            let p = decode!(ReembedPlanRequest);
+            value!(plan_reembed(
+                &p.tenant_id,
+                &p.source_collection,
+                &p.shadow_collection,
+                &p.target_embedding_provider,
+                &p.target_embedding_model
+            )?)
+        }
+        "nextral.graph.graphify" => {
+            let p = decode!(GraphifyRequest);
+            value!(crate::runtime::graphify::graphify_memory(
+                store,
+                &p.tenant_id,
+                &p.user_id,
+                &p.memory_id,
+                &p.hints,
+            )?)
+        }
+        "nextral.batch.ingest" | "nextral.batch.retrieve" | "nextral.batch.forget" => {
+            let array_name = if request.tool == "nextral.batch.retrieve" {
+                "queries"
+            } else {
+                "items"
             };
-            Ok(serde_json::json!({
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-                "active_count": total,
-                "total_count": all,
-                "entity_count": entities.len(),
-                "tag_count": tags.len(),
-                "avg_importance": avg_importance,
-                "by_memory_type": by_type,
-                "by_content_type": by_content_type,
-            })
-            .to_string())
-        }
-        "nextral.memory.search_by_tag" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"].as_str().unwrap_or("");
-            let user_id = payload["user_id"].as_str().unwrap_or("");
-            let tag = payload["tag"].as_str().unwrap_or("");
-            let store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records = store.list_memories(
-                tenant_id,
-                user_id,
-                &[
-                    crate::memory::PrivacyLevel::Private,
-                    crate::memory::PrivacyLevel::Shared,
-                    crate::memory::PrivacyLevel::Sensitive,
-                ],
-                false,
-            )?;
-            let filtered: Vec<_> = records.into_iter().filter(|r| r.has_tag(tag)).collect();
-            Ok(serde_json::to_string(&filtered).map_err(CoreError::from)?)
-        }
-        "nextral.memory.search_by_entity" => {
-            let payload: serde_json::Value =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"].as_str().unwrap_or("");
-            let user_id = payload["user_id"].as_str().unwrap_or("");
-            let entity = payload["entity"].as_str().unwrap_or("");
-            let store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records = store.list_memories(
-                tenant_id,
-                user_id,
-                &[
-                    crate::memory::PrivacyLevel::Private,
-                    crate::memory::PrivacyLevel::Shared,
-                    crate::memory::PrivacyLevel::Sensitive,
-                ],
-                false,
-            )?;
-            let filtered: Vec<_> = records
-                .into_iter()
-                .filter(|r| r.has_entity(entity))
-                .collect();
-            Ok(serde_json::to_string(&filtered).map_err(CoreError::from)?)
-        }
-        "nextral.health" => Ok(serde_json::json!({"status": "ok", "version": "0.1.0"}).to_string()),
-        "nextral.runtime.scored_search" => {
-            let payload: RetrievalRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let response = crate::runtime::retrieval::retrieve(&mut *store, payload)?;
-            Ok(serde_json::to_string(&response).map_err(CoreError::from)?)
-        }
-        "nextral.batch.ingest" => {
-            const MAX_BATCH: usize = 1000;
-            let payload: BatchIngestRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            if payload.items.len() > MAX_BATCH {
-                return Err(PackageError {
-                    code: "invalid_input".into(),
-                    message: format!(
-                        "batch size {} exceeds maximum {}",
-                        payload.items.len(),
-                        MAX_BATCH
-                    ),
-                });
+            let items = payload[array_name]
+                .as_array()
+                .ok_or_else(|| CoreError::InvalidInput(format!("{array_name} required")))?;
+            let maximum = match store {
+                RuntimeStore::Production(s) => s.config.batch.max_batch_size,
+                RuntimeStore::Test(_) => 100,
+            };
+            if items.len() > maximum {
+                return Err(
+                    CoreError::InvalidInput(format!("batch exceeds {maximum} items")).into(),
+                );
             }
-            if let Some(key) = &payload.idempotency_key {
-                if let Some(cached) = check_idempotency(key) {
-                    return Ok(cached);
+            if items.is_empty() {
+                return Ok(serde_json::to_string(&BatchResponse {
+                    total: 0,
+                    succeeded: 0,
+                    failed: 0,
+                    errors: Vec::new(),
+                    results: Vec::new(),
+                })
+                .map_err(CoreError::from)?);
+            }
+            let batch_tenant = items[0]["tenant_id"].as_str().unwrap_or("");
+            let batch_user = items[0]["user_id"].as_str().unwrap_or("");
+            for item in items {
+                validate_tenant_user(item)?;
+                if item["tenant_id"].as_str() != Some(batch_tenant)
+                    || item["user_id"].as_str() != Some(batch_user)
+                {
+                    return Err(CoreError::InvalidInput(
+                        "batch must have one tenant/user scope".into(),
+                    )
+                    .into());
                 }
             }
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let mut results = Vec::new();
-            let mut succeeded = 0;
-            let mut failed = 0;
-            let mut errors = Vec::new();
-            for item in payload.items {
-                match crate::ingestion::ingest_memory(&mut *store, item) {
-                    Ok(response) => {
-                        succeeded += 1;
-                        results.push(serde_json::to_value(&response).unwrap_or_default());
+            let fingerprint =
+                crate::memory::deterministic_id(&[&request.tool, &payload[array_name].to_string()]);
+            let key = payload["idempotency_key"].as_str().map(|k| {
+                format!(
+                    "idempotency/{}",
+                    crate::memory::deterministic_id(&[batch_tenant, batch_user, &request.tool, k])
+                )
+            });
+            let lease = key.as_ref().map(|key| format!("lease/{key}"));
+            let owner = crate::runtime::lifecycle::worker_owner();
+            if let Some(lease) = &lease {
+                if !store.lifecycle_claim(
+                    batch_tenant,
+                    lease,
+                    &owner,
+                    crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,
+                    300,
+                )? {
+                    return Err(CoreError::Conflict(
+                        "idempotent batch is leased by another worker".into(),
+                    )
+                    .into());
+                }
+            }
+            if let Some(key) = &key {
+                if let Some(cached) = store.lifecycle_load(batch_tenant, key)? {
+                    if cached["fingerprint"].as_str() != Some(fingerprint.as_str()) {
+                        if let Some(lease) = &lease {
+                            store.lifecycle_release(batch_tenant, lease, &owner)?;
+                        }
+                        return Err(CoreError::Conflict(
+                            "idempotency key reused with different request".into(),
+                        )
+                        .into());
+                    }
+                    if request.tool != "nextral.batch.retrieve"
+                        && cached["response"]["failed"].as_u64() == Some(0)
+                    {
+                        if let Some(lease) = &lease {
+                            store.lifecycle_release(batch_tenant, lease, &owner)?;
+                        }
+                        return Ok(cached["response"].to_string());
+                    }
+                }
+            }
+            let mut response = BatchResponse {
+                total: items.len(),
+                succeeded: 0,
+                failed: 0,
+                errors: Vec::new(),
+                results: Vec::new(),
+            };
+            for item in items {
+                if let Some(lease) = &lease {
+                    if !store.lifecycle_claim(batch_tenant,lease,&owner,crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,300)?{return Err(CoreError::Conflict("batch idempotency lease lost".into()).into());}
+                }
+                let result: CoreResult<serde_json::Value> = (|| match request.tool.as_str() {
+                    "nextral.batch.ingest" => {
+                        Ok(serde_json::to_value(crate::ingestion::ingest_memory(
+                            store,
+                            serde_json::from_value(item.clone())?,
+                        )?)?)
+                    }
+                    "nextral.batch.retrieve" => Ok(serde_json::to_value(
+                        crate::retrieval::retrieve(store, serde_json::from_value(item.clone())?)?,
+                    )?),
+                    _ => Ok(serde_json::to_value(forget_memory(
+                        store,
+                        serde_json::from_value(item.clone())?,
+                    )?)?),
+                })();
+                match result {
+                    Ok(value) => {
+                        if matches!(
+                            value["status"].as_str(),
+                            Some("rejected" | "error" | "incomplete")
+                        ) {
+                            response.failed += 1;
+                            response
+                                .errors
+                                .push("item did not complete; inspect its result".into());
+                        } else {
+                            response.succeeded += 1;
+                        }
+                        response.results.push(value);
                     }
                     Err(error) => {
-                        failed += 1;
-                        errors.push(error.to_string());
+                        response.failed += 1;
+                        response.errors.push(error.to_string());
                     }
                 }
             }
-            let total = succeeded + failed;
-            let response = serde_json::to_string(&BatchResponse {
-                total,
-                succeeded,
-                failed,
-                errors,
-                results,
-            })
-            .map_err(CoreError::from)?;
-            if let Some(key) = &payload.idempotency_key {
-                store_idempotency(key, &response);
+            let result = value!(response);
+            if let Some(key) = key {
+                store.lifecycle_save(
+                    batch_tenant,
+                    &key,
+                    &serde_json::json!({"tenant_id":batch_tenant,"user_id":batch_user,"tool":request.tool,"fingerprint":fingerprint,"response":(request.tool != "nextral.batch.retrieve").then_some(&result)}),
+                )?;
             }
-            Ok(response)
+            if let Some(lease) = &lease {
+                store.lifecycle_release(batch_tenant, lease, &owner)?;
+            }
+            result
         }
-        "nextral.batch.retrieve" => {
-            const MAX_BATCH: usize = 100;
-            let payload: BatchRetrieveRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            if payload.queries.len() > MAX_BATCH {
-                return Err(PackageError {
-                    code: "invalid_input".into(),
-                    message: format!(
-                        "batch size {} exceeds maximum {}",
-                        payload.queries.len(),
-                        MAX_BATCH
-                    ),
-                });
-            }
-            if let Some(key) = &payload.idempotency_key {
-                if let Some(cached) = check_idempotency(key) {
-                    return Ok(cached);
-                }
-            }
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let mut results = Vec::new();
-            let mut succeeded = 0;
-            let mut failed = 0;
-            let mut errors = Vec::new();
-            for query in payload.queries {
-                match crate::runtime::retrieval::retrieve(&mut *store, query) {
-                    Ok(response) => {
-                        succeeded += 1;
-                        results.push(serde_json::to_value(&response).unwrap_or_default());
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        errors.push(error.to_string());
-                    }
-                }
-            }
-            let total = succeeded + failed;
-            let response = serde_json::to_string(&BatchResponse {
-                total,
-                succeeded,
-                failed,
-                errors,
-                results,
-            })
-            .map_err(CoreError::from)?;
-            if let Some(key) = &payload.idempotency_key {
-                store_idempotency(key, &response);
-            }
-            Ok(response)
+        "experiments.create" => {
+            let p = decode!(ExperimentCreateRequest);
+            with_control(store, |c| {
+                Ok(serde_json::to_value(c.registry.create(
+                    p.lane,
+                    p.policy_version,
+                    p.description,
+                ))?)
+            })?
         }
-        "nextral.batch.forget" => {
-            const MAX_BATCH: usize = 1000;
-            let payload: BatchForgetRequest =
-                serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            if payload.items.len() > MAX_BATCH {
-                return Err(PackageError {
-                    code: "invalid_input".into(),
-                    message: format!(
-                        "batch size {} exceeds maximum {}",
-                        payload.items.len(),
-                        MAX_BATCH
-                    ),
-                });
-            }
-            if let Some(key) = &payload.idempotency_key {
-                if let Some(cached) = check_idempotency(key) {
-                    return Ok(cached);
-                }
-            }
-            let mut store = shared_store()
-                .lock()
-                .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let mut results = Vec::new();
-            let mut succeeded = 0;
-            let mut failed = 0;
-            let mut errors = Vec::new();
-            for item in payload.items {
-                match forget_memory(&mut *store, item) {
-                    Ok(response) => {
-                        succeeded += 1;
-                        results.push(serde_json::to_value(&response).unwrap_or_default());
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        errors.push(error.to_string());
-                    }
-                }
-            }
-            let total = succeeded + failed;
-            let response = serde_json::to_string(&BatchResponse {
-                total,
-                succeeded,
-                failed,
-                errors,
-                results,
-            })
-            .map_err(CoreError::from)?;
-            if let Some(key) = &payload.idempotency_key {
-                store_idempotency(key, &response);
-            }
-            Ok(response)
+        "experiments.promote" => {
+            let p = decode!(ExperimentPromoteRequest);
+            with_control(store, |c| {
+                Ok(serde_json::to_value(
+                    c.registry.promote(&p.experiment_id, &p.evidence)?,
+                )?)
+            })?
         }
-        other => Err(PackageError {
-            code: "invalid_input".to_string(),
-            message: format!("unknown MCP tool: {other}"),
-        }),
+        "experiments.rollback" => {
+            let p = decode!(ExperimentRollbackRequest);
+            with_control(store, |c| {
+                Ok(serde_json::to_value(
+                    c.registry.rollback(&p.experiment_id, &p.reason)?,
+                )?)
+            })?
+        }
+        "experiments.status" => {
+            let c = load_control(store)?;
+            value!(c.registry.status(payload["experiment_id"].as_str()))
+        }
+        "safety.policy.get" => {
+            let c = load_control(store)?;
+            value!(&c.safety_policy)
+        }
+        "safety.policy.set" => {
+            let p = decode!(SafetyPolicySetRequest);
+            with_control(store, |c| {
+                c.safety_policy.actions.insert(p.severity, p.action);
+                Ok(serde_json::to_value(&c.safety_policy)?)
+            })?
+        }
+        other => return Err(CoreError::InvalidInput(format!("unknown MCP tool: {other}")).into()),
+    };
+    if matches!(
+        request.tool.as_str(),
+        "nextral.consolidation.run" | "nextral.jobs.run"
+    ) {
+        store.drain_outbox(tenant)?;
     }
+    Ok(result.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

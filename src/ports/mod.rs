@@ -67,6 +67,8 @@ pub struct ArchiveReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditWrite {
+    #[serde(default)]
+    pub id: Option<String>,
     pub tenant_id: String,
     pub user_id: Option<String>,
     pub actor_id: String,

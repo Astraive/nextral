@@ -2,7 +2,7 @@ use crate::{
     config::IngestionPolicy,
     contracts::CoreResult,
     domain::{AuditAction, AuditEvent},
-    graph::{graphify_record, merge_graph, GraphHint},
+    graph::{graphify_record, GraphHint},
     memory::{
         deterministic_id, now_timestamp, ContentType, MemoryRecord, MemoryType, PrivacyLevel,
         SourceType,
@@ -30,6 +30,8 @@ pub struct IngestMemoryRequest {
     pub graph_hints: Vec<GraphHint>,
     pub policy: IngestionPolicy,
     pub trace_id: Option<String>,
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,11 +78,31 @@ impl IngestMemoryRequest {
             graph_hints: Vec::new(),
             policy,
             trace_id: None,
+            embedding: None,
         }
     }
 }
 
 pub fn ingest_memory<T>(
+    store: &mut T,
+    request: IngestMemoryRequest,
+) -> CoreResult<IngestMemoryResponse>
+where
+    T: MemoryIndexStore + AuditSink + GraphStore,
+{
+    let mut span = crate::runtime::observability::start_span("nextral.ingest");
+    let result = ingest_memory_impl(store, request);
+    let accepted = result
+        .as_ref()
+        .is_ok_and(|response| response.status == IngestStatus::Accepted);
+    crate::runtime::observability::record_ingest(accepted);
+    if !accepted {
+        span.fail();
+    }
+    result
+}
+
+fn ingest_memory_impl<T>(
     store: &mut T,
     request: IngestMemoryRequest,
 ) -> CoreResult<IngestMemoryResponse>
@@ -95,7 +117,7 @@ where
             "ingest_trace",
         ])
     });
-    let attempt_id = deterministic_id(&[&request.user_id, &request.content, "write_attempt"]);
+    let attempt_id = crate::runtime::lifecycle::worker_owner();
     store.emit_audit(AuditEvent {
         id: attempt_id,
         tenant_id: request.tenant_id.clone(),
@@ -111,19 +133,24 @@ where
         created_at: now_timestamp(),
     })?;
 
+    let policy = store.ingestion_policy(&request.policy);
     let mut errors = Vec::new();
     if request.content.trim().is_empty() {
         errors.push("content cannot be empty".to_string());
     }
-    if request.importance_score < request.policy.min_importance_score {
+    if !request.importance_score.is_finite()
+        || request.importance_score < policy.min_importance_score
+    {
         errors.push("importance_score is below write threshold".to_string());
     }
-    if request.confidence_score.unwrap_or(0.0) < request.policy.min_confidence_score {
+    if !request.confidence_score.unwrap_or(0.0).is_finite()
+        || request.confidence_score.unwrap_or(0.0) < policy.min_confidence_score
+    {
         errors.push("confidence_score is below write threshold".to_string());
     }
     if !errors.is_empty() {
         store.emit_audit(AuditEvent {
-            id: deterministic_id(&[&request.user_id, &request.content, "write_rejected"]),
+            id: crate::runtime::lifecycle::worker_owner(),
             tenant_id: request.tenant_id,
             user_id: Some(request.user_id.clone()),
             actor: request.user_id,
@@ -169,13 +196,12 @@ where
     record.entities = request.entities;
     record.tags = request.tags;
     record.privacy_level = request.privacy_level;
+    store.prepare_embedding(&mut record, request.embedding.as_deref())?;
     record.validate()?;
 
     let graph_output = graphify_record(&record, &request.graph_hints)?;
-    store.upsert_memory(record)?;
-    merge_graph(store, graph_output)?;
-    store.emit_audit(AuditEvent {
-        id: deterministic_id(&[&request.user_id, &id, "write_accepted"]),
+    let audit = AuditEvent {
+        id: crate::runtime::lifecycle::worker_owner(),
         tenant_id: request.tenant_id,
         user_id: Some(request.user_id.clone()),
         actor: request.user_id,
@@ -187,17 +213,117 @@ where
         trace_id: Some(trace_id.clone()),
         metadata_json: "{}".to_string(),
         created_at: now_timestamp(),
-    })?;
+    };
+    let receipts = store.commit_ingestion(
+        record,
+        graph_output.nodes,
+        graph_output.relationships,
+        audit,
+    )?;
 
     Ok(IngestMemoryResponse {
         status: IngestStatus::Accepted,
         trace_id,
         record_id: Some(id),
         validation_errors: Vec::new(),
-        write_receipts: vec![
-            "memory_index".to_string(),
-            "audit".to_string(),
-            "graph".to_string(),
-        ],
+        write_receipts: receipts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_mutations_have_distinct_audit_events() {
+        let mut store = crate::testkit::TestMemoryStore::new();
+        for (content, trace) in [
+            ("First decision", "attempt-one"),
+            ("Changed decision", "attempt-two"),
+        ] {
+            let mut request = IngestMemoryRequest::new(
+                "tenant",
+                "owner",
+                content,
+                ContentType::Decision,
+                MemoryType::Semantic,
+                SourceType::Manual,
+                IngestionPolicy {
+                    min_importance_score: 0.0,
+                    min_confidence_score: 0.0,
+                },
+            );
+            request.id = Some("same-memory".into());
+            request.trace_id = Some(trace.into());
+            assert_eq!(
+                ingest_memory(&mut store, request).unwrap().status,
+                IngestStatus::Accepted
+            );
+        }
+        let accepted: Vec<_> = store
+            .audit_events
+            .iter()
+            .filter(|event| event.action == AuditAction::WriteAccepted)
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            2,
+            "each accepted mutation must persist its own acceptance event"
+        );
+        assert_ne!(accepted[0].id, accepted[1].id);
+        assert_eq!(accepted[0].trace_id.as_deref(), Some("attempt-one"));
+        assert_eq!(accepted[1].trace_id.as_deref(), Some("attempt-two"));
+        assert_eq!(
+            store
+                .get_memory("tenant", "owner", "same-memory")
+                .unwrap()
+                .unwrap()
+                .content,
+            "Changed decision"
+        );
+    }
+
+    #[test]
+    fn repeated_trace_and_content_do_not_deduplicate_accepted_mutations() {
+        let mut store = crate::testkit::TestMemoryStore::new();
+        let mut request = IngestMemoryRequest::new(
+            "tenant",
+            "owner",
+            "Same decision",
+            ContentType::Decision,
+            MemoryType::Semantic,
+            SourceType::Manual,
+            IngestionPolicy {
+                min_importance_score: 0.0,
+                min_confidence_score: 0.0,
+            },
+        );
+        request.id = Some("same-memory".into());
+        request.trace_id = Some("shared-trace".into());
+        for _ in 0..3 {
+            assert_eq!(
+                ingest_memory(&mut store, request.clone()).unwrap().status,
+                IngestStatus::Accepted
+            );
+        }
+        for action in [AuditAction::WriteAttempt, AuditAction::WriteAccepted] {
+            let events: Vec<_> = store
+                .audit_events
+                .iter()
+                .filter(|event| event.action == action)
+                .collect();
+            assert_eq!(
+                events.len(),
+                3,
+                "correlation traces must not deduplicate distinct ingestion calls"
+            );
+            let ids: std::collections::HashSet<_> = events.iter().map(|event| &event.id).collect();
+            assert_eq!(ids.len(), 3);
+            assert!(events
+                .iter()
+                .all(|event| event.trace_id.as_deref() == Some("shared-trace")
+                    && event.tenant_id == "tenant"
+                    && event.user_id.as_deref() == Some("owner")));
+        }
+    }
 }

@@ -1,3 +1,4 @@
+pub use crate::store::{AuditSink, GraphStore, MemoryIndexStore, ReminderStore, SessionStore};
 use crate::{
     contracts::{CoreError, CoreResult},
     domain::{AuditEvent, GraphEdge, GraphNode, SessionMessage},
@@ -5,70 +6,6 @@ use crate::{
     prospective::ReminderRecord,
 };
 use serde::{Deserialize, Serialize};
-
-pub trait MemoryIndexStore {
-    fn upsert_memory(&mut self, record: MemoryRecord) -> CoreResult<()>;
-    fn get_memory(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        id: &str,
-    ) -> CoreResult<Option<MemoryRecord>>;
-    fn list_memories(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        privacy_scope: &[PrivacyLevel],
-        include_inactive: bool,
-    ) -> CoreResult<Vec<MemoryRecord>>;
-    fn update_memory(&mut self, record: MemoryRecord) -> CoreResult<()>;
-    fn count_memories(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        include_inactive: bool,
-    ) -> CoreResult<usize>;
-    fn list_entities(&self, tenant_id: &str, user_id: &str) -> CoreResult<Vec<String>>;
-    fn list_tags(&self, tenant_id: &str, user_id: &str) -> CoreResult<Vec<String>>;
-}
-
-pub trait GraphStore {
-    fn merge_node(&mut self, node: GraphNode) -> CoreResult<()>;
-    fn merge_edge(&mut self, edge: GraphEdge) -> CoreResult<()>;
-    fn graph_memory_ids(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        query: &str,
-        max_hops: u8,
-        privacy_scope: &[PrivacyLevel],
-    ) -> CoreResult<Vec<String>>;
-}
-
-pub trait AuditSink {
-    fn emit_audit(&mut self, event: AuditEvent) -> CoreResult<()>;
-}
-
-pub trait ReminderStore {
-    fn upsert_reminder(&mut self, reminder: ReminderRecord) -> CoreResult<()>;
-    fn list_due_reminders(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        due_at_or_before: &str,
-    ) -> CoreResult<Vec<ReminderRecord>>;
-}
-
-pub trait SessionStore {
-    fn append_session_message(&mut self, message: SessionMessage) -> CoreResult<()>;
-    fn session_tail(
-        &self,
-        tenant_id: &str,
-        user_id: &str,
-        session_id: &str,
-        limit: usize,
-    ) -> CoreResult<Vec<SessionMessage>>;
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TestMemoryStore {
@@ -78,11 +15,63 @@ pub struct TestMemoryStore {
     pub graph_edges: Vec<GraphEdge>,
     pub reminders: Vec<ReminderRecord>,
     pub audit_events: Vec<AuditEvent>,
+    #[serde(skip)]
+    pub lifecycle_state: std::collections::HashMap<(String, String), serde_json::Value>,
+    #[serde(skip)]
+    pub lifecycle_leases: std::collections::HashMap<(String, String), (String, u64)>,
+    #[serde(skip)]
+    pub lifecycle_vectors: std::collections::HashMap<(String, String, String, String), Vec<f32>>,
 }
 
 impl TestMemoryStore {
     pub fn new() -> Self {
         Self::default()
+    }
+    fn audit_replayed(&self, event: &AuditEvent) -> CoreResult<bool> {
+        if let Some(existing) = self
+            .audit_events
+            .iter()
+            .find(|existing| existing.tenant_id == event.tenant_id && existing.id == event.id)
+        {
+            if !existing.same_payload(event)? {
+                return Err(CoreError::Conflict(
+                    "audit identity reused for a different event".into(),
+                ));
+            }
+            return Ok(true);
+        }
+        serde_json::from_str::<serde_json::Value>(&event.metadata_json)?;
+        Ok(false)
+    }
+    fn protect_record(&self, mut record: MemoryRecord) -> MemoryRecord {
+        for source in &record.source_message_ids {
+            if let Some(tombstone) = self.lifecycle_state.get(&(
+                record.tenant_id.clone(),
+                format!("forgotten-source/{}/{}", record.user_id, source),
+            )) {
+                if record.status == MemoryStatus::Active {
+                    record.status = MemoryStatus::SoftDeleted;
+                }
+                if tombstone["redact"].as_bool() == Some(true) {
+                    record.content = "[redacted]".into();
+                    record.entities.clear();
+                    record.tags.clear();
+                    record.embedding = None;
+                }
+            }
+        }
+        record
+    }
+    fn remove_graph_source(&mut self, record: &MemoryRecord) {
+        for edge in self
+            .graph_edges
+            .iter_mut()
+            .filter(|edge| edge.tenant_id == record.tenant_id && edge.user_id == record.user_id)
+        {
+            edge.source_memory_ids.retain(|id| id != &record.id);
+        }
+        self.graph_edges
+            .retain(|edge| !edge.source_memory_ids.is_empty());
     }
 
     pub fn vector_search(
@@ -110,16 +99,155 @@ impl TestMemoryStore {
 }
 
 impl MemoryIndexStore for TestMemoryStore {
+    fn prepare_retrieval(
+        &self,
+        _request: &mut crate::retrieval::RetrievalRequest,
+    ) -> CoreResult<()> {
+        Ok(())
+    }
+    fn prepare_embedding(
+        &self,
+        record: &mut MemoryRecord,
+        embedding: Option<&[f32]>,
+    ) -> CoreResult<()> {
+        if let Some(vector) = embedding {
+            if vector.is_empty() || vector.iter().any(|v| !v.is_finite()) {
+                return Err(CoreError::InvalidInput(
+                    "embedding must be nonempty and finite".into(),
+                ));
+            }
+            record.embedding = Some(vector.to_vec());
+            record.embedding_dim = Some(vector.len() as u32);
+        }
+        Ok(())
+    }
+    fn ingestion_policy(
+        &self,
+        requested: &crate::config::IngestionPolicy,
+    ) -> crate::config::IngestionPolicy {
+        requested.clone()
+    }
+    fn vector_candidates(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        query: &str,
+        _query_vector: Option<&[f32]>,
+        top_k: usize,
+        privacy_scope: &[PrivacyLevel],
+    ) -> CoreResult<Vec<(String, f32)>> {
+        Ok(self.vector_search(tenant_id, user_id, query, top_k, privacy_scope))
+    }
+    fn commit_ingestion(
+        &mut self,
+        record: MemoryRecord,
+        nodes: Vec<GraphNode>,
+        edges: Vec<GraphEdge>,
+        audit: AuditEvent,
+    ) -> CoreResult<Vec<String>> {
+        let replayed = self.audit_replayed(&audit)?;
+        crate::graph::validate_source_graph(
+            &record.tenant_id,
+            &record.user_id,
+            &record.id,
+            &nodes,
+            &edges,
+        )?;
+        self.upsert_memory(record)?;
+        for node in nodes {
+            self.merge_node(node)?;
+        }
+        for edge in edges {
+            self.merge_edge(edge)?;
+        }
+        if !replayed {
+            self.audit_events.push(audit);
+        }
+        Ok(vec![
+            "test_memory".into(),
+            "test_graph".into(),
+            "test_audit".into(),
+        ])
+    }
+    fn commit_graph_replay(
+        &mut self,
+        record: &MemoryRecord,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        audit: &AuditEvent,
+    ) -> CoreResult<Vec<String>> {
+        let replayed = self.audit_replayed(audit)?;
+        crate::graph::validate_source_graph(
+            &record.tenant_id,
+            &record.user_id,
+            &record.id,
+            nodes,
+            edges,
+        )?;
+        let current = self
+            .get_memory(&record.tenant_id, &record.user_id, &record.id)?
+            .ok_or_else(|| CoreError::NotFound("canonical graph source missing".into()))?;
+        if current.status != MemoryStatus::Active
+            || crate::runtime::graphify::source_fingerprint(&current)?
+                != crate::runtime::graphify::source_fingerprint(record)?
+        {
+            return Err(CoreError::Conflict("canonical graph source changed".into()));
+        }
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        if self
+            .lifecycle_leases
+            .get(&(
+                record.tenant_id.clone(),
+                format!("privacy/{}", record.user_id),
+            ))
+            .is_some_and(|(_, until)| *until > now)
+        {
+            return Err(CoreError::Conflict("source lifecycle is leased".into()));
+        }
+        self.remove_graph_source(record);
+        for node in nodes {
+            self.merge_node(node.clone())?;
+        }
+        for edge in edges {
+            self.merge_edge(edge.clone())?;
+        }
+        if !replayed {
+            self.audit_events.push(audit.clone());
+        }
+        Ok(vec![
+            "test_graph:source:replaced".into(),
+            "test_audit".into(),
+        ])
+    }
     fn upsert_memory(&mut self, record: MemoryRecord) -> CoreResult<()> {
         record.validate()?;
+        if record.status == MemoryStatus::Active
+            && (self.memories.iter().any(|r| {
+                r.tenant_id == record.tenant_id
+                    && r.user_id == record.user_id
+                    && r.id == record.id
+                    && r.status != MemoryStatus::Active
+            }) || record.source_message_ids.iter().any(|source| {
+                self.lifecycle_state.contains_key(&(
+                    record.tenant_id.clone(),
+                    format!("forgotten-source/{}/{}", record.user_id, source),
+                ))
+            }))
+        {
+            return Err(CoreError::Conflict(
+                "forgotten memory/source cannot be resurrected".into(),
+            ));
+        }
         if self.memories.iter().any(|memory| {
             memory.id == record.id
-                && (memory.tenant_id != record.tenant_id || memory.user_id != record.user_id)
+                && memory.tenant_id == record.tenant_id
+                && memory.user_id != record.user_id
         }) {
             return Err(CoreError::Conflict(
                 "memory id is already in use by a different tenant/user scope".to_string(),
             ));
         }
+        self.remove_graph_source(&record);
         if let Some(existing) = self.memories.iter_mut().find(|memory| {
             memory.id == record.id
                 && memory.tenant_id == record.tenant_id
@@ -144,7 +272,26 @@ impl MemoryIndexStore for TestMemoryStore {
             .find(|memory| {
                 memory.tenant_id == tenant_id && memory.user_id == user_id && memory.id == id
             })
-            .cloned())
+            .map(|record| self.protect_record(record.clone())))
+    }
+
+    fn get_active_memories(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        ids: &[&str],
+    ) -> CoreResult<Vec<MemoryRecord>> {
+        Ok(self
+            .memories
+            .iter()
+            .filter(|memory| {
+                memory.tenant_id == tenant_id
+                    && memory.user_id == user_id
+                    && ids.contains(&memory.id.as_str())
+            })
+            .map(|record| self.protect_record(record.clone()))
+            .filter(|record| record.status == MemoryStatus::Active)
+            .collect())
     }
 
     fn list_memories(
@@ -160,21 +307,31 @@ impl MemoryIndexStore for TestMemoryStore {
             .filter(|memory| memory.tenant_id == tenant_id)
             .filter(|memory| memory.user_id == user_id)
             .filter(|memory| privacy_scope.contains(&memory.privacy_level))
+            .map(|record| self.protect_record(record.clone()))
             .filter(|memory| include_inactive || memory.status == MemoryStatus::Active)
-            .cloned()
             .collect())
     }
 
     fn update_memory(&mut self, record: MemoryRecord) -> CoreResult<()> {
-        if let Some(existing) = self.memories.iter_mut().find(|memory| {
-            memory.tenant_id == record.tenant_id
-                && memory.user_id == record.user_id
-                && memory.id == record.id
-        }) {
-            *existing = record;
-            return Ok(());
+        if self
+            .get_memory(&record.tenant_id, &record.user_id, &record.id)?
+            .is_none()
+        {
+            return Err(CoreError::NotFound("memory record not found".to_string()));
         }
-        Err(CoreError::NotFound("memory record not found".to_string()))
+        self.upsert_memory(record)
+    }
+
+    fn record_accesses(&mut self, tenant_id: &str, user_id: &str, ids: &[&str]) -> CoreResult<()> {
+        for record in self.memories.iter_mut().filter(|record| {
+            record.tenant_id == tenant_id
+                && record.user_id == user_id
+                && record.status == MemoryStatus::Active
+                && ids.contains(&record.id.as_str())
+        }) {
+            record.mark_accessed();
+        }
+        Ok(())
     }
 
     fn count_memories(
@@ -222,6 +379,7 @@ impl MemoryIndexStore for TestMemoryStore {
 
 impl GraphStore for TestMemoryStore {
     fn merge_node(&mut self, node: GraphNode) -> CoreResult<()> {
+        crate::graph::validate_node(&node)?;
         if !self.graph_nodes.iter().any(|existing| {
             existing.tenant_id == node.tenant_id
                 && existing.user_id == node.user_id
@@ -234,8 +392,10 @@ impl GraphStore for TestMemoryStore {
     }
 
     fn merge_edge(&mut self, edge: GraphEdge) -> CoreResult<()> {
+        crate::graph::validate_edge(&edge)?;
         if let Some(existing) = self.graph_edges.iter_mut().find(|existing| {
-            existing.user_id == edge.user_id
+            existing.tenant_id == edge.tenant_id
+                && existing.user_id == edge.user_id
                 && existing.from_key == edge.from_key
                 && existing.relationship_type == edge.relationship_type
                 && existing.to_key == edge.to_key
@@ -261,6 +421,11 @@ impl GraphStore for TestMemoryStore {
         max_hops: u8,
         privacy_scope: &[PrivacyLevel],
     ) -> CoreResult<Vec<String>> {
+        if max_hops > 10 {
+            return Err(CoreError::InvalidInput(
+                "graph traversal exceeds 10 hops".into(),
+            ));
+        }
         let normalized = query.trim().to_lowercase();
         if normalized.is_empty() {
             return Ok(Vec::new());
@@ -270,6 +435,7 @@ impl GraphStore for TestMemoryStore {
             .iter()
             .filter(|m| m.tenant_id == tenant_id && m.user_id == user_id)
             .filter(|m| privacy_scope.contains(&m.privacy_level))
+            .filter(|m| self.protect_record((*m).clone()).status == MemoryStatus::Active)
             .map(|m| m.id.clone())
             .collect();
 
@@ -330,18 +496,29 @@ impl GraphStore for TestMemoryStore {
 
 impl AuditSink for TestMemoryStore {
     fn emit_audit(&mut self, event: AuditEvent) -> CoreResult<()> {
-        self.audit_events.push(event);
+        if !self.audit_replayed(&event)? {
+            self.audit_events.push(event);
+        }
         Ok(())
     }
 }
 
 impl SessionStore for TestMemoryStore {
+    fn hot_tail_status(&self, t: &str, u: &str, s: &str) -> CoreResult<(usize, Vec<String>)> {
+        Ok((self.session_tail(t, u, s, 20)?.len(), Vec::new()))
+    }
     fn append_session_message(&mut self, message: SessionMessage) -> CoreResult<()> {
-        if self
-            .session_messages
-            .iter()
-            .any(|existing| existing.idempotency_key == message.idempotency_key)
-        {
+        if let Some(existing) = self.session_messages.iter().find(|existing| {
+            existing.tenant_id == message.tenant_id
+                && existing.user_id == message.user_id
+                && existing.session_id == message.session_id
+                && existing.idempotency_key == message.idempotency_key
+        }) {
+            if existing.content != message.content || existing.role != message.role {
+                return Err(CoreError::Conflict(
+                    "session idempotency key reused for different message".into(),
+                ));
+            }
             return Ok(());
         }
         self.session_messages.push(message);
@@ -402,22 +579,21 @@ impl ReminderStore for TestMemoryStore {
         user_id: &str,
         due_at_or_before: &str,
     ) -> CoreResult<Vec<ReminderRecord>> {
-        Ok(self
+        let cutoff = crate::runtime::lifecycle::timestamp_nanos(due_at_or_before)?;
+        let mut due = Vec::new();
+        for reminder in self
             .reminders
             .iter()
-            .filter(|reminder| reminder.tenant_id == tenant_id)
-            .filter(|reminder| reminder.user_id == user_id)
-            .filter(|reminder| {
-                let effective = reminder
-                    .next_attempt_at
-                    .as_deref()
-                    .unwrap_or(&reminder.due_at);
-                let effective_ts = effective.parse::<u64>().unwrap_or(0);
-                let cutoff = due_at_or_before.parse::<u64>().unwrap_or(u64::MAX);
-                effective_ts <= cutoff
-            })
-            .filter(|reminder| reminder.is_due_visible())
-            .cloned()
-            .collect())
+            .filter(|r| r.tenant_id == tenant_id && r.user_id == user_id && r.is_due_visible())
+        {
+            let effective = reminder
+                .next_attempt_at
+                .as_deref()
+                .unwrap_or(&reminder.due_at);
+            if crate::runtime::lifecycle::timestamp_nanos(effective)? <= cutoff {
+                due.push(reminder.clone());
+            }
+        }
+        Ok(due)
     }
 }

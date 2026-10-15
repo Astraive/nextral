@@ -3,6 +3,8 @@ name = "nextral-python"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT"
+description = "Native Python bridge for the Nextral memory runtime"
 
 [lib]
 name = "nextral_python"
@@ -10,4 +12,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nextral = { path = "../.." }
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
