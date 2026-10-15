@@ -145,41 +145,17 @@ impl QdrantPort for QdrantAdapter {
         collection: &str,
         request: &VectorSearchRequest,
     ) -> CoreResult<Vec<VectorSearchHit>> {
-        let mut must_filters = vec![
-            json!({ "key": "tenant_id", "match": { "value": request.scope.tenant_id }}),
-            json!({ "key": "user_id", "match": { "value": request.scope.user_id }}),
-            json!({ "key": "status", "match": { "value": "active" }}),
-        ];
-        if !request.privacy_scope.is_empty() {
-            let levels: Vec<String> = request
-                .privacy_scope
-                .iter()
-                .map(|level| {
-                    serde_json::to_value(level)
-                        .unwrap_or_default()
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string()
-                })
-                .filter(|s| !s.is_empty())
-                .collect();
-            if levels.len() == 1 {
-                must_filters
-                    .push(json!({ "key": "privacy_level", "match": { "value": levels[0] }}));
-            } else if levels.len() > 1 {
-                let should: Vec<Value> = levels
-                    .iter()
-                    .map(|level| json!({ "key": "privacy_level", "match": { "value": level }}))
-                    .collect();
-                must_filters.push(json!({ "should": should, "min_should": { "min_count": 1 }}));
-            }
-        }
         let payload = json!({
             "vector": request.query_vector,
             "limit": request.top_k,
             "with_payload": true,
             "filter": {
-                "must": must_filters
+                "must": [
+                    { "key": "tenant_id", "match": { "value": request.scope.tenant_id }},
+                    { "key": "user_id", "match": { "value": request.scope.user_id }},
+                    { "key": "status", "match": { "value": "active" }},
+                    { "key": "privacy_level", "match": { "any": request.privacy_scope }},
+                ]
             }
         });
         let response = maybe_add_bearer_auth(

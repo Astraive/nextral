@@ -50,11 +50,32 @@ pub fn forget_memory(
             Some(request.memory_id.clone()),
         ));
     }
-    receipts.push(StoreReceipt::ok(
-        "pending_async",
-        "propagate_to_external_stores",
-        Some(request.memory_id),
-    ));
+    receipts.extend([
+        StoreReceipt {
+            backend: "qdrant".to_string(),
+            operation: "delete_point".to_string(),
+            target_id: Some(request.memory_id.clone()),
+            status: "not_implemented".to_string(),
+        },
+        StoreReceipt {
+            backend: "neo4j".to_string(),
+            operation: "redact_edges".to_string(),
+            target_id: Some(request.memory_id.clone()),
+            status: "not_implemented".to_string(),
+        },
+        StoreReceipt {
+            backend: "redis".to_string(),
+            operation: "invalidate_cache".to_string(),
+            target_id: Some(request.memory_id.clone()),
+            status: "not_implemented".to_string(),
+        },
+        StoreReceipt {
+            backend: "s3".to_string(),
+            operation: "append_tombstone_manifest".to_string(),
+            target_id: Some(request.memory_id),
+            status: "not_implemented".to_string(),
+        },
+    ]);
     Ok(ForgetMemoryResponse {
         transition,
         redaction_transition,

@@ -42,6 +42,9 @@ if (-not $SkipStart) {
     Run docker @($compose + @("up", "-d"))
 }
 
+$startedStack = -not $SkipStart
+
+try {
 Wait-Until "postgres" {
     Run docker @($compose + @("exec", "-T", "postgres", "pg_isready", "-U", "nextral", "-d", "nextral"))
 }
@@ -218,7 +221,12 @@ Run cargo @("run", "-p", "nextral-cli", "--", "adapters", "smoke", $adapterSmoke
 Run node @("-e", "const n=require('./bindings/node/index.js'); const r=JSON.parse(n.e2ESmoke()); if(r.status !== 'ok') process.exit(1); console.log(JSON.stringify(r));")
 
 Write-Host "Docker E2E passed: all seven memory systems covered across PostgreSQL, Redis, Qdrant, Neo4j, MinIO/S3, CLI, and Node."
-
-if (-not $KeepRunning) {
-    Write-Host "Stack left running for inspection. Use 'docker compose -f docker-compose.integration.yml down' when done, or pass -KeepRunning explicitly for the same behavior."
+}
+finally {
+    if ($startedStack -and -not $KeepRunning) {
+        Write-Host "Stopping integration stack"
+        Run docker @($compose + @("down"))
+    } elseif ($startedStack) {
+        Write-Host "Stack left running for inspection because -KeepRunning was set."
+    }
 }

@@ -70,6 +70,7 @@ mod tests {
         },
         store::{GraphStore, MemoryIndexStore, ReminderStore, SessionStore, TestMemoryStore},
         topology::{all_profiles, requires_store, StoreRole},
+        CoreError,
     };
 
     #[tokio::test]
@@ -211,6 +212,48 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn ingest_rejects_cross_tenant_id_collision() {
+        let mut store = TestMemoryStore::new();
+        let policy = IngestionPolicy {
+            min_importance_score: 0.0,
+            min_confidence_score: 0.0,
+        };
+
+        let mut tenant_a = IngestMemoryRequest::new(
+            "tenant_a",
+            "usr_1",
+            "Tenant A fact",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+            policy.clone(),
+        );
+        tenant_a.id = Some("shared-id".to_string());
+        tenant_a.importance_score = 1.0;
+        assert_eq!(
+            ingest_memory(&mut store, tenant_a).unwrap().status,
+            IngestStatus::Accepted
+        );
+
+        let mut tenant_b = IngestMemoryRequest::new(
+            "tenant_b",
+            "usr_1",
+            "Tenant B overwrite attempt",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+            policy,
+        );
+        tenant_b.id = Some("shared-id".to_string());
+        tenant_b.importance_score = 1.0;
+
+        let error = ingest_memory(&mut store, tenant_b).unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)));
+        let original = store.get_memory("tenant_a", "usr_1", "shared-id").unwrap();
+        assert_eq!(original.unwrap().content, "Tenant A fact");
     }
 
     #[test]

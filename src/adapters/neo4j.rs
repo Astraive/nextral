@@ -29,7 +29,8 @@ impl Neo4jAdapter {
             .replace("bolt+s://", "https://")
             .replace("neo4j://", "http://")
             .replace("bolt://", "http://");
-        validate_transport_url(&http_url, is_tls).map_err(CoreError::InvalidInput)?;
+        validate_transport_url(&http_url, hardening.require_tls || is_tls)
+            .map_err(CoreError::InvalidInput)?;
         Ok(Self { url, hardening })
     }
 
@@ -48,11 +49,18 @@ impl Neo4jAdapter {
     fn http_url(&self) -> String {
         let url = self
             .url
+            .replace("neo4j+s://", "https://")
+            .replace("bolt+s://", "https://")
             .replace("neo4j://", "http://")
             .replace("bolt://", "http://");
-        // Neo4j HTTP API runs on port 7474, not bolt port 7687
+        // The HTTP API uses separate ports from Bolt.
         if let Some(stripped) = url.strip_suffix(":7687") {
-            format!("{}:7474", stripped)
+            let port = if url.starts_with("https://") {
+                7473
+            } else {
+                7474
+            };
+            format!("{stripped}:{port}")
         } else {
             url
         }
@@ -156,7 +164,7 @@ impl Neo4jPort for Neo4jAdapter {
         }
         let statement = format!(
             r#"
-            MATCH (n:NextralEntity {{user_id:$user_id}})
+            MATCH (n:NextralEntity {{tenant_id:$tenant_id, user_id:$user_id}})
             WHERE any(term in $query_entities WHERE toLower(n.name) CONTAINS toLower(term))
             MATCH p=(n)-[r:NEXTRAL_RELATES_TO*1..{}]-()
             UNWIND relationships(p) as rel
@@ -169,6 +177,7 @@ impl Neo4jPort for Neo4jAdapter {
         let body = self.cypher(
             &statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "query_entities": query_entities,
             }),
@@ -186,7 +195,7 @@ impl Neo4jPort for Neo4jAdapter {
 
     fn redact_memory_edges(&self, scope: &TenantUserScope, memory_id: &str) -> CoreResult<()> {
         let statement = r#"
-            MATCH ()-[r:NEXTRAL_RELATES_TO {user_id:$user_id}]-()
+            MATCH ()-[r:NEXTRAL_RELATES_TO {tenant_id:$tenant_id, user_id:$user_id}]-()
             WHERE any(id in r.source_memory_ids WHERE id = $memory_id)
             SET r.source_memory_ids = [id IN r.source_memory_ids WHERE id <> $memory_id]
             WITH r
@@ -196,6 +205,7 @@ impl Neo4jPort for Neo4jAdapter {
         self.cypher(
             statement,
             json!({
+                "tenant_id": scope.tenant_id,
                 "user_id": scope.user_id,
                 "memory_id": memory_id
             }),

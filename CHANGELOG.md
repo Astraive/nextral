@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
+
 ## 0.1.0
 
 - Added production package runtime contracts for all seven memory systems.

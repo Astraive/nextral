@@ -2,7 +2,7 @@
 -- Values such as retention windows, cache TTLs, model names, and service URLs live in runtime config.
 
 CREATE TABLE IF NOT EXISTS nextral_memories (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     session_id TEXT,
@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS nextral_memories (
     last_accessed_at TIMESTAMPTZ,
     access_count BIGINT NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
-    schema_version TEXT NOT NULL
+    schema_version TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nextral_memories_user_time
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS nextral_reminders (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    source_memory_id TEXT NOT NULL REFERENCES nextral_memories(id) ON DELETE CASCADE,
+    source_memory_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
     details TEXT NOT NULL DEFAULT '',
@@ -90,9 +91,11 @@ CREATE TABLE IF NOT EXISTS nextral_reminders (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
-    dedupe_key TEXT NOT NULL UNIQUE,
+    dedupe_key TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY (tenant_id, source_memory_id) REFERENCES nextral_memories(tenant_id, id),
+    UNIQUE (tenant_id, dedupe_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nextral_reminders_due
