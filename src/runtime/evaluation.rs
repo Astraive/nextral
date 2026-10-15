@@ -33,7 +33,10 @@ pub fn canary_replay_gate(report: &EvaluationReport) -> bool {
     canary_replay_gate_with_config(report, &CanaryGateConfig::default())
 }
 
-pub fn canary_replay_gate_with_config(report: &EvaluationReport, config: &CanaryGateConfig) -> bool {
+pub fn canary_replay_gate_with_config(
+    report: &EvaluationReport,
+    config: &CanaryGateConfig,
+) -> bool {
     report.destructive_events <= config.max_destructive_events
         && report.golden_recall_score >= config.min_golden_recall
         && report.contradiction_score >= config.min_contradiction_score

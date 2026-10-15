@@ -1,21 +1,30 @@
 use crate::contracts::{CoreError, CoreResult};
 use crate::{
-    adapters::{neo4j::Neo4jAdapter, postgres::PostgresAdapter, qdrant::QdrantAdapter, redis::RedisAdapter, s3::S3Adapter},
+    adapters::{
+        neo4j::Neo4jAdapter, postgres::PostgresAdapter, qdrant::QdrantAdapter, redis::RedisAdapter,
+        s3::S3Adapter,
+    },
     config::IngestionPolicy,
     ingestion::IngestMemoryRequest,
     memory::{ContentType, MemoryRecord, MemoryType, SourceType},
-    ports::{AuditWrite, CacheEntry, Neo4jPort, ObjectArchivePort, PostgresPort, QdrantPort, RedisPort, TenantUserScope, VectorSearchRequest},
+    ports::{
+        AuditWrite, CacheEntry, Neo4jPort, ObjectArchivePort, PostgresPort, QdrantPort, RedisPort,
+        TenantUserScope, VectorSearchRequest,
+    },
     retrieval::RetrievalRequest,
     runtime::{
         consolidation::{consolidate_session, ConsolidationLane, ConsolidationRequest},
+        evaluation::{canary_replay_gate, report_from_severity},
         governance::{forget_memory, ForgetMemoryRequest},
         intelligence::{
             classify_severity, decision_for, ExperimentRegistry, RuntimeLane, SafetyPolicy,
             Severity,
         },
-        evaluation::{canary_replay_gate, report_from_severity},
         reembed::plan_reembed,
-        reminders::{execute_due_reminders, schedule_reminder, ExecuteDueRemindersRequest, ScheduleReminderRequest},
+        reminders::{
+            execute_due_reminders, schedule_reminder, ExecuteDueRemindersRequest,
+            ScheduleReminderRequest,
+        },
         session::{append_session_message, assemble_working_context, AppendSessionMessageRequest},
     },
     store::TestMemoryStore,
@@ -134,7 +143,8 @@ struct IdempotencyEntry {
 }
 
 fn idempotency_store() -> &'static Mutex<std::collections::HashMap<String, IdempotencyEntry>> {
-    static INSTANCE: OnceLock<Mutex<std::collections::HashMap<String, IdempotencyEntry>>> = OnceLock::new();
+    static INSTANCE: OnceLock<Mutex<std::collections::HashMap<String, IdempotencyEntry>>> =
+        OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -142,7 +152,10 @@ fn evict_expired(store: &mut std::collections::HashMap<String, IdempotencyEntry>
     let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
     store.retain(|_, entry| entry.expires_at > now);
     if store.len() > IDEMPOTENCY_MAX_ENTRIES {
-        let mut entries: Vec<_> = store.iter().map(|(k, v)| (k.clone(), v.expires_at)).collect();
+        let mut entries: Vec<_> = store
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expires_at))
+            .collect();
         entries.sort_by_key(|(_, expires)| *expires);
         let to_remove = store.len() - IDEMPOTENCY_MAX_ENTRIES;
         for (key, _) in entries.into_iter().take(to_remove) {
@@ -155,17 +168,23 @@ fn check_idempotency(key: &str) -> Option<String> {
     let mut store = idempotency_store().lock().ok()?;
     evict_expired(&mut store);
     let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-    store.get(key).filter(|e| e.expires_at > now).map(|e| e.response.clone())
+    store
+        .get(key)
+        .filter(|e| e.expires_at > now)
+        .map(|e| e.response.clone())
 }
 
 fn store_idempotency(key: &str, response: &str) {
     if let Ok(mut store) = idempotency_store().lock() {
         evict_expired(&mut store);
         let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-        store.insert(key.to_string(), IdempotencyEntry {
-            response: response.to_string(),
-            expires_at: now.saturating_add(IDEMPOTENCY_TTL_SECONDS),
-        });
+        store.insert(
+            key.to_string(),
+            IdempotencyEntry {
+                response: response.to_string(),
+                expires_at: now.saturating_add(IDEMPOTENCY_TTL_SECONDS),
+            },
+        );
     }
 }
 
@@ -365,7 +384,11 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
         &request.memory_id,
         0.8,
     )?)?;
-    let related_ids = neo4j.related_memory_ids(&scope, std::slice::from_ref(&request.memory_id), request.graph_hops)?;
+    let related_ids = neo4j.related_memory_ids(
+        &scope,
+        std::slice::from_ref(&request.memory_id),
+        request.graph_hops,
+    )?;
     let archive_receipt = s3.put_object(&crate::ports::ArchiveObject {
         tenant_id: request.tenant_id.clone(),
         user_id: request.user_id.clone(),
@@ -410,8 +433,14 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
 const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 fn validate_tenant_user(payload: &serde_json::Value) -> Result<(), PackageError> {
-    let tenant_id = payload.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("");
-    let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+    let tenant_id = payload
+        .get("tenant_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let user_id = payload
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if tenant_id.trim().is_empty() || user_id.trim().is_empty() {
         return Err(PackageError {
             code: "invalid_input".into(),
@@ -431,7 +460,10 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
     if request_json.len() > MAX_PAYLOAD_BYTES {
         return Err(PackageError {
             code: "invalid_input".into(),
-            message: format!("request payload exceeds maximum {} bytes", MAX_PAYLOAD_BYTES),
+            message: format!(
+                "request payload exceeds maximum {} bytes",
+                MAX_PAYLOAD_BYTES
+            ),
         });
     }
     let request: McpCallRequest = serde_json::from_str(request_json).map_err(CoreError::from)?;
@@ -468,12 +500,18 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
         "nextral.memory.ingest" => {
             let payload: IngestMemoryRequest =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let idempotency_key = payload.id.clone().filter(|id| !id.is_empty()).map(|id| format!("ingest:{id}"));
+            let idempotency_key = payload
+                .id
+                .clone()
+                .filter(|id| !id.is_empty())
+                .map(|id| format!("ingest:{id}"));
             let mut store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
             if let Some(ref key) = idempotency_key {
-                let idem_store = idempotency_store().lock().map_err(|e| CoreError::Conflict(e.to_string()))?;
+                let idem_store = idempotency_store()
+                    .lock()
+                    .map_err(|e| CoreError::Conflict(e.to_string()))?;
                 let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
                 if let Some(entry) = idem_store.get(key) {
                     if entry.expires_at > now {
@@ -482,7 +520,9 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 }
                 drop(idem_store);
             }
-            let response = serde_json::to_string(&crate::ingestion::ingest_memory(&mut *store, payload)?).map_err(CoreError::from)?;
+            let response =
+                serde_json::to_string(&crate::ingestion::ingest_memory(&mut *store, payload)?)
+                    .map_err(CoreError::from)?;
             if let Some(key) = idempotency_key {
                 drop(store);
                 store_idempotency(&key, &response);
@@ -518,7 +558,9 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
             {
-                let idem_store = idempotency_store().lock().map_err(|e| CoreError::Conflict(e.to_string()))?;
+                let idem_store = idempotency_store()
+                    .lock()
+                    .map_err(|e| CoreError::Conflict(e.to_string()))?;
                 let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
                 if let Some(entry) = idem_store.get(&idempotency_key) {
                     if entry.expires_at > now {
@@ -526,7 +568,8 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                     }
                 }
             }
-            let response = serde_json::to_string(&forget_memory(&mut *store, payload)?).map_err(CoreError::from)?;
+            let response = serde_json::to_string(&forget_memory(&mut *store, payload)?)
+                .map_err(CoreError::from)?;
             drop(store);
             store_idempotency(&idempotency_key, &response);
             Ok(response)
@@ -537,7 +580,10 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             let mut store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            Ok(serde_json::to_string(&execute_due_reminders(&mut *store, payload)?).map_err(CoreError::from)?)
+            Ok(
+                serde_json::to_string(&execute_due_reminders(&mut *store, payload)?)
+                    .map_err(CoreError::from)?,
+            )
         }
         "experiments.create" => {
             let payload: ExperimentCreateRequest =
@@ -545,9 +591,10 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             let mut control = control_plane()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let experiment = control
-                .registry
-                .create(payload.lane, payload.policy_version, payload.description);
+            let experiment =
+                control
+                    .registry
+                    .create(payload.lane, payload.policy_version, payload.description);
             Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
         }
         "experiments.promote" => {
@@ -578,10 +625,7 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 .registry
                 .promote(&payload.experiment_id, payload.severity)
                 .ok_or_else(|| {
-                    CoreError::NotFound(format!(
-                        "experiment {} not found",
-                        payload.experiment_id
-                    ))
+                    CoreError::NotFound(format!("experiment {} not found", payload.experiment_id))
                 })?;
             Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
         }
@@ -595,10 +639,7 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 .registry
                 .rollback(&payload.experiment_id, &payload.reason)
                 .ok_or_else(|| {
-                    CoreError::NotFound(format!(
-                        "experiment {} not found",
-                        payload.experiment_id
-                    ))
+                    CoreError::NotFound(format!("experiment {} not found", payload.experiment_id))
                 })?;
             Ok(serde_json::to_string(&experiment).map_err(CoreError::from)?)
         }
@@ -651,7 +692,10 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 .into_iter()
                 .filter(|item| !matches!(item.source_path, crate::retrieval::SourcePath::Vector))
                 .collect();
-            Ok(serde_json::to_string(&serde_json::json!({ "items": graph_only })).map_err(CoreError::from)?)
+            Ok(
+                serde_json::to_string(&serde_json::json!({ "items": graph_only }))
+                    .map_err(CoreError::from)?,
+            )
         }
         "nextral.session.append" => {
             let payload: AppendSessionMessageRequest =
@@ -704,10 +748,9 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
         "nextral.graph.graphify" => {
             let payload: serde_json::Value =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let record: MemoryRecord = serde_json::from_value(
-                payload.get("record").cloned().unwrap_or_default(),
-            )
-            .map_err(CoreError::from)?;
+            let record: MemoryRecord =
+                serde_json::from_value(payload.get("record").cloned().unwrap_or_default())
+                    .map_err(CoreError::from)?;
             let hints: Vec<crate::graph::GraphHint> = serde_json::from_value(
                 payload
                     .get("hints")
@@ -729,61 +772,95 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|v| v.as_str())
-                        .filter_map(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok())
+                        .filter_map(|s| {
+                            serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+                        })
                         .collect()
                 })
-                .unwrap_or_else(|| vec![
-                    crate::memory::PrivacyLevel::Private,
-                    crate::memory::PrivacyLevel::Shared,
-                    crate::memory::PrivacyLevel::Sensitive,
-                ]);
+                .unwrap_or_else(|| {
+                    vec![
+                        crate::memory::PrivacyLevel::Private,
+                        crate::memory::PrivacyLevel::Shared,
+                        crate::memory::PrivacyLevel::Sensitive,
+                    ]
+                });
             let store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records = store.list_memories(
-                tenant_id,
-                user_id,
-                &privacy_scope,
-                include_inactive,
-            )?;
+            let records =
+                store.list_memories(tenant_id, user_id, &privacy_scope, include_inactive)?;
             Ok(serde_json::to_string(&records).map_err(CoreError::from)?)
         }
         "nextral.memory.update" => {
             let payload: serde_json::Value =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
-            let tenant_id = payload["tenant_id"].as_str().ok_or_else(|| CoreError::InvalidInput("tenant_id required".into()))?;
-            let user_id = payload["user_id"].as_str().ok_or_else(|| CoreError::InvalidInput("user_id required".into()))?;
-            let memory_id = payload["memory_id"].as_str().ok_or_else(|| CoreError::InvalidInput("memory_id required".into()))?;
+            let tenant_id = payload["tenant_id"]
+                .as_str()
+                .ok_or_else(|| CoreError::InvalidInput("tenant_id required".into()))?;
+            let user_id = payload["user_id"]
+                .as_str()
+                .ok_or_else(|| CoreError::InvalidInput("user_id required".into()))?;
+            let memory_id = payload["memory_id"]
+                .as_str()
+                .ok_or_else(|| CoreError::InvalidInput("memory_id required".into()))?;
             let mut store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let mut record = store.get_memory(tenant_id, user_id, memory_id)?
+            let mut record = store
+                .get_memory(tenant_id, user_id, memory_id)?
                 .ok_or_else(|| CoreError::NotFound("memory not found".into()))?;
             record.patch(
-                payload.get("content").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                payload.get("content_type").and_then(|v| v.as_str()).and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok()),
-                payload.get("importance_score").and_then(|v| v.as_f64()).map(|s| s as f32),
-                payload.get("confidence_score").map(|v| v.as_f64().map(|s| s as f32)),
-                payload.get("privacy_level").and_then(|v| v.as_str()).and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok()),
+                payload
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                payload
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| {
+                        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+                    }),
+                payload
+                    .get("importance_score")
+                    .and_then(|v| v.as_f64())
+                    .map(|s| s as f32),
+                payload
+                    .get("confidence_score")
+                    .map(|v| v.as_f64().map(|s| s as f32)),
+                payload
+                    .get("privacy_level")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| {
+                        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+                    }),
             )?;
             if let Some(add_tags) = payload.get("add_tags").and_then(|v| v.as_array()) {
                 for tag in add_tags {
-                    if let Some(t) = tag.as_str() { record.add_tag(t); }
+                    if let Some(t) = tag.as_str() {
+                        record.add_tag(t);
+                    }
                 }
             }
             if let Some(remove_tags) = payload.get("remove_tags").and_then(|v| v.as_array()) {
                 for tag in remove_tags {
-                    if let Some(t) = tag.as_str() { record.remove_tag(t); }
+                    if let Some(t) = tag.as_str() {
+                        record.remove_tag(t);
+                    }
                 }
             }
             if let Some(add_entities) = payload.get("add_entities").and_then(|v| v.as_array()) {
                 for entity in add_entities {
-                    if let Some(e) = entity.as_str() { record.add_entity(e); }
+                    if let Some(e) = entity.as_str() {
+                        record.add_entity(e);
+                    }
                 }
             }
-            if let Some(remove_entities) = payload.get("remove_entities").and_then(|v| v.as_array()) {
+            if let Some(remove_entities) = payload.get("remove_entities").and_then(|v| v.as_array())
+            {
                 for entity in remove_entities {
-                    if let Some(e) = entity.as_str() { record.remove_entity(e); }
+                    if let Some(e) = entity.as_str() {
+                        record.remove_entity(e);
+                    }
                 }
             }
             store.upsert_memory(record.clone())?;
@@ -801,16 +878,34 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             let all = store.count_memories(tenant_id, user_id, true)?;
             let entities = store.list_entities(tenant_id, user_id)?;
             let tags = store.list_tags(tenant_id, user_id)?;
-            let records = store.list_memories(tenant_id, user_id, &[crate::memory::PrivacyLevel::Private, crate::memory::PrivacyLevel::Shared, crate::memory::PrivacyLevel::Sensitive, crate::memory::PrivacyLevel::Restricted], true)?;
-            let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-            let mut by_content_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let records = store.list_memories(
+                tenant_id,
+                user_id,
+                &[
+                    crate::memory::PrivacyLevel::Private,
+                    crate::memory::PrivacyLevel::Shared,
+                    crate::memory::PrivacyLevel::Sensitive,
+                    crate::memory::PrivacyLevel::Restricted,
+                ],
+                true,
+            )?;
+            let mut by_type: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut by_content_type: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             let mut total_importance = 0.0f32;
             for r in &records {
                 *by_type.entry(format!("{:?}", r.memory_type)).or_insert(0) += 1;
-                *by_content_type.entry(format!("{:?}", r.content_type)).or_insert(0) += 1;
+                *by_content_type
+                    .entry(format!("{:?}", r.content_type))
+                    .or_insert(0) += 1;
                 total_importance += r.importance_score;
             }
-            let avg_importance = if records.is_empty() { 0.0 } else { total_importance / records.len() as f32 };
+            let avg_importance = if records.is_empty() {
+                0.0
+            } else {
+                total_importance / records.len() as f32
+            };
             Ok(serde_json::json!({
                 "tenant_id": tenant_id,
                 "user_id": user_id,
@@ -821,7 +916,8 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
                 "avg_importance": avg_importance,
                 "by_memory_type": by_type,
                 "by_content_type": by_content_type,
-            }).to_string())
+            })
+            .to_string())
         }
         "nextral.memory.search_by_tag" => {
             let payload: serde_json::Value =
@@ -832,7 +928,16 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             let store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records = store.list_memories(tenant_id, user_id, &[crate::memory::PrivacyLevel::Private, crate::memory::PrivacyLevel::Shared, crate::memory::PrivacyLevel::Sensitive], false)?;
+            let records = store.list_memories(
+                tenant_id,
+                user_id,
+                &[
+                    crate::memory::PrivacyLevel::Private,
+                    crate::memory::PrivacyLevel::Shared,
+                    crate::memory::PrivacyLevel::Sensitive,
+                ],
+                false,
+            )?;
             let filtered: Vec<_> = records.into_iter().filter(|r| r.has_tag(tag)).collect();
             Ok(serde_json::to_string(&filtered).map_err(CoreError::from)?)
         }
@@ -845,13 +950,23 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             let store = shared_store()
                 .lock()
                 .map_err(|error| CoreError::Conflict(error.to_string()))?;
-            let records = store.list_memories(tenant_id, user_id, &[crate::memory::PrivacyLevel::Private, crate::memory::PrivacyLevel::Shared, crate::memory::PrivacyLevel::Sensitive], false)?;
-            let filtered: Vec<_> = records.into_iter().filter(|r| r.has_entity(entity)).collect();
+            let records = store.list_memories(
+                tenant_id,
+                user_id,
+                &[
+                    crate::memory::PrivacyLevel::Private,
+                    crate::memory::PrivacyLevel::Shared,
+                    crate::memory::PrivacyLevel::Sensitive,
+                ],
+                false,
+            )?;
+            let filtered: Vec<_> = records
+                .into_iter()
+                .filter(|r| r.has_entity(entity))
+                .collect();
             Ok(serde_json::to_string(&filtered).map_err(CoreError::from)?)
         }
-        "nextral.health" => {
-            Ok(serde_json::json!({"status": "ok", "version": "0.1.0"}).to_string())
-        }
+        "nextral.health" => Ok(serde_json::json!({"status": "ok", "version": "0.1.0"}).to_string()),
         "nextral.runtime.scored_search" => {
             let payload: RetrievalRequest =
                 serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
@@ -868,7 +983,11 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             if payload.items.len() > MAX_BATCH {
                 return Err(PackageError {
                     code: "invalid_input".into(),
-                    message: format!("batch size {} exceeds maximum {}", payload.items.len(), MAX_BATCH),
+                    message: format!(
+                        "batch size {} exceeds maximum {}",
+                        payload.items.len(),
+                        MAX_BATCH
+                    ),
                 });
             }
             if let Some(key) = &payload.idempotency_key {
@@ -916,7 +1035,11 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             if payload.queries.len() > MAX_BATCH {
                 return Err(PackageError {
                     code: "invalid_input".into(),
-                    message: format!("batch size {} exceeds maximum {}", payload.queries.len(), MAX_BATCH),
+                    message: format!(
+                        "batch size {} exceeds maximum {}",
+                        payload.queries.len(),
+                        MAX_BATCH
+                    ),
                 });
             }
             if let Some(key) = &payload.idempotency_key {
@@ -964,7 +1087,11 @@ pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
             if payload.items.len() > MAX_BATCH {
                 return Err(PackageError {
                     code: "invalid_input".into(),
-                    message: format!("batch size {} exceeds maximum {}", payload.items.len(), MAX_BATCH),
+                    message: format!(
+                        "batch size {} exceeds maximum {}",
+                        payload.items.len(),
+                        MAX_BATCH
+                    ),
                 });
             }
             if let Some(key) = &payload.idempotency_key {

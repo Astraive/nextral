@@ -324,10 +324,14 @@ impl MemoryRecord {
     ) -> CoreResult<()> {
         if let Some(c) = content {
             if c.trim().is_empty() {
-                return Err(CoreError::InvalidInput("content cannot be empty".to_string()));
+                return Err(CoreError::InvalidInput(
+                    "content cannot be empty".to_string(),
+                ));
             }
             if c.len() > 1_000_000 {
-                return Err(CoreError::InvalidInput("content must not exceed 1,000,000 characters".to_string()));
+                return Err(CoreError::InvalidInput(
+                    "content must not exceed 1,000,000 characters".to_string(),
+                ));
             }
             self.content = c;
         }
@@ -390,7 +394,10 @@ pub fn deterministic_id(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     let result = hasher.finalize();
-    format!("mem_{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap_or([0; 8])))
+    format!(
+        "mem_{:016x}",
+        u64::from_be_bytes(result[..8].try_into().unwrap_or([0; 8]))
+    )
 }
 
 pub fn estimate_tokens(text: &str) -> u32 {

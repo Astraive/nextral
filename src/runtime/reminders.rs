@@ -133,8 +133,12 @@ pub fn execute_due_reminders(
 
     for mut reminder in due {
         let previous = reminder.status.clone();
-        if matches!(previous, ReminderStatus::Scheduled | ReminderStatus::RetryScheduled) {
-            let transition = reminder.transition(ReminderStatus::Due, &request.actor, "window reached")?;
+        if matches!(
+            previous,
+            ReminderStatus::Scheduled | ReminderStatus::RetryScheduled
+        ) {
+            let transition =
+                reminder.transition(ReminderStatus::Due, &request.actor, "window reached")?;
             receipts.push(StoreReceipt::ok(
                 "reminder_transition",
                 format!("{}_to_{}", transition.from, transition.to),
@@ -144,8 +148,11 @@ pub fn execute_due_reminders(
 
         let dispatch_success = !reminder.title.to_lowercase().contains("fail");
         if dispatch_success {
-            let t1 =
-                reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
+            let t1 = reminder.transition(
+                ReminderStatus::Dispatched,
+                &request.actor,
+                "dispatch start",
+            )?;
             let t2 = reminder.transition(
                 ReminderStatus::Completed,
                 &request.actor,
@@ -181,7 +188,8 @@ pub fn execute_due_reminders(
             continue;
         }
 
-        let t3 = reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
+        let t3 =
+            reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
         let t4 = reminder.transition(ReminderStatus::Failed, &request.actor, "dispatch failed")?;
         receipts.push(StoreReceipt::ok(
             "reminder_transition",
@@ -226,7 +234,8 @@ pub fn execute_due_reminders(
                 outcome_severity: Severity::Warning,
             });
         } else {
-            let t6 = reminder.transition(ReminderStatus::Expired, &request.actor, "retry exhausted")?;
+            let t6 =
+                reminder.transition(ReminderStatus::Expired, &request.actor, "retry exhausted")?;
             receipts.push(StoreReceipt::ok(
                 "reminder_transition",
                 format!("{}_to_{}", t6.from, t6.to),

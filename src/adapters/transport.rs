@@ -14,7 +14,11 @@ impl TransportHardeningProfile {
         Self::strict_with_timeouts(token_env, 2000, 4000)
     }
 
-    pub fn strict_with_timeouts(token_env: Option<&str>, connect_timeout_ms: u64, request_timeout_ms: u64) -> Self {
+    pub fn strict_with_timeouts(
+        token_env: Option<&str>,
+        connect_timeout_ms: u64,
+        request_timeout_ms: u64,
+    ) -> Self {
         Self {
             require_tls: true,
             connect_timeout_ms,
@@ -27,7 +31,11 @@ impl TransportHardeningProfile {
         Self::baseline_with_timeouts(token_env, 2000, 4000)
     }
 
-    pub fn baseline_with_timeouts(token_env: Option<&str>, connect_timeout_ms: u64, request_timeout_ms: u64) -> Self {
+    pub fn baseline_with_timeouts(
+        token_env: Option<&str>,
+        connect_timeout_ms: u64,
+        request_timeout_ms: u64,
+    ) -> Self {
         Self {
             require_tls: false,
             connect_timeout_ms,
@@ -37,10 +45,7 @@ impl TransportHardeningProfile {
     }
 }
 
-pub fn maybe_add_bearer_auth(
-    request: RequestBuilder,
-    token_env: Option<&str>,
-) -> RequestBuilder {
+pub fn maybe_add_bearer_auth(request: RequestBuilder, token_env: Option<&str>) -> RequestBuilder {
     if let Some(env_key) = token_env {
         if let Ok(value) = env::var(env_key) {
             if !value.trim().is_empty() {

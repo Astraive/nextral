@@ -1,6 +1,8 @@
 use crate::{
     contracts::CoreResult,
-    runtime::reminders::{execute_due_reminders, ExecuteDueRemindersRequest, ExecuteDueRemindersResponse},
+    runtime::reminders::{
+        execute_due_reminders, ExecuteDueRemindersRequest, ExecuteDueRemindersResponse,
+    },
     store::ReminderStore,
 };
 use std::sync::Arc;
@@ -93,7 +95,10 @@ where
         let _ = self.stop_tx.send(true);
     }
 
-    pub async fn tick_once(&self, due_at_or_before: &str) -> CoreResult<ExecuteDueRemindersResponse> {
+    pub async fn tick_once(
+        &self,
+        due_at_or_before: &str,
+    ) -> CoreResult<ExecuteDueRemindersResponse> {
         let mut guard = self.store.lock().await;
         execute_due_reminders(
             &mut *guard,

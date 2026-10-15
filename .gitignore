@@ -14,6 +14,5 @@ node_modules/
 *.whl
 *.tgz
 .maturin/
-/package-lock.json
 .agents
 .claude

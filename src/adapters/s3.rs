@@ -78,8 +78,8 @@ impl S3Adapter {
             )),
             self.hardening.token_env.as_deref(),
         )
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         Ok(serde_json::json!({
             "status": response.status().as_u16(),
             "bucket": self.bucket,
@@ -131,15 +131,15 @@ impl ObjectArchivePort for S3Adapter {
             self.hardening.token_env.as_deref(),
         )
         .body(object.bytes.clone())
-            .header("x-amz-meta-tenant-id", object.tenant_id.clone())
-            .header("x-amz-meta-user-id", object.user_id.clone())
-            .header(
-                "x-amz-meta-memory-id",
-                object.memory_id.clone().unwrap_or_default(),
-            )
-            .header("x-amz-meta-content-sha256", computed_sha256.clone())
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .header("x-amz-meta-tenant-id", object.tenant_id.clone())
+        .header("x-amz-meta-user-id", object.user_id.clone())
+        .header(
+            "x-amz-meta-memory-id",
+            object.memory_id.clone().unwrap_or_default(),
+        )
+        .header("x-amz-meta-content-sha256", computed_sha256.clone())
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 put_object failed: {}",
@@ -153,12 +153,7 @@ impl ObjectArchivePort for S3Adapter {
         })
     }
 
-    fn tombstone_object(
-        &self,
-        tenant_id: &str,
-        object_key: &str,
-        reason: &str,
-    ) -> CoreResult<()> {
+    fn tombstone_object(&self, tenant_id: &str, object_key: &str, reason: &str) -> CoreResult<()> {
         let expected_prefix = format!("tenants/{}/", tenant_id);
         if !object_key.starts_with(&expected_prefix) {
             return Err(CoreError::InvalidInput(format!(
@@ -181,8 +176,8 @@ impl ObjectArchivePort for S3Adapter {
         .header("x-amz-meta-original-key", object_key)
         .header("x-amz-meta-tombstone-at", crate::memory::now_timestamp())
         .body(reason.as_bytes().to_vec())
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "s3 tombstone_object failed: {}",

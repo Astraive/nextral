@@ -185,11 +185,9 @@ impl MemoryIndexStore for TestMemoryStore {
 
     fn list_entities(&self, tenant_id: &str, user_id: &str) -> CoreResult<Vec<String>> {
         let mut entities: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for memory in self
-            .memories
-            .iter()
-            .filter(|m| m.tenant_id == tenant_id && m.user_id == user_id && m.status == MemoryStatus::Active)
-        {
+        for memory in self.memories.iter().filter(|m| {
+            m.tenant_id == tenant_id && m.user_id == user_id && m.status == MemoryStatus::Active
+        }) {
             for entity in &memory.entities {
                 entities.insert(entity.clone());
             }
@@ -201,11 +199,9 @@ impl MemoryIndexStore for TestMemoryStore {
 
     fn list_tags(&self, tenant_id: &str, user_id: &str) -> CoreResult<Vec<String>> {
         let mut tags: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for memory in self
-            .memories
-            .iter()
-            .filter(|m| m.tenant_id == tenant_id && m.user_id == user_id && m.status == MemoryStatus::Active)
-        {
+        for memory in self.memories.iter().filter(|m| {
+            m.tenant_id == tenant_id && m.user_id == user_id && m.status == MemoryStatus::Active
+        }) {
             for tag in &memory.tags {
                 tags.insert(tag.clone());
             }

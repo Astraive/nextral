@@ -29,8 +29,7 @@ impl Neo4jAdapter {
             .replace("bolt+s://", "https://")
             .replace("neo4j://", "http://")
             .replace("bolt://", "http://");
-        validate_transport_url(&http_url, is_tls)
-            .map_err(CoreError::InvalidInput)?;
+        validate_transport_url(&http_url, is_tls).map_err(CoreError::InvalidInput)?;
         Ok(Self { url, hardening })
     }
 
@@ -47,7 +46,8 @@ impl Neo4jAdapter {
     }
 
     fn http_url(&self) -> String {
-        let url = self.url
+        let url = self
+            .url
             .replace("neo4j://", "http://")
             .replace("bolt://", "http://");
         // Neo4j HTTP API runs on port 7474, not bolt port 7687
@@ -79,8 +79,8 @@ impl Neo4jAdapter {
             self.hardening.token_env.as_deref(),
         )
         .json(&payload)
-            .send()
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+        .send()
+        .map_err(|error| CoreError::Io(error.to_string()))?;
         if !response.status().is_success() {
             return Err(CoreError::Io(format!(
                 "neo4j request failed: {}",

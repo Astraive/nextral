@@ -277,7 +277,12 @@ where
     for (record, semantic_similarity) in &vector_items {
         merged.insert(
             record.id.clone(),
-            item_from_record(record, SourcePath::Vector, *semantic_similarity, &scoring_weights),
+            item_from_record(
+                record,
+                SourcePath::Vector,
+                *semantic_similarity,
+                &scoring_weights,
+            ),
         );
     }
     for memory_id in &graph_ids {
@@ -352,7 +357,11 @@ where
             selected.len() as f32 / merged_candidates as f32
         },
         contradiction_rate,
-        if degraded_reasons.is_empty() { 0.9 } else { 0.5 },
+        if degraded_reasons.is_empty() {
+            0.9
+        } else {
+            0.5
+        },
     );
     let severity = classify_severity(
         quality.overall,
@@ -403,7 +412,9 @@ fn item_from_record(
     let access = (record.access_count as f32 / 10.0).min(1.0);
     // Calculate recency based on how recently the record was created
     // Decay factor: 1.0 for recent, decreasing over time (half-life ~30 days)
-    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(u64::MAX);
+    let now = crate::memory::now_timestamp()
+        .parse::<u64>()
+        .unwrap_or(u64::MAX);
     let created = record.created_at.parse::<u64>().unwrap_or(u64::MAX);
     let age_seconds = now.saturating_sub(created);
     let half_life_seconds = 30 * 24 * 60 * 60; // 30 days

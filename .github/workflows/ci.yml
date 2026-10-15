@@ -61,11 +61,9 @@ jobs:
         run: python -m maturin build
       - name: Install Python wheel (Linux)
         if: runner.os == 'Linux'
-        working-directory: bindings/python
         run: python -m pip install $(ls target/wheels/*.whl | head -1)
       - name: Install Python wheel (Windows)
         if: runner.os == 'Windows'
-        working-directory: bindings/python
         run: python -m pip install (Get-ChildItem target/wheels/*.whl | Select-Object -First 1).FullName
       - name: Python CLI help
         working-directory: bindings/python

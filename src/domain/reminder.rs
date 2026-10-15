@@ -115,9 +115,7 @@ impl ReminderRecord {
             ));
         }
         if timezone.trim().is_empty() {
-            return Err(CoreError::InvalidInput(
-                "timezone is required".to_string(),
-            ));
+            return Err(CoreError::InvalidInput("timezone is required".to_string()));
         }
         let kind_text = format!("{:?}", kind);
         let dedupe_key =

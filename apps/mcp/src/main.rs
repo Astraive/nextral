@@ -52,7 +52,10 @@ fn run() -> Result<(), String> {
         Some("smoke") => println!("{}", e2e_smoke_json().map_err(|error| error.message)?),
         Some("call") => {
             let request_json = env::args().nth(2).ok_or("missing MCP call request JSON")?;
-            println!("{}", mcp_call_json(&request_json).map_err(|error| error.message)?);
+            println!(
+                "{}",
+                mcp_call_json(&request_json).map_err(|error| error.message)?
+            );
         }
         _ => println!("usage: nextral-mcp tools | schema | smoke | call '<json>'"),
     }

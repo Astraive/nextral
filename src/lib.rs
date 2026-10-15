@@ -446,7 +446,11 @@ mod tests {
         )
         .unwrap();
         assert!(response.telemetry.vector_candidates >= 1);
-        assert!(response.telemetry.vector_ms < 10000, "vector search took too long: {}ms", response.telemetry.vector_ms);
+        assert!(
+            response.telemetry.vector_ms < 10000,
+            "vector search took too long: {}ms",
+            response.telemetry.vector_ms
+        );
         assert!(response.telemetry.token_utilization >= 0.0);
         assert!(response.telemetry.dedupe_ratio >= 0.0);
     }
@@ -559,46 +563,102 @@ mod tests {
 
     #[test]
     fn memory_record_validate_empty_id_fails() {
-        let record = MemoryRecord::new("", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_validate_empty_content_fails() {
-        let record = MemoryRecord::new("id", "t", "u", "  ", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "  ",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_validate_bad_importance_fails() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.importance_score = 1.5;
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_validate_bad_confidence_fails() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.confidence_score = Some(-0.1);
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_validate_wrong_schema_version_fails() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.schema_version = "999.0.0".to_string();
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_validate_working_non_realtime_fails() {
-        let record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Working, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Working,
+            SourceType::Manual,
+        );
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_record_mark_accessed_increments() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         assert_eq!(record.access_count, 0);
         assert!(record.last_accessed_at.is_none());
         record.mark_accessed();
@@ -608,11 +668,23 @@ mod tests {
 
     #[test]
     fn memory_record_redacted_clears_content() {
-        let mut record = MemoryRecord::new("id", "t", "u", "secret data", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "secret data",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.entities = vec!["entity".to_string()];
         record.tags = vec!["tag".to_string()];
-        record.transition(MemoryStatus::SoftDeleted, "actor", "reason").unwrap();
-        record.transition(MemoryStatus::Redacted, "actor", "reason").unwrap();
+        record
+            .transition(MemoryStatus::SoftDeleted, "actor", "reason")
+            .unwrap();
+        record
+            .transition(MemoryStatus::Redacted, "actor", "reason")
+            .unwrap();
         assert_eq!(record.content, "[redacted]");
         assert!(record.entities.is_empty());
         assert!(record.tags.is_empty());
@@ -620,52 +692,156 @@ mod tests {
 
     #[test]
     fn memory_record_invalid_transition_fails() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
-        assert!(record.transition(MemoryStatus::Redacted, "actor", "reason").is_err());
-        assert!(record.transition(MemoryStatus::Active, "actor", "reason").is_err());
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
+        assert!(record
+            .transition(MemoryStatus::Redacted, "actor", "reason")
+            .is_err());
+        assert!(record
+            .transition(MemoryStatus::Active, "actor", "reason")
+            .is_err());
     }
 
     // === DOMAIN: ReminderRecord ===
 
     #[test]
     fn reminder_new_validates_empty_fields() {
-        assert!(crate::prospective::ReminderRecord::new("", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").is_err());
-        assert!(crate::prospective::ReminderRecord::new("t", "", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").is_err());
-        assert!(crate::prospective::ReminderRecord::new("t", "u", "", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").is_err());
-        assert!(crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "", "100", "UTC").is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC"
+        )
+        .is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "t",
+            "",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC"
+        )
+        .is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC"
+        )
+        .is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "",
+            "100",
+            "UTC"
+        )
+        .is_err());
     }
 
     #[test]
     fn reminder_new_validates_due_at() {
-        assert!(crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "not_a_number", "UTC").is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "not_a_number",
+            "UTC"
+        )
+        .is_err());
     }
 
     #[test]
     fn reminder_new_validates_timezone() {
-        assert!(crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "").is_err());
+        assert!(crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            ""
+        )
+        .is_err());
     }
 
     #[test]
     fn reminder_transition_valid_paths() {
-        let mut r = crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").unwrap();
-        r.transition(crate::prospective::ReminderStatus::Due, "sys", "window").unwrap();
-        r.transition(crate::prospective::ReminderStatus::Dispatched, "sys", "start").unwrap();
-        r.transition(crate::prospective::ReminderStatus::Completed, "sys", "done").unwrap();
+        let mut r = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC",
+        )
+        .unwrap();
+        r.transition(crate::prospective::ReminderStatus::Due, "sys", "window")
+            .unwrap();
+        r.transition(
+            crate::prospective::ReminderStatus::Dispatched,
+            "sys",
+            "start",
+        )
+        .unwrap();
+        r.transition(crate::prospective::ReminderStatus::Completed, "sys", "done")
+            .unwrap();
     }
 
     #[test]
     fn reminder_transition_invalid_fails() {
-        let mut r = crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").unwrap();
-        assert!(r.transition(crate::prospective::ReminderStatus::Completed, "sys", "bad").is_err());
+        let mut r = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC",
+        )
+        .unwrap();
+        assert!(r
+            .transition(crate::prospective::ReminderStatus::Completed, "sys", "bad")
+            .is_err());
     }
 
     #[test]
     fn reminder_is_due_visible() {
-        let mut r = crate::prospective::ReminderRecord::new("t", "u", "mem", crate::prospective::ReminderKind::FollowUp, "title", "100", "UTC").unwrap();
+        let mut r = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem",
+            crate::prospective::ReminderKind::FollowUp,
+            "title",
+            "100",
+            "UTC",
+        )
+        .unwrap();
         assert!(r.is_due_visible());
-        r.transition(crate::prospective::ReminderStatus::Due, "sys", "w").unwrap();
+        r.transition(crate::prospective::ReminderStatus::Due, "sys", "w")
+            .unwrap();
         assert!(r.is_due_visible());
-        r.transition(crate::prospective::ReminderStatus::Dispatched, "sys", "s").unwrap();
+        r.transition(crate::prospective::ReminderStatus::Dispatched, "sys", "s")
+            .unwrap();
         assert!(!r.is_due_visible());
     }
 
@@ -680,12 +856,22 @@ mod tests {
     #[test]
     fn graph_edge_new_validates_confidence() {
         assert!(crate::graph::GraphEdge::new("t", "u", "a:X", "USES", "b:Y", 0.5, "mem1").is_ok());
-        assert!(crate::graph::GraphEdge::new("t", "u", "a:X", "USES", "b:Y", -0.1, "mem1").is_err());
+        assert!(
+            crate::graph::GraphEdge::new("t", "u", "a:X", "USES", "b:Y", -0.1, "mem1").is_err()
+        );
     }
 
     #[test]
     fn graphify_record_with_entities_and_hints() {
-        let mut record = MemoryRecord::new("id", "t", "u", "Atlas uses PostgreSQL", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "Atlas uses PostgreSQL",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.entities = vec!["Atlas".to_string(), "PostgreSQL".to_string()];
         let output = crate::graph::graphify_record(&record, &[]).unwrap();
         assert!(!output.nodes.is_empty());
@@ -694,7 +880,15 @@ mod tests {
 
     #[test]
     fn graphify_record_empty_entities() {
-        let record = MemoryRecord::new("id", "t", "u", "some content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "some content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         let output = crate::graph::graphify_record(&record, &[]).unwrap();
         assert!(output.nodes.is_empty());
         assert!(output.relationships.is_empty());
@@ -714,10 +908,38 @@ mod tests {
 
     #[test]
     fn procedural_policy_new_validates() {
-        assert!(crate::domain::policy::ProceduralPolicy::new("", "u", "n", "body", crate::memory::PrivacyLevel::Private).is_err());
-        assert!(crate::domain::policy::ProceduralPolicy::new("t", "", "n", "body", crate::memory::PrivacyLevel::Private).is_err());
-        assert!(crate::domain::policy::ProceduralPolicy::new("t", "u", "", "body", crate::memory::PrivacyLevel::Private).is_err());
-        assert!(crate::domain::policy::ProceduralPolicy::new("t", "u", "n", " ", crate::memory::PrivacyLevel::Private).is_err());
+        assert!(crate::domain::policy::ProceduralPolicy::new(
+            "",
+            "u",
+            "n",
+            "body",
+            crate::memory::PrivacyLevel::Private
+        )
+        .is_err());
+        assert!(crate::domain::policy::ProceduralPolicy::new(
+            "t",
+            "",
+            "n",
+            "body",
+            crate::memory::PrivacyLevel::Private
+        )
+        .is_err());
+        assert!(crate::domain::policy::ProceduralPolicy::new(
+            "t",
+            "u",
+            "",
+            "body",
+            crate::memory::PrivacyLevel::Private
+        )
+        .is_err());
+        assert!(crate::domain::policy::ProceduralPolicy::new(
+            "t",
+            "u",
+            "n",
+            " ",
+            crate::memory::PrivacyLevel::Private
+        )
+        .is_err());
     }
 
     // === SCORING ===
@@ -734,7 +956,10 @@ mod tests {
 
     #[test]
     fn lexical_score_full_match() {
-        assert_eq!(crate::scoring::lexical_score("hello world", "hello world"), 1.0);
+        assert_eq!(
+            crate::scoring::lexical_score("hello world", "hello world"),
+            1.0
+        );
     }
 
     #[test]
@@ -763,8 +988,24 @@ mod tests {
     #[test]
     fn rank_records_orders_by_score() {
         let records = vec![
-            MemoryRecord::new("1", "t", "u", "tokio runtime", ContentType::Note, MemoryType::Semantic, SourceType::Manual),
-            MemoryRecord::new("2", "t", "u", "graph traversal", ContentType::Note, MemoryType::Semantic, SourceType::Manual),
+            MemoryRecord::new(
+                "1",
+                "t",
+                "u",
+                "tokio runtime",
+                ContentType::Note,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ),
+            MemoryRecord::new(
+                "2",
+                "t",
+                "u",
+                "graph traversal",
+                ContentType::Note,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ),
         ];
         let ranked = crate::scoring::rank_records(&records, "tokio").unwrap();
         assert_eq!(ranked[0].id, "1");
@@ -969,15 +1210,21 @@ mod tests {
     fn transport_strict_requires_tls() {
         let profile = crate::adapters::transport::TransportHardeningProfile::strict(None);
         assert!(profile.require_tls);
-        assert!(crate::adapters::transport::validate_transport_url("https://example.com", true).is_ok());
-        assert!(crate::adapters::transport::validate_transport_url("http://example.com", true).is_err());
+        assert!(
+            crate::adapters::transport::validate_transport_url("https://example.com", true).is_ok()
+        );
+        assert!(
+            crate::adapters::transport::validate_transport_url("http://example.com", true).is_err()
+        );
     }
 
     #[test]
     fn transport_baseline_allows_http() {
         let profile = crate::adapters::transport::TransportHardeningProfile::baseline(None);
         assert!(!profile.require_tls);
-        assert!(crate::adapters::transport::validate_transport_url("http://example.com", false).is_ok());
+        assert!(
+            crate::adapters::transport::validate_transport_url("http://example.com", false).is_ok()
+        );
     }
 
     #[test]
@@ -985,7 +1232,8 @@ mod tests {
         std::env::set_var("NEXTRAL_TEST_TOKEN", "test_value_123");
         let client = reqwest::blocking::Client::new();
         let req = client.get("http://example.com");
-        let req = crate::adapters::transport::maybe_add_bearer_auth(req, Some("NEXTRAL_TEST_TOKEN"));
+        let req =
+            crate::adapters::transport::maybe_add_bearer_auth(req, Some("NEXTRAL_TEST_TOKEN"));
         let built = req.build().unwrap();
         assert!(built.headers().contains_key("authorization"));
         std::env::remove_var("NEXTRAL_TEST_TOKEN");
@@ -995,7 +1243,10 @@ mod tests {
     fn transport_bearer_auth_without_env() {
         let client = reqwest::blocking::Client::new();
         let req = client.get("http://example.com");
-        let req = crate::adapters::transport::maybe_add_bearer_auth(req, Some("NEXTRAL_NONEXISTENT_VAR_12345"));
+        let req = crate::adapters::transport::maybe_add_bearer_auth(
+            req,
+            Some("NEXTRAL_NONEXISTENT_VAR_12345"),
+        );
         let built = req.build().unwrap();
         assert!(!built.headers().contains_key("authorization"));
     }
@@ -1036,56 +1287,75 @@ mod tests {
 
     #[test]
     fn mcp_unknown_tool_returns_error() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "unknown.tool",
-            "payload_json": "{}"
-        }).to_string());
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "unknown.tool",
+                "payload_json": "{}"
+            })
+            .to_string(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn mcp_health_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.health",
-            "payload_json": "{}"
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.health",
+                "payload_json": "{}"
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["status"], "ok");
     }
 
     #[test]
     fn mcp_session_append_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.session.append",
-            "payload_json": serde_json::json!({
-                "tenant_id": "t", "user_id": "u", "session_id": "s",
-                "role": "user", "content": "hello", "idempotency_key": null
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.session.append",
+                "payload_json": serde_json::json!({
+                    "tenant_id": "t", "user_id": "u", "session_id": "s",
+                    "role": "user", "content": "hello", "idempotency_key": null
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v["message_id"].is_string());
     }
 
     #[test]
     fn mcp_session_context_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.session.context",
-            "payload_json": serde_json::json!({
-                "tenant_id": "t", "user_id": "u", "query_text": "test",
-                "entities": [], "token_budget": 1800,
-                "privacy_scope": ["private"], "top_k_vector": 12, "max_graph_hops": 2
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.session.context",
+                "payload_json": serde_json::json!({
+                    "tenant_id": "t", "user_id": "u", "query_text": "test",
+                    "entities": [], "token_budget": 1800,
+                    "privacy_scope": ["private"], "top_k_vector": 12, "max_graph_hops": 2
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v["retrieved_memory_ids"].is_array());
     }
 
     #[test]
     fn mcp_memory_list_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.list",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.list",
+                "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v.is_array());
     }
@@ -1102,28 +1372,64 @@ mod tests {
     #[test]
     fn store_update_memory_not_found() {
         let mut store = crate::store::TestMemoryStore::new();
-        let record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         assert!(store.update_memory(record).is_err());
     }
 
     #[test]
     fn store_list_memories_include_inactive() {
         let mut store = crate::store::TestMemoryStore::new();
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.status = MemoryStatus::SoftDeleted;
         store.upsert_memory(record).unwrap();
-        let active = store.list_memories("t", "u", &[PrivacyLevel::Private], false).unwrap();
+        let active = store
+            .list_memories("t", "u", &[PrivacyLevel::Private], false)
+            .unwrap();
         assert!(active.is_empty());
-        let all = store.list_memories("t", "u", &[PrivacyLevel::Private], true).unwrap();
+        let all = store
+            .list_memories("t", "u", &[PrivacyLevel::Private], true)
+            .unwrap();
         assert_eq!(all.len(), 1);
     }
 
     #[test]
     fn store_upsert_overwrites_existing() {
         let mut store = crate::store::TestMemoryStore::new();
-        let r1 = MemoryRecord::new("id", "t", "u", "old content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let r1 = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "old content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(r1).unwrap();
-        let r2 = MemoryRecord::new("id", "t", "u", "new content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let r2 = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "new content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(r2).unwrap();
         let loaded = store.get_memory("t", "u", "id").unwrap().unwrap();
         assert_eq!(loaded.content, "new content");
@@ -1132,7 +1438,9 @@ mod tests {
     #[test]
     fn store_graph_memory_ids_empty_query() {
         let store = crate::store::TestMemoryStore::new();
-        let ids = store.graph_memory_ids("t", "u", "", 2, &[PrivacyLevel::Private]).unwrap();
+        let ids = store
+            .graph_memory_ids("t", "u", "", 2, &[PrivacyLevel::Private])
+            .unwrap();
         assert!(ids.is_empty());
     }
 
@@ -1162,7 +1470,14 @@ mod tests {
     fn store_session_tail_limit() {
         let mut store = crate::store::TestMemoryStore::new();
         for i in 0..10 {
-            let msg = crate::domain::SessionMessage::new("t", "u", "s", "user", format!("msg {i}"), format!("key_{i}"));
+            let msg = crate::domain::SessionMessage::new(
+                "t",
+                "u",
+                "s",
+                "user",
+                format!("msg {i}"),
+                format!("key_{i}"),
+            );
             store.append_session_message(msg).unwrap();
         }
         let tail = store.session_tail("t", "u", "s", 3).unwrap();
@@ -1183,8 +1498,26 @@ mod tests {
     #[test]
     fn store_reminder_dedupe_key_conflict() {
         let mut store = crate::store::TestMemoryStore::new();
-        let r1 = crate::prospective::ReminderRecord::new("t", "u", "mem1", crate::prospective::ReminderKind::FollowUp, "title1", "100", "UTC").unwrap();
-        let r2 = crate::prospective::ReminderRecord::new("t", "u", "mem2", crate::prospective::ReminderKind::FollowUp, "title2", "200", "UTC").unwrap();
+        let r1 = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem1",
+            crate::prospective::ReminderKind::FollowUp,
+            "title1",
+            "100",
+            "UTC",
+        )
+        .unwrap();
+        let r2 = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem2",
+            crate::prospective::ReminderKind::FollowUp,
+            "title2",
+            "200",
+            "UTC",
+        )
+        .unwrap();
         // r1 and r2 have different dedupe keys since they have different inputs
         store.upsert_reminder(r1).unwrap();
         store.upsert_reminder(r2).unwrap();
@@ -1308,7 +1641,8 @@ mod tests {
     fn working_context_assembly_empty_session() {
         let mut store = crate::store::TestMemoryStore::new();
         let request = RetrievalRequest::test("t", "u", "query");
-        let ctx = crate::runtime::session::assemble_working_context(&mut store, request, 20).unwrap();
+        let ctx =
+            crate::runtime::session::assemble_working_context(&mut store, request, 20).unwrap();
         assert!(ctx.session_tail.is_empty());
     }
 
@@ -1324,7 +1658,10 @@ mod tests {
                 user_id: "u".to_string(),
                 session_id: "s".to_string(),
                 lane: crate::runtime::consolidation::ConsolidationLane::Fast,
-                policy: IngestionPolicy { min_importance_score: 0.0, min_confidence_score: 0.0 },
+                policy: IngestionPolicy {
+                    min_importance_score: 0.0,
+                    min_confidence_score: 0.0,
+                },
             },
         );
         assert!(result.is_err());
@@ -1368,7 +1705,15 @@ mod tests {
 
     #[test]
     fn topology_all_types_have_profiles() {
-        for mt in [MemoryType::Working, MemoryType::Session, MemoryType::Episodic, MemoryType::Semantic, MemoryType::Relational, MemoryType::Procedural, MemoryType::Prospective] {
+        for mt in [
+            MemoryType::Working,
+            MemoryType::Session,
+            MemoryType::Episodic,
+            MemoryType::Semantic,
+            MemoryType::Relational,
+            MemoryType::Procedural,
+            MemoryType::Prospective,
+        ] {
             let profile = crate::topology::profile(&mt);
             assert_eq!(profile.memory_type, mt);
         }
@@ -1487,18 +1832,22 @@ mod tests {
 
     #[test]
     fn mcp_batch_retrieve_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.batch.retrieve",
-            "payload_json": serde_json::json!({
-                "queries": [
-                    {
-                        "tenant_id": "t", "user_id": "u", "query_text": "test",
-                        "entities": [], "token_budget": 1800, "privacy_scope": ["private"],
-                        "top_k_vector": 12, "max_graph_hops": 2
-                    }
-                ]
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.batch.retrieve",
+                "payload_json": serde_json::json!({
+                    "queries": [
+                        {
+                            "tenant_id": "t", "user_id": "u", "query_text": "test",
+                            "entities": [], "token_budget": 1800, "privacy_scope": ["private"],
+                            "top_k_vector": 12, "max_graph_hops": 2
+                        }
+                    ]
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["total"], 1);
         assert_eq!(v["succeeded"], 1);
@@ -1506,15 +1855,19 @@ mod tests {
 
     #[test]
     fn mcp_batch_forget_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.batch.forget",
-            "payload_json": serde_json::json!({
-                "items": [{
-                    "tenant_id": "t", "user_id": "u", "memory_id": "nonexistent",
-                    "actor": "a", "reason": "test", "redact": false
-                }]
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.batch.forget",
+                "payload_json": serde_json::json!({
+                    "items": [{
+                        "tenant_id": "t", "user_id": "u", "memory_id": "nonexistent",
+                        "actor": "a", "reason": "test", "redact": false
+                    }]
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["total"], 1);
         assert_eq!(v["failed"], 1);
@@ -1565,10 +1918,19 @@ mod tests {
     #[test]
     fn working_context_populates_retrieved_ids() {
         let mut store = crate::store::TestMemoryStore::new();
-        let record = MemoryRecord::new("mem1", "t", "u", "Atlas uses PostgreSQL", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "mem1",
+            "t",
+            "u",
+            "Atlas uses PostgreSQL",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(record).unwrap();
         let request = RetrievalRequest::test("t", "u", "PostgreSQL");
-        let ctx = crate::runtime::session::assemble_working_context(&mut store, request, 20).unwrap();
+        let ctx =
+            crate::runtime::session::assemble_working_context(&mut store, request, 20).unwrap();
         assert!(!ctx.retrieved_memory_ids.is_empty());
     }
 
@@ -1577,16 +1939,28 @@ mod tests {
     #[test]
     fn forget_with_redact_clears_content() {
         let mut store = crate::store::TestMemoryStore::new();
-        let record = MemoryRecord::new("mem_forget", "t", "u", "secret data", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "mem_forget",
+            "t",
+            "u",
+            "secret data",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(record).unwrap();
-        let result = forget_memory(&mut store, ForgetMemoryRequest {
-            tenant_id: "t".to_string(),
-            user_id: "u".to_string(),
-            memory_id: "mem_forget".to_string(),
-            actor: "a".to_string(),
-            reason: "test".to_string(),
-            redact: true,
-        }).unwrap();
+        let result = forget_memory(
+            &mut store,
+            ForgetMemoryRequest {
+                tenant_id: "t".to_string(),
+                user_id: "u".to_string(),
+                memory_id: "mem_forget".to_string(),
+                actor: "a".to_string(),
+                reason: "test".to_string(),
+                redact: true,
+            },
+        )
+        .unwrap();
         assert!(result.redaction_transition.is_some());
         let loaded = store.get_memory("t", "u", "mem_forget").unwrap().unwrap();
         assert_eq!(loaded.content, "[redacted]");
@@ -1597,28 +1971,36 @@ mod tests {
     #[test]
     fn reminder_full_lifecycle_scheduled_to_completed() {
         let mut store = crate::store::TestMemoryStore::new();
-        let scheduled = schedule_reminder(&mut store, ScheduleReminderRequest {
-            tenant_id: "t".to_string(),
-            user_id: "u".to_string(),
-            source_memory_id: "mem".to_string(),
-            kind: crate::prospective::ReminderKind::FollowUp,
-            title: "Check migration".to_string(),
-            due_at: "9999999999".to_string(),
-            timezone: "UTC".to_string(),
-            trace_id: None,
-        }).unwrap();
+        let scheduled = schedule_reminder(
+            &mut store,
+            ScheduleReminderRequest {
+                tenant_id: "t".to_string(),
+                user_id: "u".to_string(),
+                source_memory_id: "mem".to_string(),
+                kind: crate::prospective::ReminderKind::FollowUp,
+                title: "Check migration".to_string(),
+                due_at: "9999999999".to_string(),
+                timezone: "UTC".to_string(),
+                trace_id: None,
+            },
+        )
+        .unwrap();
         assert_eq!(scheduled.reminder.status, ReminderStatus::Scheduled);
-        let due = execute_due_reminders(&mut store, ExecuteDueRemindersRequest {
-            tenant_id: "t".to_string(),
-            user_id: "u".to_string(),
-            due_at_or_before: "9999999999".to_string(),
-            actor: "system".to_string(),
-            retry_delay_seconds: 60,
-            max_retries: Some(3),
-            dispatch_policy_version: None,
-            retry_strategy_id: None,
-            trace_id: None,
-        }).unwrap();
+        let due = execute_due_reminders(
+            &mut store,
+            ExecuteDueRemindersRequest {
+                tenant_id: "t".to_string(),
+                user_id: "u".to_string(),
+                due_at_or_before: "9999999999".to_string(),
+                actor: "system".to_string(),
+                retry_delay_seconds: 60,
+                max_retries: Some(3),
+                dispatch_policy_version: None,
+                retry_strategy_id: None,
+                trace_id: None,
+            },
+        )
+        .unwrap();
         assert_eq!(due.results.len(), 1);
         assert_eq!(due.results[0].status, ReminderStatus::Completed);
     }
@@ -1717,7 +2099,15 @@ mod tests {
 
     #[test]
     fn memory_rejects_huge_content() {
-        let mut record = MemoryRecord::new("id", "t", "u", "x", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "x",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.content = "a".repeat(2_000_000);
         assert!(record.validate().is_err());
     }
@@ -1725,27 +2115,59 @@ mod tests {
     #[test]
     fn memory_rejects_long_id() {
         let long_id = "x".repeat(300);
-        let record = MemoryRecord::new(long_id, "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            long_id,
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_rejects_too_many_entities() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.entities = (0..2000).map(|i| format!("entity_{i}")).collect();
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_rejects_too_many_tags() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.tags = (0..2000).map(|i| format!("tag_{i}")).collect();
         assert!(record.validate().is_err());
     }
 
     #[test]
     fn memory_accepts_max_content() {
-        let mut record = MemoryRecord::new("id", "t", "u", "x", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "x",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.content = "a".repeat(1_000_000);
         assert!(record.validate().is_ok());
     }
@@ -1765,20 +2187,28 @@ mod tests {
 
     #[test]
     fn batch_retrieve_empty_queries() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.batch.retrieve",
-            "payload_json": serde_json::json!({"queries": []}).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.batch.retrieve",
+                "payload_json": serde_json::json!({"queries": []}).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["total"], 0);
     }
 
     #[test]
     fn batch_forget_empty_items() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.batch.forget",
-            "payload_json": serde_json::json!({"items": []}).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.batch.forget",
+                "payload_json": serde_json::json!({"items": []}).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["total"], 0);
     }
@@ -1787,30 +2217,38 @@ mod tests {
 
     #[test]
     fn ingest_idempotency_by_memory_id() {
-        let r1 = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.ingest",
-            "payload_json": serde_json::json!({
-                "id": "idem_test_1", "tenant_id": "t", "user_id": "u",
-                "content": "first content", "content_type": "note",
-                "memory_type": "semantic", "source_type": "manual",
-                "source_message_ids": [], "importance_score": 0.5,
-                "entities": [], "tags": [], "privacy_level": "private",
-                "graph_hints": [],
-                "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
-            }).to_string()
-        }).to_string()).unwrap();
-        let r2 = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.ingest",
-            "payload_json": serde_json::json!({
-                "id": "idem_test_1", "tenant_id": "t", "user_id": "u",
-                "content": "different content", "content_type": "note",
-                "memory_type": "semantic", "source_type": "manual",
-                "source_message_ids": [], "importance_score": 0.5,
-                "entities": [], "tags": [], "privacy_level": "private",
-                "graph_hints": [],
-                "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
-            }).to_string()
-        }).to_string()).unwrap();
+        let r1 = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.ingest",
+                "payload_json": serde_json::json!({
+                    "id": "idem_test_1", "tenant_id": "t", "user_id": "u",
+                    "content": "first content", "content_type": "note",
+                    "memory_type": "semantic", "source_type": "manual",
+                    "source_message_ids": [], "importance_score": 0.5,
+                    "entities": [], "tags": [], "privacy_level": "private",
+                    "graph_hints": [],
+                    "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let r2 = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.ingest",
+                "payload_json": serde_json::json!({
+                    "id": "idem_test_1", "tenant_id": "t", "user_id": "u",
+                    "content": "different content", "content_type": "note",
+                    "memory_type": "semantic", "source_type": "manual",
+                    "source_message_ids": [], "importance_score": 0.5,
+                    "entities": [], "tags": [], "privacy_level": "private",
+                    "graph_hints": [],
+                    "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v1: serde_json::Value = serde_json::from_str(&r1).unwrap();
         let v2: serde_json::Value = serde_json::from_str(&r2).unwrap();
         assert_eq!(v1["record_id"], v2["record_id"]);
@@ -1821,7 +2259,15 @@ mod tests {
     #[test]
     fn retrieval_with_zero_budget_returns_nothing() {
         let mut store = crate::store::TestMemoryStore::new();
-        let record = MemoryRecord::new("m1", "t", "u", "Atlas uses PostgreSQL", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "m1",
+            "t",
+            "u",
+            "Atlas uses PostgreSQL",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(record).unwrap();
         let mut req = RetrievalRequest::test("t", "u", "PostgreSQL");
         req.token_budget = 0;
@@ -1833,7 +2279,15 @@ mod tests {
     fn retrieval_with_large_top_k() {
         let mut store = crate::store::TestMemoryStore::new();
         for i in 0..5 {
-            let record = MemoryRecord::new(format!("m{i}"), "t", "u", format!("item {i} about PostgreSQL"), ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+            let record = MemoryRecord::new(
+                format!("m{i}"),
+                "t",
+                "u",
+                format!("item {i} about PostgreSQL"),
+                ContentType::Note,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            );
             store.upsert_memory(record).unwrap();
         }
         let mut req = RetrievalRequest::test("t", "u", "PostgreSQL");
@@ -1847,18 +2301,30 @@ mod tests {
     #[test]
     fn forget_redact_clears_entities_and_tags() {
         let mut store = crate::store::TestMemoryStore::new();
-        let mut record = MemoryRecord::new("mem_redact", "t", "u", "sensitive data", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "mem_redact",
+            "t",
+            "u",
+            "sensitive data",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.entities = vec!["entity1".to_string(), "entity2".to_string()];
         record.tags = vec!["tag1".to_string(), "tag2".to_string()];
         store.upsert_memory(record).unwrap();
-        forget_memory(&mut store, ForgetMemoryRequest {
-            tenant_id: "t".to_string(),
-            user_id: "u".to_string(),
-            memory_id: "mem_redact".to_string(),
-            actor: "a".to_string(),
-            reason: "gdpr".to_string(),
-            redact: true,
-        }).unwrap();
+        forget_memory(
+            &mut store,
+            ForgetMemoryRequest {
+                tenant_id: "t".to_string(),
+                user_id: "u".to_string(),
+                memory_id: "mem_redact".to_string(),
+                actor: "a".to_string(),
+                reason: "gdpr".to_string(),
+                redact: true,
+            },
+        )
+        .unwrap();
         let loaded = store.get_memory("t", "u", "mem_redact").unwrap().unwrap();
         assert_eq!(loaded.content, "[redacted]");
         assert!(loaded.entities.is_empty());
@@ -1869,16 +2335,28 @@ mod tests {
     #[test]
     fn forget_soft_delete_preserves_content() {
         let mut store = crate::store::TestMemoryStore::new();
-        let record = MemoryRecord::new("mem_soft", "t", "u", "keep this", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let record = MemoryRecord::new(
+            "mem_soft",
+            "t",
+            "u",
+            "keep this",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         store.upsert_memory(record).unwrap();
-        forget_memory(&mut store, ForgetMemoryRequest {
-            tenant_id: "t".to_string(),
-            user_id: "u".to_string(),
-            memory_id: "mem_soft".to_string(),
-            actor: "a".to_string(),
-            reason: "user request".to_string(),
-            redact: false,
-        }).unwrap();
+        forget_memory(
+            &mut store,
+            ForgetMemoryRequest {
+                tenant_id: "t".to_string(),
+                user_id: "u".to_string(),
+                memory_id: "mem_soft".to_string(),
+                actor: "a".to_string(),
+                reason: "user request".to_string(),
+                redact: false,
+            },
+        )
+        .unwrap();
         let loaded = store.get_memory("t", "u", "mem_soft").unwrap().unwrap();
         assert_eq!(loaded.content, "keep this");
         assert_eq!(loaded.status, MemoryStatus::SoftDeleted);
@@ -2034,8 +2512,26 @@ mod tests {
     #[test]
     fn reminder_numeric_timestamp_comparison() {
         let mut store = crate::store::TestMemoryStore::new();
-        let r1 = crate::prospective::ReminderRecord::new("t", "u", "mem1", crate::prospective::ReminderKind::FollowUp, "early", "100", "UTC").unwrap();
-        let r2 = crate::prospective::ReminderRecord::new("t", "u", "mem2", crate::prospective::ReminderKind::FollowUp, "late", "999", "UTC").unwrap();
+        let r1 = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem1",
+            crate::prospective::ReminderKind::FollowUp,
+            "early",
+            "100",
+            "UTC",
+        )
+        .unwrap();
+        let r2 = crate::prospective::ReminderRecord::new(
+            "t",
+            "u",
+            "mem2",
+            crate::prospective::ReminderKind::FollowUp,
+            "late",
+            "999",
+            "UTC",
+        )
+        .unwrap();
         store.upsert_reminder(r1).unwrap();
         store.upsert_reminder(r2).unwrap();
         let due_150 = store.list_due_reminders("t", "u", "150").unwrap();
@@ -2106,24 +2602,32 @@ mod tests {
 
     #[test]
     fn mcp_memory_list_default_privacy_scope() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.list",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.list",
+                "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v.is_array());
     }
 
     #[test]
     fn mcp_memory_list_with_custom_privacy_scope() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.list",
-            "payload_json": serde_json::json!({
-                "tenant_id": "t", "user_id": "u",
-                "privacy_scope": ["private"],
-                "include_inactive": true
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.list",
+                "payload_json": serde_json::json!({
+                    "tenant_id": "t", "user_id": "u",
+                    "privacy_scope": ["private"],
+                    "include_inactive": true
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v.is_array());
     }
@@ -2131,20 +2635,32 @@ mod tests {
     #[test]
     fn mcp_memory_list_include_inactive() {
         let mut store = crate::store::TestMemoryStore::new();
-        let mut record = MemoryRecord::new("mem_inactive", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "mem_inactive",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.status = MemoryStatus::SoftDeleted;
         store.upsert_memory(record).unwrap();
         {
             let mut shared = crate::package::shared_store().lock().unwrap();
             *shared = store;
         }
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.list",
-            "payload_json": serde_json::json!({
-                "tenant_id": "t", "user_id": "u",
-                "include_inactive": true
-            }).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.list",
+                "payload_json": serde_json::json!({
+                    "tenant_id": "t", "user_id": "u",
+                    "include_inactive": true
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(!v.as_array().unwrap().is_empty());
     }
@@ -2208,7 +2724,15 @@ mod tests {
 
     #[test]
     fn memory_add_remove_tag() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.add_tag("important");
         assert!(record.has_tag("important"));
         assert!(record.remove_tag("important"));
@@ -2218,7 +2742,15 @@ mod tests {
 
     #[test]
     fn memory_add_remove_entity() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.add_entity("PostgreSQL");
         assert!(record.has_entity("PostgreSQL"));
         assert!(record.remove_entity("PostgreSQL"));
@@ -2227,15 +2759,25 @@ mod tests {
 
     #[test]
     fn memory_patch_updates_fields() {
-        let mut record = MemoryRecord::new("id", "t", "u", "old content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "old content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         record.importance_score = 0.3;
-        record.patch(
-            Some("new content".to_string()),
-            Some(ContentType::Decision),
-            Some(0.9),
-            None,
-            None,
-        ).unwrap();
+        record
+            .patch(
+                Some("new content".to_string()),
+                Some(ContentType::Decision),
+                Some(0.9),
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(record.content, "new content");
         assert_eq!(record.content_type, ContentType::Decision);
         assert_eq!(record.importance_score, 0.9);
@@ -2243,8 +2785,18 @@ mod tests {
 
     #[test]
     fn memory_patch_rejects_empty_content() {
-        let mut record = MemoryRecord::new("id", "t", "u", "content", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
-        assert!(record.patch(Some("  ".to_string()), None, None, None, None).is_err());
+        let mut record = MemoryRecord::new(
+            "id",
+            "t",
+            "u",
+            "content",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
+        assert!(record
+            .patch(Some("  ".to_string()), None, None, None, None)
+            .is_err());
     }
 
     // === NEW FEATURES: ENTITY-BASED RETRIEVAL ===
@@ -2252,16 +2804,42 @@ mod tests {
     #[test]
     fn retrieval_with_entities_boosts_matches() {
         let mut store = crate::store::TestMemoryStore::new();
-        store.upsert_memory(MemoryRecord::new("entity_m1", "t", "u", "uses a database system", ContentType::Fact, MemoryType::Semantic, SourceType::Manual)).unwrap();
-        let mut r2 = MemoryRecord::new("entity_m2", "t", "u", "uses a different thing", ContentType::Fact, MemoryType::Semantic, SourceType::Manual);
+        store
+            .upsert_memory(MemoryRecord::new(
+                "entity_m1",
+                "t",
+                "u",
+                "uses a database system",
+                ContentType::Fact,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ))
+            .unwrap();
+        let mut r2 = MemoryRecord::new(
+            "entity_m2",
+            "t",
+            "u",
+            "uses a different thing",
+            ContentType::Fact,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         r2.entities = vec!["PostgreSQL".to_string()];
         store.upsert_memory(r2).unwrap();
         let mut req = RetrievalRequest::test("t", "u", "database");
         req.entities = vec!["PostgreSQL".to_string()];
         let response = retrieve(&mut store, req).unwrap();
         assert!(!response.items.is_empty());
-        let ids: Vec<&str> = response.items.iter().map(|i| i.memory_id.as_str()).collect();
-        assert!(ids.contains(&"entity_m2"), "entity-matched record should be in results, got {:?}", ids);
+        let ids: Vec<&str> = response
+            .items
+            .iter()
+            .map(|i| i.memory_id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"entity_m2"),
+            "entity-matched record should be in results, got {:?}",
+            ids
+        );
     }
 
     // === NEW FEATURES: STORE METHODS ===
@@ -2269,8 +2847,28 @@ mod tests {
     #[test]
     fn count_memories_works() {
         let mut store = crate::store::TestMemoryStore::new();
-        store.upsert_memory(MemoryRecord::new("m1", "t", "u", "c1", ContentType::Note, MemoryType::Semantic, SourceType::Manual)).unwrap();
-        store.upsert_memory(MemoryRecord::new("m2", "t", "u", "c2", ContentType::Note, MemoryType::Semantic, SourceType::Manual)).unwrap();
+        store
+            .upsert_memory(MemoryRecord::new(
+                "m1",
+                "t",
+                "u",
+                "c1",
+                ContentType::Note,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ))
+            .unwrap();
+        store
+            .upsert_memory(MemoryRecord::new(
+                "m2",
+                "t",
+                "u",
+                "c2",
+                ContentType::Note,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ))
+            .unwrap();
         assert_eq!(store.count_memories("t", "u", false).unwrap(), 2);
         assert_eq!(store.count_memories("t", "other", false).unwrap(), 0);
     }
@@ -2278,7 +2876,15 @@ mod tests {
     #[test]
     fn list_entities_and_tags() {
         let mut store = crate::store::TestMemoryStore::new();
-        let mut r = MemoryRecord::new("m1", "t", "u", "c", ContentType::Note, MemoryType::Semantic, SourceType::Manual);
+        let mut r = MemoryRecord::new(
+            "m1",
+            "t",
+            "u",
+            "c",
+            ContentType::Note,
+            MemoryType::Semantic,
+            SourceType::Manual,
+        );
         r.entities = vec!["Atlas".to_string(), "PostgreSQL".to_string()];
         r.tags = vec!["important".to_string(), "backend".to_string()];
         store.upsert_memory(r).unwrap();
@@ -2295,17 +2901,79 @@ mod tests {
     #[test]
     fn graph_max_hops_respected() {
         let mut store = crate::store::TestMemoryStore::new();
-        store.upsert_memory(MemoryRecord::new("m1", "t", "u", "Atlas uses PostgreSQL", ContentType::Fact, MemoryType::Semantic, SourceType::Manual)).unwrap();
-        store.upsert_memory(MemoryRecord::new("m2", "t", "u", "PostgreSQL uses Redis", ContentType::Fact, MemoryType::Semantic, SourceType::Manual)).unwrap();
-        store.merge_node(crate::graph::GraphNode::new("t", "u", "Entity", "Atlas", 0.8).unwrap()).unwrap();
-        store.merge_node(crate::graph::GraphNode::new("t", "u", "Entity", "PostgreSQL", 0.8).unwrap()).unwrap();
-        store.merge_node(crate::graph::GraphNode::new("t", "u", "Entity", "Redis", 0.8).unwrap()).unwrap();
-        store.merge_edge(crate::graph::GraphEdge::new("t", "u", "Entity:atlas", "USES", "Entity:postgresql", 0.9, "m1").unwrap()).unwrap();
-        store.merge_edge(crate::graph::GraphEdge::new("t", "u", "Entity:postgresql", "USES", "Entity:redis", 0.9, "m2").unwrap()).unwrap();
-        let hop1 = store.graph_memory_ids("t", "u", "Atlas", 1, &[PrivacyLevel::Private]).unwrap();
-        assert!(hop1.contains(&"m1".to_string()), "hop1 should contain m1, got {:?}", hop1);
+        store
+            .upsert_memory(MemoryRecord::new(
+                "m1",
+                "t",
+                "u",
+                "Atlas uses PostgreSQL",
+                ContentType::Fact,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ))
+            .unwrap();
+        store
+            .upsert_memory(MemoryRecord::new(
+                "m2",
+                "t",
+                "u",
+                "PostgreSQL uses Redis",
+                ContentType::Fact,
+                MemoryType::Semantic,
+                SourceType::Manual,
+            ))
+            .unwrap();
+        store
+            .merge_node(crate::graph::GraphNode::new("t", "u", "Entity", "Atlas", 0.8).unwrap())
+            .unwrap();
+        store
+            .merge_node(
+                crate::graph::GraphNode::new("t", "u", "Entity", "PostgreSQL", 0.8).unwrap(),
+            )
+            .unwrap();
+        store
+            .merge_node(crate::graph::GraphNode::new("t", "u", "Entity", "Redis", 0.8).unwrap())
+            .unwrap();
+        store
+            .merge_edge(
+                crate::graph::GraphEdge::new(
+                    "t",
+                    "u",
+                    "Entity:atlas",
+                    "USES",
+                    "Entity:postgresql",
+                    0.9,
+                    "m1",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .merge_edge(
+                crate::graph::GraphEdge::new(
+                    "t",
+                    "u",
+                    "Entity:postgresql",
+                    "USES",
+                    "Entity:redis",
+                    0.9,
+                    "m2",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let hop1 = store
+            .graph_memory_ids("t", "u", "Atlas", 1, &[PrivacyLevel::Private])
+            .unwrap();
+        assert!(
+            hop1.contains(&"m1".to_string()),
+            "hop1 should contain m1, got {:?}",
+            hop1
+        );
         assert!(!hop1.contains(&"m2".to_string()));
-        let hop2 = store.graph_memory_ids("t", "u", "Atlas", 2, &[PrivacyLevel::Private]).unwrap();
+        let hop2 = store
+            .graph_memory_ids("t", "u", "Atlas", 2, &[PrivacyLevel::Private])
+            .unwrap();
         assert!(hop2.contains(&"m1".to_string()));
         assert!(hop2.contains(&"m2".to_string()));
     }
@@ -2314,30 +2982,38 @@ mod tests {
 
     #[test]
     fn mcp_memory_update_tool() {
-        let ingest_result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.ingest",
-            "payload_json": serde_json::json!({
-                "id": "update_test_1", "tenant_id": "t", "user_id": "u",
-                "content": "original content", "content_type": "note",
-                "memory_type": "semantic", "source_type": "manual",
-                "source_message_ids": [], "importance_score": 0.5,
-                "entities": [], "tags": ["old_tag"], "privacy_level": "private",
-                "graph_hints": [],
-                "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
-            }).to_string()
-        }).to_string()).unwrap();
+        let ingest_result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.ingest",
+                "payload_json": serde_json::json!({
+                    "id": "update_test_1", "tenant_id": "t", "user_id": "u",
+                    "content": "original content", "content_type": "note",
+                    "memory_type": "semantic", "source_type": "manual",
+                    "source_message_ids": [], "importance_score": 0.5,
+                    "entities": [], "tags": ["old_tag"], "privacy_level": "private",
+                    "graph_hints": [],
+                    "policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0}
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(ingest_result.contains("accepted"));
 
-        let update_result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.update",
-            "payload_json": serde_json::json!({
-                "tenant_id": "t", "user_id": "u", "memory_id": "update_test_1",
-                "content": "updated content",
-                "importance_score": 0.9,
-                "add_tags": ["new_tag"],
-                "remove_tags": ["old_tag"]
-            }).to_string()
-        }).to_string()).unwrap();
+        let update_result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.update",
+                "payload_json": serde_json::json!({
+                    "tenant_id": "t", "user_id": "u", "memory_id": "update_test_1",
+                    "content": "updated content",
+                    "importance_score": 0.9,
+                    "add_tags": ["new_tag"],
+                    "remove_tags": ["old_tag"]
+                }).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&update_result).unwrap();
         assert_eq!(v["content"], "updated content");
         assert_eq!(v["importance_score"], 0.9);
@@ -2345,10 +3021,14 @@ mod tests {
 
     #[test]
     fn mcp_memory_stats_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.stats",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
-        }).to_string()).unwrap();
+        let result = crate::package::mcp_call_json(
+            &serde_json::json!({
+                "tool": "nextral.memory.stats",
+                "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
+            })
+            .to_string(),
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("active_count").is_some());
         assert!(v.get("entity_count").is_some());
@@ -2433,7 +3113,10 @@ mod tests {
             .get_memory("e2e_tenant", "e2e_user", &memory_id)
             .unwrap()
             .unwrap();
-        assert_eq!(record.content, "Atlas uses PostgreSQL for durable memory storage");
+        assert_eq!(
+            record.content,
+            "Atlas uses PostgreSQL for durable memory storage"
+        );
         assert_eq!(record.importance_score, 0.9);
         assert_eq!(record.entities, vec!["Atlas", "PostgreSQL"]);
         assert_eq!(record.tags, vec!["backend", "database"]);
@@ -2480,14 +3163,15 @@ mod tests {
         // === PHASE 5: UPDATE MEMORY ===
         record.add_tag("production");
         record.add_entity("Redis");
-        record.patch(
-            Some("Atlas uses PostgreSQL and Redis".to_string()),
-            None,
-            Some(0.95),
-            None,
-            None,
-        )
-        .unwrap();
+        record
+            .patch(
+                Some("Atlas uses PostgreSQL and Redis".to_string()),
+                None,
+                Some(0.95),
+                None,
+                None,
+            )
+            .unwrap();
         store.upsert_memory(record.clone()).unwrap();
 
         let updated = store
@@ -2501,17 +3185,14 @@ mod tests {
 
         // === PHASE 6: LIST MEMORIES ===
         let all_memories = store
-            .list_memories(
-                "e2e_tenant",
-                "e2e_user",
-                &[PrivacyLevel::Private],
-                false,
-            )
+            .list_memories("e2e_tenant", "e2e_user", &[PrivacyLevel::Private], false)
             .unwrap();
         assert_eq!(all_memories.len(), 1);
 
         // === PHASE 7: COUNT MEMORIES ===
-        let count = store.count_memories("e2e_tenant", "e2e_user", false).unwrap();
+        let count = store
+            .count_memories("e2e_tenant", "e2e_user", false)
+            .unwrap();
         assert_eq!(count, 1);
 
         // === PHASE 8: LIST ENTITIES AND TAGS ===
@@ -2578,12 +3259,8 @@ mod tests {
         // === PHASE 14: WORKING CONTEXT ASSEMBLY ===
         let mut ctx_request = RetrievalRequest::test("e2e_tenant", "e2e_user", "Atlas");
         ctx_request.session_id = Some("e2e_session".to_string());
-        let context = crate::runtime::session::assemble_working_context(
-            &mut store,
-            ctx_request,
-            20,
-        )
-        .unwrap();
+        let context =
+            crate::runtime::session::assemble_working_context(&mut store, ctx_request, 20).unwrap();
         assert!(!context.session_tail.is_empty());
         assert!(!context.retrieved_memory_ids.is_empty());
 
@@ -2621,10 +3298,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(due_result.results.len(), 1);
-        assert_eq!(
-            due_result.results[0].status,
-            ReminderStatus::Completed
-        );
+        assert_eq!(due_result.results[0].status, ReminderStatus::Completed);
 
         // === PHASE 17: CONSOLIDATION ===
         let consolidated = crate::runtime::consolidation::consolidate_session(
@@ -2727,8 +3401,12 @@ mod tests {
         assert!(redacted_record.tags.is_empty());
 
         // === PHASE 21: STATISTICS ===
-        let _active_count = store.count_memories("e2e_tenant", "e2e_user", false).unwrap();
-        let total_count = store.count_memories("e2e_tenant", "e2e_user", true).unwrap();
+        let _active_count = store
+            .count_memories("e2e_tenant", "e2e_user", false)
+            .unwrap();
+        let total_count = store
+            .count_memories("e2e_tenant", "e2e_user", true)
+            .unwrap();
         assert!(total_count >= 2);
 
         // === PHASE 22: MEMORY TYPE VALIDATION ===
@@ -2781,22 +3459,11 @@ mod tests {
         assert!(!reminder.is_due_visible());
 
         // === PHASE 24: GRAPH OPERATIONS ===
-        let n1 = crate::graph::GraphNode::new(
-            "e2e_tenant",
-            "e2e_user",
-            "Technology",
-            "PostgreSQL",
-            0.9,
-        )
-        .unwrap();
-        let n2 = crate::graph::GraphNode::new(
-            "e2e_tenant",
-            "e2e_user",
-            "Technology",
-            "Redis",
-            0.8,
-        )
-        .unwrap();
+        let n1 =
+            crate::graph::GraphNode::new("e2e_tenant", "e2e_user", "Technology", "PostgreSQL", 0.9)
+                .unwrap();
+        let n2 = crate::graph::GraphNode::new("e2e_tenant", "e2e_user", "Technology", "Redis", 0.8)
+            .unwrap();
         store.merge_node(n1).unwrap();
         store.merge_node(n2).unwrap();
         let edge = crate::graph::GraphEdge::new(
@@ -2822,7 +3489,9 @@ mod tests {
         assert!(bad_config.validate().is_err());
 
         // === FINAL: VERIFY STORE INTEGRITY ===
-        let final_count = store.count_memories("e2e_tenant", "e2e_user", true).unwrap();
+        let final_count = store
+            .count_memories("e2e_tenant", "e2e_user", true)
+            .unwrap();
         assert!(final_count >= 2);
 
         println!("E2E lifecycle test passed: 25 phases, all operations verified");

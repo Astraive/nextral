@@ -8,3 +8,4 @@ export declare function validateConfig(configJson: string): string
 export declare function e2ESmoke(): string
 export declare function reembedPlan(requestJson: string): string
 export declare function ingestRequestSchema(): string
+export declare function mcpCall(requestJson: string): string

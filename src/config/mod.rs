@@ -256,7 +256,12 @@ pub fn resolve_env_vars(input: &str) -> String {
                 if replacement.is_empty() || replacement == format!("${{{}}}", var_name) {
                     break;
                 }
-                result = format!("{}{}{}", &result[..start], replacement, &result[start + 2 + end + 1..]);
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    replacement,
+                    &result[start + 2 + end + 1..]
+                );
             }
             None => break,
         }
@@ -445,11 +450,15 @@ fn validate_stores(config: &StoreConfig) -> CoreResult<()> {
             }
         }
         // Check postgres uses sslmode in URL
-        if !config.postgres_url.contains("sslmode=require") && !config.postgres_url.starts_with("postgresql://") {
+        if !config.postgres_url.contains("sslmode=require")
+            && !config.postgres_url.starts_with("postgresql://")
+        {
             // Only warn-style check for postgres since it uses connection string params
         }
         // Check redis uses rediss:// for TLS
-        if !config.redis_url.starts_with("rediss://") && !config.redis_url.starts_with("redis+tls://") {
+        if !config.redis_url.starts_with("rediss://")
+            && !config.redis_url.starts_with("redis+tls://")
+        {
             return Err(CoreError::InvalidInput(
                 "stores.redis_url must use rediss:// or redis+tls:// when stores.enforce_tls is true".to_string(),
             ));

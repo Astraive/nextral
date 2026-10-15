@@ -28,16 +28,24 @@ impl ProceduralPolicy {
         let name = name.into();
         let body = body.into();
         if tenant_id.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput("tenant_id is required".to_string()));
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "tenant_id is required".to_string(),
+            ));
         }
         if user_id.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput("user_id is required".to_string()));
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "user_id is required".to_string(),
+            ));
         }
         if name.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput("name is required".to_string()));
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "name is required".to_string(),
+            ));
         }
         if body.trim().is_empty() {
-            return Err(crate::contracts::CoreError::InvalidInput("body cannot be empty".to_string()));
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "body cannot be empty".to_string(),
+            ));
         }
         let now = now_timestamp();
         Ok(Self {

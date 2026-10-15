@@ -40,14 +40,14 @@ impl RedisAdapter {
 
     fn redis_client(&self) -> CoreResult<&redis::Client> {
         self.client.get_or_init(|| {
-            redis::Client::open(self.url.as_str())
-                .expect("failed to create redis client")
+            redis::Client::open(self.url.as_str()).expect("failed to create redis client")
         });
         Ok(self.client.get().unwrap())
     }
 
     fn pool(&self) -> &Mutex<Vec<redis::Connection>> {
-        self.pool.get_or_init(|| Mutex::new(Vec::with_capacity(POOL_SIZE)))
+        self.pool
+            .get_or_init(|| Mutex::new(Vec::with_capacity(POOL_SIZE)))
     }
 
     fn connection(&self) -> CoreResult<redis::Connection> {

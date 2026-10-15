@@ -14,8 +14,8 @@ pub struct RuntimePolicy {
 
 impl Default for RuntimePolicy {
     fn default() -> Self {
-        use crate::memory::{MemoryType, PrivacyLevel};
         use crate::config::{IngestionPolicy, RetrievalPolicy, ScoringWeights};
+        use crate::memory::{MemoryType, PrivacyLevel};
         Self {
             ingestion: IngestionPolicy {
                 min_importance_score: 0.2,

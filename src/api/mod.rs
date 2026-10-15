@@ -60,13 +60,18 @@ pub fn startup_plan(config: &NextralConfig, mode: ServiceMode) -> CoreResult<Ser
     })
 }
 
-pub fn run_service_hosts(config: &NextralConfig, mode: ServiceMode) -> CoreResult<ServiceRuntimeReport> {
+pub fn run_service_hosts(
+    config: &NextralConfig,
+    mode: ServiceMode,
+) -> CoreResult<ServiceRuntimeReport> {
     let plan = startup_plan(config, mode)?;
 
     // Check readiness matrix before starting services
     let readiness = startup_readiness_matrix(config)?;
     if readiness.fail_fast {
-        let unavailable: Vec<&str> = readiness.backends.iter()
+        let unavailable: Vec<&str> = readiness
+            .backends
+            .iter()
             .filter(|b| b.status == "unavailable")
             .map(|b| b.backend.as_str())
             .collect();
@@ -218,7 +223,10 @@ fn handle_connection(stream: &mut TcpStream, mode: &str) -> std::io::Result<()> 
     let method = parts.first().unwrap_or(&"");
     let path = parts.get(1).unwrap_or(&"");
 
-    if !matches!(*method, "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS") {
+    if !matches!(
+        *method,
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+    ) {
         let error_body = serde_json::json!({"error": "method not allowed"}).to_string();
         let response = format!(
             "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -275,7 +283,12 @@ fn handle_connection(stream: &mut TcpStream, mode: &str) -> std::io::Result<()> 
     stream.write_all(response.as_bytes())
 }
 
-pub fn route_request(mode: &str, method: &str, path: &str, body: &str) -> ((u16, &'static str), String) {
+pub fn route_request(
+    mode: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> ((u16, &'static str), String) {
     let path = path.trim_end_matches('/');
     let result = match (method, path) {
         ("GET", "/health") | ("GET", "/v1/health") => {
@@ -333,6 +346,9 @@ pub fn route_request(mode: &str, method: &str, path: &str, body: &str) -> ((u16,
     };
     match result {
         Ok(body) => ((200, "OK"), body),
-        Err(error) => ((500, "Internal Server Error"), serde_json::json!({"error": error}).to_string()),
+        Err(error) => (
+            (500, "Internal Server Error"),
+            serde_json::json!({"error": error}).to_string(),
+        ),
     }
 }

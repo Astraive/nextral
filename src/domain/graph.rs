@@ -66,7 +66,13 @@ pub struct GraphifyOutput {
 }
 
 impl GraphNode {
-    pub fn new(tenant_id: &str, user_id: &str, label: &str, name: &str, confidence: f32) -> CoreResult<Self> {
+    pub fn new(
+        tenant_id: &str,
+        user_id: &str,
+        label: &str,
+        name: &str,
+        confidence: f32,
+    ) -> CoreResult<Self> {
         validate_score("confidence", confidence)?;
         let canonical_name = canonicalize(name);
         Ok(Self {
@@ -113,7 +119,13 @@ pub fn graphify_record(record: &MemoryRecord, hints: &[GraphHint]) -> CoreResult
     let mut contradictions = Vec::new();
     for entity in &record.entities {
         if !entity.trim().is_empty() {
-            nodes.push(GraphNode::new(&record.tenant_id, &record.user_id, infer_label(entity), entity, 0.8)?);
+            nodes.push(GraphNode::new(
+                &record.tenant_id,
+                &record.user_id,
+                infer_label(entity),
+                entity,
+                0.8,
+            )?);
         }
     }
 
@@ -179,7 +191,11 @@ pub fn merge_graph(store: &mut impl GraphStore, output: GraphifyOutput) -> CoreR
 }
 
 fn dedup_nodes(nodes: &mut Vec<GraphNode>) {
-    nodes.sort_by(|left, right| left.user_id.cmp(&right.user_id).then(left.key.cmp(&right.key)));
+    nodes.sort_by(|left, right| {
+        left.user_id
+            .cmp(&right.user_id)
+            .then(left.key.cmp(&right.key))
+    });
     nodes.dedup_by(|left, right| left.user_id == right.user_id && left.key == right.key);
 }
 
@@ -187,7 +203,13 @@ pub fn canonicalize(name: &str) -> String {
     name.trim().to_lowercase().replace(' ', "_")
 }
 
-pub fn connect(edges: &mut Vec<GraphEdge>, tenant_id: &str, user_id: &str, from: impl Into<String>, to: impl Into<String>) {
+pub fn connect(
+    edges: &mut Vec<GraphEdge>,
+    tenant_id: &str,
+    user_id: &str,
+    from: impl Into<String>,
+    to: impl Into<String>,
+) {
     let from = from.into();
     let to = to.into();
     if let Ok(edge) = GraphEdge::new(tenant_id, user_id, &from, "RELATED_TO", &to, 0.5, "legacy") {

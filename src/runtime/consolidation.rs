@@ -77,7 +77,11 @@ where
     ingest.importance_score = 1.0;
     ingest.confidence_score = Some(1.0);
     store.emit_audit(AuditEvent::new(
-        deterministic_id(&[&request.tenant_id, &request.session_id, "consolidation_queued"]),
+        deterministic_id(&[
+            &request.tenant_id,
+            &request.session_id,
+            "consolidation_queued",
+        ]),
         &request.tenant_id,
         "system",
         AuditAction::ConsolidationQueued,

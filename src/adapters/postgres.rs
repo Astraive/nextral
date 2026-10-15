@@ -42,7 +42,8 @@ impl PostgresAdapter {
     }
 
     fn pool(&self) -> &Mutex<Vec<Client>> {
-        self.pool.get_or_init(|| Mutex::new(Vec::with_capacity(POOL_SIZE)))
+        self.pool
+            .get_or_init(|| Mutex::new(Vec::with_capacity(POOL_SIZE)))
     }
 
     fn client(&self) -> CoreResult<Client> {
@@ -411,7 +412,11 @@ fn row_to_memory(row: Row) -> CoreResult<MemoryRecord> {
         embedding_model: row.get(12),
         embedding_dim: {
             let val: i32 = row.get(13);
-            if val >= 0 { Some(val as u32) } else { None }
+            if val >= 0 {
+                Some(val as u32)
+            } else {
+                None
+            }
         },
         extraction_provider: None,
         extraction_model: None,
@@ -430,7 +435,11 @@ fn row_to_memory(row: Row) -> CoreResult<MemoryRecord> {
         },
         access_count: {
             let val: i64 = row.get(20);
-            if val >= 0 { val as u64 } else { 0 }
+            if val >= 0 {
+                val as u64
+            } else {
+                0
+            }
         },
         status: from_text::<MemoryStatus>(row.get(21))?,
         schema_version: row.get(22),
