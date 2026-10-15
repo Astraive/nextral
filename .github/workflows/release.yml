@@ -1,0 +1,193 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Require matching version tag
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Guard all manifests and lockfile versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py versions --tag "$RELEASE_TAG"
+
+  checks:
+    name: Build and clean-install every release artifact
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  attest:
+    name: Attest verified release assets
+    needs: checks
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: artifacts/release
+      - name: Recheck tag and complete release bundle
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py artifacts artifacts/release --require-checksums --tag "$RELEASE_TAG"
+      - name: Generate GitHub artifact provenance
+        id: provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/release/*
+      - name: Retain portable provenance bundle
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: python -c "import os,pathlib,shutil; shutil.copy2(os.environ['PROVENANCE_BUNDLE'], pathlib.Path('artifacts/release/provenance.jsonl'))"
+      - name: Verify detached provenance for every payload and checksum manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py provenance artifacts/release --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: attested-release
+          path: artifacts/release/*
+          if-no-files-found: error
+
+  pypi:
+    name: Publish tested wheels to PyPI
+    needs: attest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nextral/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: attested-release
+          path: artifacts/release
+      - name: Require complete attested artifacts before publication
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py artifacts artifacts/release --require-checksums --require-provenance --tag "$RELEASE_TAG"
+      - name: Select only verified wheels
+        run: python -c "import pathlib,shutil; p=pathlib.Path('artifacts/pypi'); p.mkdir(parents=True); wheels=list(pathlib.Path('artifacts/release').glob('*.whl')); assert len(wheels)==5, wheels; [shutil.copy2(w,p/w.name) for w in wheels]"
+      - name: Publish using configured PyPI trusted publisher
+        # Configure Astraive/nextral, release.yml and environment pypi as a PyPI trusted publisher.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: artifacts/pypi/
+          attestations: true
+
+  npm:
+    name: Publish tested universal npm artifact
+    needs: attest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/nextral
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install npm with trusted-publishing support
+        run: npm install --global npm@11.6.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: attested-release
+          path: artifacts/release
+      - name: Require complete attested artifacts before publication
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py artifacts artifacts/release --require-checksums --require-provenance --tag "$RELEASE_TAG"
+      - name: Publish exact tested tarball with OIDC provenance
+        # Configure Astraive/nextral, release.yml and environment npm as the npm trusted publisher.
+        run: python -c "import pathlib,subprocess; files=list(pathlib.Path('artifacts/release').glob('*.tgz')); assert len(files)==1, files; subprocess.run(['npm','publish',str(files[0]),'--registry','https://registry.npmjs.org/','--access','public','--provenance'],check=True)"
+
+  crates:
+    name: Publish verified Rust crates in dependency order
+    needs: attest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/nextral
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../nextral-target
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: attested-release
+          path: artifacts/release
+      - name: Require explicitly configured crates.io credential
+        run: python -c "import os; assert os.environ.get('CARGO_REGISTRY_TOKEN'), 'Configure CARGO_REGISTRY_TOKEN in the crates-io environment with nextral and nextral-api publish permission'"
+      - name: Publish exact verified crate sources in dependency order
+        run: python scripts/verify-release.py crate-publish artifacts/release
+
+  github-release:
+    name: Publish checksummed GitHub release
+    needs: [attest, pypi, npm, crates]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: attested-release
+          path: artifacts/release
+      - name: Recheck complete attested release and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/verify-release.py artifacts artifacts/release --require-checksums --require-provenance --tag "$RELEASE_TAG"
+      - name: Create release with native libraries, wheels, npm tarball and Rust crates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python -c "import os,pathlib,subprocess; files=sorted(str(p) for p in pathlib.Path('artifacts/release').iterdir() if p.is_file()); subprocess.run(['gh','release','create',os.environ['RELEASE_TAG'],'--verify-tag','--generate-notes',*files],check=True)"
