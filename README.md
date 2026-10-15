@@ -1,264 +1,55 @@
 # Nextral
 
-**Nextral** is a package-first memory runtime for agents, LLM applications, and tool-driven systems.
+Nextral is a package-first memory runtime: a canonical Rust core with Python and Node.js bindings, a Rust CLI, MCP stdio, and optional HTTP, gRPC, and GraphQL hosts. It persists and retrieves host-supplied memory; it does not call LLM or embedding providers.
 
-It provides a canonical Rust core with Python and Node.js bindings, CLI tools, MCP support, and optional HTTP, gRPC, and GraphQL service surfaces. Nextral is designed to be embedded directly into applications or exposed as a service boundary when needed.
+## Start here
 
-## What Nextral does
+- [Installation](docs/getting-started/installation.md) and [quickstart](docs/getting-started/quickstart.md)
+- [Supported capabilities and packages](docs/package-production.md#supported-capabilities-and-packages)
+- [Configuration, security, and deployment](docs/package-production.md)
+- [CLI and MCP examples](docs/cli/README.md)
+- [Python API](bindings/python/README.md) and [Node.js API](bindings/node/README.md)
+- [Memory architecture](docs/memory/architecture.md) and [documentation index](docs/README.md)
 
-Nextral provides a production-ready memory layer for applications that need to store, retrieve, score, relate, and operate on long-lived memory.
+## Runtime boundaries
 
-It supports:
+Choose a backend explicitly: `production_stores` for PostgreSQL, Redis, Qdrant, Neo4j, and private S3-compatible storage, or `test_memory` for isolated, process-local tests. Configure the package programmatically or supply `NEXTRAL_CONFIG`; there is no implicit in-memory application backend.
 
-* Structured memory records
-* Semantic retrieval
-* Graph-based relationships
-* Reminder and session workflows
-* Runtime-neutral package APIs
-* CLI and MCP tool-call workflows
-* Optional HTTP, gRPC, and GraphQL APIs
-* Production storage adapters for real deployment environments
+The host supplies embeddings, query vectors, extracted entities/graph hints, consolidation candidates, and summaries. Provider configuration describes those inputs; it is not an SDK that invokes a model. PostgreSQL is authoritative for tenant/user-scoped canonical state. External indexes and archives have acknowledged receipts and durable recovery work, not a cross-store transaction.
 
-Nextral does **not** manage LLM providers directly. Host applications and agents provide embeddings, extraction outputs, and model-specific behavior. Nextral focuses on memory runtime, persistence, retrieval, graph operations, and tool access.
+Run schema migration with an owner role before starting applications. The runtime database role needs no DDL rights. Embedded packages, CLI, and stdio MCP are trusted host interfaces; network APIs verify JWT claims or accept a privileged service token. See the [trust boundaries](docs/package-production.md#authentication-and-trust-boundaries).
 
-## Architecture
+## Build from checkout
 
-```text
-nextral/
-├── src/                 # canonical Rust core and runtime modules
-├── bindings/
-│   ├── python/          # PyO3 bridge + Python wrappers
-│   └── node/            # napi-rs bridge + TypeScript wrappers
-├── apps/                # CLI, MCP, API, examples, and native consumers
-├── tests/
-├── docs/
-├── scripts/
-├── Cargo.toml
-├── package.json
-├── pyproject.toml
-└── README.md
-```
-
-The Rust core in `src/` is the source of truth. Language bindings expose the same runtime behavior to Python and Node.js without duplicating business logic.
-
-## Core principles
-
-* **Package-first:** Nextral is designed to be installed and used as a package.
-* **Runtime-neutral:** The same Rust core powers Python, Node.js, CLI, MCP, and service modes.
-* **LLM-agnostic:** Model providers are configured externally. Nextral does not hardcode model names, endpoints, dimensions, or provider-specific assumptions.
-* **Production-store ready:** PostgreSQL, Redis, Qdrant, Neo4j, and MinIO/S3 are used for production persistence.
-* **Service-optional:** HTTP, gRPC, and GraphQL APIs are available when an application wants a network boundary, but they are not required.
-
-## Repository layout
-
-```text
-src/
-├── memory/              # memory records, taxonomy, and memory operations
-├── retrieval/           # retrieval planning and execution
-├── graph/               # graph nodes, edges, canonicalization, relationships
-├── scoring/             # retrieval scoring logic
-├── runtime/             # orchestration and runtime execution
-├── contracts/           # shared contracts and schemas
-└── lib.rs
-
-bindings/
-├── python/              # Python package and PyO3 bridge
-└── node/                # Node.js package and napi-rs bridge
-
-apps/
-├── cli/                 # CLI application
-├── mcp/                 # MCP tool server
-├── web/                 # optional service host surfaces
-└── examples/            # usage examples
-```
-
-## Build
-
-### Rust workspace
-
-```bash
+```sh
 cargo build --workspace
-```
-
-### Python package
-
-```bash
-pip install -e bindings/python
-```
-
-### Node package
-
-```bash
+python -m pip install -e bindings/python
+npm ci
 npm --workspace bindings/node run build
 ```
 
-## Quick smoke test
+These require Rust and the platform linker. Package release artifacts have a narrower supported platform matrix than arbitrary Rust targets; see the package guide. Registry installation commands assume an appropriate artifact is available, not that this checkout has been published.
 
-```bash
+## Usage
+
+The Rust CLI executable is built as `nextral` (under Cargo's configured target directory):
+
+```sh
+nextral config validate examples/config.production.example.json
+nextral schema nextral.memory.ingest
+nextral --config runtime.json memory ingest request.json
+nextral --config runtime.json memory list '{"tenant_id":"example","user_id":"alice"}'
 nextral memory smoke
 ```
 
-## Configuration
+`runtime.json` and `request.json` above are host-created deployment/request files. Ingestion executes a write; schema inspection is a separate command. The smoke command deliberately uses the isolated testkit and does not verify production stores. Python installs a different `nextral` command; use `python -m nextral` to disambiguate it and consult the CLI guide for syntax differences.
 
-Production configuration should start from:
-
-```text
-examples/config.production.example.json
-```
-
-Validate a production config with:
-
-```bash
-nextral config validate examples/config.production.example.json
-```
-
-The validator checks required stores, provider settings, retrieval policy, score bounds, cache TTLs, and production-vs-test backend compatibility.
-
-## Production stores
-
-A production Nextral deployment uses:
-
-| Store      | Purpose                                                              |
-| ---------- | -------------------------------------------------------------------- |
-| PostgreSQL | Canonical memory index, sessions, reminders, audit, jobs, and outbox |
-| Redis      | Hot session tail, cache, leases, and invalidation                    |
-| Qdrant     | Vector storage and semantic retrieval                                |
-| Neo4j      | Relational memory graph                                              |
-| MinIO/S3   | Immutable transcript and source archive                              |
-
-Nextral does not require n8n or ClickHouse.
-
-## Model providers
-
-Embedding, extraction, and reranking providers are configured externally.
-
-Provider configuration must define:
-
-* Provider kind
-* Model name
-* Dimensions
-* Endpoint
-* API key environment variable
-* Any runtime-specific provider settings
-
-Supported provider kinds:
-
-```text
-open_ai_compatible
-http
-external_callback
-test
-```
-
-The `test` provider kind is intended for tests and demos only.
-
-## Optional service modes
-
-Nextral can run network APIs for applications that need a service boundary.
-
-Available contracts:
-
-```text
-contracts/http/openapi.json
-contracts/grpc/nextral.proto
-contracts/graphql/schema.graphql
-```
-
-These service modes use the same configured runtime and store adapters as the package APIs. They are optional and should not become a separate required SaaS layer.
-
-## CLI
-
-Common commands:
-
-```bash
-nextral config validate examples/config.production.example.json
-nextral memory smoke
-```
-
-Additional CLI commands are documented in:
-
-```text
-docs/cli/README.md
-```
-
-## MCP support
-
-Nextral includes MCP support so agents and LLM applications can use memory operations through tool calls.
-
-The MCP app is located at:
-
-```text
-apps/mcp/
-```
-
-## Documentation
-
-Start here:
-
-```text
-docs/README.md
-```
-
-Important docs:
-
-```text
-docs/architecture/project-structure.md
-docs/getting-started/installation.md
-docs/getting-started/quickstart.md
-docs/memory/README.md
-docs/package-production.md
-```
-
-Memory architecture docs:
-
-```text
-docs/memory/architecture.md
-docs/memory/types/README.md
-docs/memory/pipeline/README.md
-docs/memory/contracts/README.md
-docs/memory/workflow/README.md
-docs/memory/operations/README.md
-```
-
-## Local integration verification
-
-Use the Docker-based end-to-end script to verify the production store stack locally:
+## Deployment and evidence
 
 ```powershell
 .\scripts\e2e-docker.ps1
 ```
 
-This verifies the required production stores and package surfaces, including PostgreSQL, Redis, Qdrant, Neo4j, MinIO/S3, CLI, and Node package paths.
+The integration harness provisions the five-store stack and exercises package and service paths. This is an instruction to run it, not a blanket claim of production readiness. Deployment SLOs are [targets requiring local measurement](docs/memory/operations/slos-alerting-and-capacity.md). Replay research records actual host outcomes and process-roundtrip latency, not synthetic severity scores or a production latency guarantee. Optional telemetry emits real Prometheus and OTLP/HTTP data only when enabled.
 
-## Development status
-
-Nextral currently includes:
-
-* Canonical Rust domain models
-* Seven memory types represented in core logic
-* Retrieval scoring logic
-* Runtime topology and operation planning
-* Native graph utilities
-* Production adapters for PostgreSQL, Redis, Qdrant, Neo4j, and S3-compatible storage
-* Python CLI paths
-* MCP/API execution paths
-* Long-running service host mode
-* Test runtime coverage
-
-See the roadmap and pending task tracker for current implementation notes:
-
-```text
-docs/pending.md
-```
-
-## License
-
-Add your license here.
-
-```text
-MIT OR Apache-2.0
-```
-
-## Project status
-
-Nextral is under active development. APIs, contracts, and package surfaces may change before a stable release.
+APIs may change before a stable release. [Historical release notes](docs/releases/0.0.1.md) describe the old scaffold, not the current runtime.

@@ -1,5 +1,7 @@
 # Help snapshots (0.0.1)
 
+Historical snapshot only: these scaffold commands are not the current CLI. Use the [current CLI reference](README.md) for executable operations, Rust/Python parser differences, MCP JSON-RPC and real service hosting.
+
 ## `nextral --help`
 
 ```text

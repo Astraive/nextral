@@ -1,99 +1,28 @@
-# Graphify Contract
+# Graphify payload guide
 
-## 1. Purpose
+## Host-supplied hint
 
-Define the extraction payload and write semantics used to convert memory chunks into Neo4j graph structure.
-
-## 2. Extraction input
+Ingestion accepts `graph_hints` entries of this shape:
 
 ```json
 {
-  "memory_id": "mem_uuid",
-  "user_id": "usr_uuid",
-  "content": "Rajan leads backend for Project Atlas using PostgreSQL",
-  "content_type": "fact",
-  "created_at": "2026-04-10T19:30:00Z"
+  "from_label": "Project",
+  "from_name": "Atlas",
+  "relationship_type": "USES",
+  "to_label": "Technology",
+  "to_name": "PostgreSQL",
+  "confidence": 0.95
 }
 ```
 
-## 3. Extraction output
+Allowed labels are `Person`, `Project`, `Technology`, `Organization`, `Entity`, `Concept`. Allowed positive relationship types are `WORKS_ON`, `USES`, `OWNS`, `DECIDED`, `RELATED_TO`, `DEPENDS_ON`; each also accepts its explicit `NOT_` form, such as `NOT_USES`. Confidence is finite and bounded to 0–1; invalid values are rejected. Names/merge keys are canonicalized; relationships retain direction and source-memory evidence.
 
-```json
-{
-  "nodes": [
-    { "label": "Person", "name": "Rajan", "confidence": 0.98 },
-    { "label": "Project", "name": "Atlas", "confidence": 0.97 },
-    { "label": "Technology", "name": "PostgreSQL", "confidence": 0.99 }
-  ],
-  "relationships": [
-    {
-      "from": { "label": "Person", "name": "Rajan" },
-      "type": "WORKS_ON",
-      "to": { "label": "Project", "name": "Atlas" },
-      "confidence": 0.95
-    },
-    {
-      "from": { "label": "Project", "name": "Atlas" },
-      "type": "USES",
-      "to": { "label": "Technology", "name": "PostgreSQL" },
-      "confidence": 0.93
-    }
-  ]
-}
-```
+## Canonical replay and persistence
 
-## 4. Node and edge constraints
+The public `nextral.graph.graphify` request contains `tenant_id`, `user_id`, `memory_id`, and optional `hints` (an array of the shape above). It rejects a full `record` payload and loads the active canonical memory in that exact scope; missing, inactive or foreign-scope memory returns `NotFound`. Replay does not rewrite canonical content. At most 256 hints and 256 canonical entities are accepted.
 
-- `label` must be from approved node label set
-- relationship `type` must be from approved relationship type set
-- names are canonicalized before merge (trim/case normalization rules)
-- confidence is required and bounded to `[0, 1]`
+Nonempty supplied hints are authoritative for relationships: deterministic content heuristics run only when hints are omitted or empty. Canonical entities still contribute nodes. No hidden model extraction occurs. A positive relation and its matching `NOT_` relation on the same scoped, directed canonical endpoints produce a logical contradiction; `USES` plus `OWNS`, different endpoints, and reversed directions do not. Duplicate same-polarity evidence is not a contradiction.
 
-## 5. Write semantics
+The flattened response contains `status: "accepted"`, `write_receipts`, `trace_id`, `nodes`, `relationships`, `contradictions`, `confidence_calibration_version`, `contradiction_class`, and `evidence_count`. Nodes carry scope, label/name/canonical key and confidence. Relationships carry scoped endpoints, `relationship_type`, `source_memory_ids`, confidence and timestamps. These are not the old nested `{from,type,to}` extractor example.
 
-Neo4j writes must use:
-
-1. `MERGE` node by canonical key (`user_id`, `label`, `canonical_name`)
-2. `MERGE` relationship by (`from_key`, `type`, `to_key`)
-3. `ON CREATE` set `created_at`, `source_memory_id`, initial confidence
-4. `ON MATCH` update `last_confirmed_at`, adjust confidence/weight
-
-## 6. Uniqueness and performance requirements
-
-- property uniqueness constraints for merge keys
-- indexes on frequently merged node properties
-- bounded transaction batch sizes for high-volume jobs
-
-## 7. Conflict handling
-
-- if extractor emits conflicting edge direction/type, store contradiction metadata
-- do not silently overwrite prior contradictory edge without evidence tracking
-- preserve source references for explainability
-
-## 8. Failure contract
-
-- extraction failure: memory remains retrievable via vector path
-- graph write failure: retry with exponential backoff
-- terminal failure: emit explicit job failure with memory and reason IDs
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Production replay transactionally commits graph intent, audit and outbox work in PostgreSQL, then attempts external application. `accepted` means durable intent, not necessarily a completed Neo4j write: inspect `write_receipts` for `neo4j:source:replaced` and drain pending work with `nextral.outbox.run`. Deterministic source replacement preserves other memories' shared evidence. Stale canonical snapshots and forgotten sources cannot restore old graph evidence; forget removes exact source contributions.

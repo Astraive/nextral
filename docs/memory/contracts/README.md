@@ -1,46 +1,10 @@
-# Memory Contracts
+# Memory payload guides
 
-## Index
+- [Ingestion and canonical records](memory-record-schema.md)
+- [Retrieval request/response](retrieval-contract.md)
+- [Graph hints and persisted canonical replay](graphify-contract.md)
+- [Reminder scheduling and execution](prospective-contract.md)
 
-1. [Documents](#documents)
-2. [Contract principles](#contract-principles)
-3. [Builder Addendum: Expanded Control Surface](#builder-addendum-expanded-control-surface)
+Rust Serde types and the MCP tool catalog define executable wire fields. Rust CLI `schema TOOL` returns the catalog input schema; Python `ingest_request_schema()` returns an ingestion template, not a write result. Network service contracts live under root `contracts/` and expose only their declared subset of operations.
 
-
-## Documents
-
-| File | Scope |
-|---|---|
-| `memory-record-schema.md` | canonical memory payloads and storage-mapping schema |
-| `retrieval-contract.md` | retrieval API input/output, ranking, and token-budget contract |
-| `graphify-contract.md` | graph extraction payload, merge behavior, and confidence semantics |
-| `prospective-contract.md` | reminders/follow-ups state model and scheduler contract |
-
-## Contract principles
-
-1. every field has ownership and validation rules
-2. ids are stable across vector/index/graph boundaries
-3. lifecycle transitions are explicit and auditable
-4. deletion and redaction are first-class operations
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Always include tenant/user scope. IDs are stable canonical references, not necessarily UUIDs; external vector IDs are adapter-mapped and must not be assumed identical to public string IDs. Embedded callers remain responsible for authorization.

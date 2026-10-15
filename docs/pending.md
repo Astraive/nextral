@@ -9,7 +9,7 @@ Canonical tracker: https://github.com/Astraive/nextral/issues/19
 - [x] Route local Cargo builds to `D:/target` using machine-local Cargo configuration.
 - [x] Review architecture/contracts and discover relevant skills through Vercel Skills.
 
-The baseline is not production completion. Normal dispatcher paths currently use an in-memory store; protocol, durability, lifecycle and packaging gaps remain. The checklist below is acceptance scope, not an implementation claim.
+The baseline was not production completion: its dispatcher used an in-memory store and had protocol, durability, lifecycle and packaging gaps. Subsequent implementation remains subject to the acceptance checklist below; code presence alone does not close an item.
 
 ## Phase 1: Correctness and isolation
 
@@ -24,6 +24,12 @@ The baseline is not production completion. Normal dispatcher paths currently use
 - [ ] Apply server/configured score floors without caller bypass.
 - [ ] Validate finite scores, required identities, vectors and supported schema versions.
 - [ ] Keep rejected writes out of durable/index/graph state with audit reasons.
+
+### 1.3 — fix(contracts): unify time and vector metadata semantics ([#59](https://github.com/Astraive/nextral/issues/59))
+
+- [ ] Accept documented RFC3339 timestamps and compare/score time consistently.
+- [ ] Preserve canonical-to-vector point identity and required payload metadata.
+- [ ] Verify schema compatibility and cross-surface round trips.
 
 ## Phase 2: Production runtime and durability
 
@@ -81,6 +87,24 @@ The baseline is not production completion. Normal dispatcher paths currently use
 - [ ] Reject incompatible insecure production configurations.
 - [ ] Do not leak credentials or raw sensitive content in diagnostics.
 
+### 2.10 — feat(storage): commit canonical changes with outbox atomically ([#55](https://github.com/Astraive/nextral/issues/55))
+
+- [ ] Commit memory mutations, audits and outbox intent in one transaction.
+- [ ] Roll back related rows on audit/outbox failure.
+- [ ] Recover external writes from committed durable intent.
+
+### 2.11 — feat(security): enforce authenticated tenant boundaries ([#56](https://github.com/Astraive/nextral/issues/56))
+
+- [ ] Bind authenticated requests to authorized tenant/user scope.
+- [ ] Provide database RLS and least-privilege tenant transaction context.
+- [ ] Reject cross-tenant scope forgery.
+
+### 2.12 — feat(migrations): track schema versions and safe deployment ([#57](https://github.com/Astraive/nextral/issues/57))
+
+- [ ] Apply ordered checksum-verified migrations under an advisory lock.
+- [ ] Record history and reject conflicting or unknown state.
+- [ ] Verify concurrent startup and data-preserving schema upgrades.
+
 ## Phase 3: Memory lifecycles and governance
 
 ### 3.1 — feat(memory): preserve ephemeral working context ([#31](https://github.com/Astraive/nextral/issues/31))
@@ -124,6 +148,12 @@ The baseline is not production completion. Normal dispatcher paths currently use
 - [ ] Execute host-vector shadow collection writes with durable checkpoints.
 - [ ] Measure source/target counts and replay quality before read cutover.
 - [ ] Keep previous collection and support explicit rollback.
+
+### 3.8 — feat(runtime): schedule durable consolidation and retention work ([#58](https://github.com/Astraive/nextral/issues/58))
+
+- [ ] Schedule idle/close and aged-session consolidation through durable jobs.
+- [ ] Persist lane/version/checkpoints, retries and terminal reasons.
+- [ ] Retain unarchived source data and expose recovery work.
 
 ## Phase 4: Protocol and CLI surfaces
 
@@ -232,6 +262,21 @@ The baseline is not production completion. Normal dispatcher paths currently use
 - [ ] Publish phased issue checklist and supported capability matrix.
 - [ ] Replace stale complete/production-ready claims with verified evidence.
 - [ ] Document migration, configuration, recovery, research evaluation and package usage accurately.
+
+## Regression acceptance
+
+- [ ] [#60](https://github.com/Astraive/nextral/issues/60): fence stale scheduled-job writes after source forget; verify terminal cancellation and scrubbed request survive a second PostgreSQL connection.
+- [ ] [#61](https://github.com/Astraive/nextral/issues/61): retain archive source provenance across failed consolidation; recover legacy manifests and block late uploads after source-only forget.
+- [ ] [#62](https://github.com/Astraive/nextral/issues/62): give distinct accepted same-ID mutations distinct audit events; reject conflicting explicit event IDs and roll back canonical/outbox changes atomically.
+- [ ] [#63](https://github.com/Astraive/nextral/issues/63): distinguish explicit negation from compatible graph relationships and measure the representative replay suite.
+- [ ] [#64](https://github.com/Astraive/nextral/issues/64): honor the configured traversal maximum through native and production graph paths.
+- [ ] [#65](https://github.com/Astraive/nextral/issues/65): classify malformed tool payloads as invalid input consistently across native consumers.
+
+## Current verification boundary
+
+The last completed local run passed strict all-feature workspace Clippy and 278 Rust tests (six real-store tests ignored). The actual CLI `memory smoke` passed against explicit `test_memory`. Clean installed-artifact consumers passed 13 Python tests and nine Node tests; one Python and two Node production-only cases were skipped. Node declarations and release version consistency also passed. These results do not prove production-store behavior.
+
+The local Docker daemon became unresponsive during production verification. Integrated five-store, authenticated protocol, telemetry, real-store packaged-consumer and measured research verification remains open until a successful isolated run provides current evidence.
 
 ## Integration contracts
 

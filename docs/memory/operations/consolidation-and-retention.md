@@ -1,97 +1,31 @@
-# Consolidation and Retention Operations
+# Consolidation and retention workers
 
-## 1. Job catalog
+## Enqueue durable work
 
-| Job | Trigger | Purpose |
-|---|---|---|
-| Fast consolidation | session idle/close | summary + high-value memory extraction |
-| Deep consolidation | nightly scheduler | full transcript chunking and archival |
-| Graphify replay | scheduled/manual | rebuild or repair graph edges |
-| Re-embed | manual/scheduled | migrate vectors to new embedding model |
-| Forget propagation | user/system request | remove/redact across all stores |
+`nextral.jobs.enqueue` accepts tenant/user/session scope, `trigger` (`idle`, `close`, `deep`, `retention`), `run_at`, optional `idle_seconds`, `consolidation`, `memory_ids`, `redact`, and `max_attempts`. Idle work requires positive `idle_seconds`. Idle/close use a fast consolidation request; deep uses deep. The embedded consolidation scope/session/lane must match the job. Host candidates, vectors and fast summary must already be supplied.
 
-## 2. Fast consolidation runbook
+Retention jobs require explicit nonempty `memory_ids`, no consolidation payload, and optional `redact`. There is no automatic global date-based purge or partition drop. The host chooses eligibility and legal retention policy.
 
-1. load full warm transcript by `session_id`
-2. generate/update session summary
-3. extract candidate memory items
-4. score and threshold candidates
-5. write accepted items (index + vector)
-6. dispatch Graphify payloads
-7. emit metrics and completion event
+## Run and recover
 
-Failure handling:
+`nextral.jobs.run` takes `{tenant_id,user_id,now,limit?,lease_seconds?}`. It claims due work using durable leases, persists attempts/retry state, and records completed memory IDs plus errors. `jobs.list/get` inspect persisted jobs. Restarts recover due work and expired claims; choose a lease duration that accommodates actual store latency and monitor retry/backlog growth.
 
-- transient: retry with backoff
-- terminal: persist failure reason, mark job failed
-- if fast lane fails, keep session eligible for deep lane
+`nextral.outbox.run` processes durable external-store work left pending after canonical/audit/outbox transactions. Do not mark a deletion or consolidation repaired until required receipts acknowledge effects and job/outbox state agrees. Retry reports and receipts are evidence; an object shaped like a report is not automatically success.
 
-## 3. Deep consolidation runbook
+## Consolidation checklist
 
-1. select sessions older than policy horizon (for example 7+ days)
-2. chunk transcript with deterministic chunk IDs
-3. embed chunk payloads and write vectors
-4. archive raw transcript to MinIO
-5. stamp archive/index version
-6. emit throughput and quality metrics
+1. Select scoped transcript and version; generate host outputs outside Nextral.
+2. Fast: require nonempty summary and explicit candidate provenance.
+3. Deep: use deterministic role-prefixed contiguous chunks and matching source IDs; default `chunk_messages` is 100.
+4. Enqueue or explicitly execute the consolidation request.
+5. Inspect accepted/rejected candidates, persisted summary, archive acknowledgement and store receipts.
+6. Drain pending external work and investigate terminal failures. Changed host input needs a new version.
 
-## 4. Retention controls
+## Retention checklist
 
-| Data class | Typical policy | Control mechanism |
-|---|---|---|
-| Redis hot tail | short-lived | TTL expiry |
-| Warm transcript rows | medium/long | partition pruning |
-| Vector memories | long-term | explicit forget/purge policy |
-| Graph data | long-term | relationship confidence aging + delete hooks |
-| Raw archives | long-term | object lifecycle and legal controls |
+1. Select owned memory IDs according to the host's policy and legal constraints.
+2. Persist a retention job; run due workers.
+3. Inspect per-item completion/errors and required backend receipts.
+4. Confirm canonical deletion/redaction and exact-source cleanup before closing the request.
 
-## 5. Partition and purge strategy
-
-For large PostgreSQL tables:
-
-- range partition by date
-- attach new partitions ahead of time
-- detach/drop old partitions for retention cutoff
-- avoid large row-by-row deletes where possible
-
-## 6. Forget propagation runbook
-
-1. validate request scope and actor permissions
-2. mark canonical rows for deletion/redaction
-3. delete matching Qdrant points
-4. remove/redact graph edges/nodes derived from target memory
-5. append deletion manifest for archives
-6. write deletion audit event
-
-Completion is only successful when all required stores are confirmed.
-
-## 7. Core metrics
-
-- fast lane success rate
-- deep lane throughput (sessions/day)
-- memory acceptance ratio
-- end-to-end write latency (extract -> retrievable)
-- forget completion latency and success ratio
-- graphify retry/terminal failure rates
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Redis TTL is a cache policy, not a canonical retention policy. PostgreSQL partitioning, graph confidence aging and S3 lifecycle are deployment design choices, not automatically enabled package features.

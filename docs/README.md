@@ -1,25 +1,22 @@
-# Nextral Docs
+# Nextral documentation
 
-This repository now uses a **runtime-neutral monorepo** with a canonical Rust core and language bindings.
+## Application entry points
 
-## Start here
+- [Installation and platforms](getting-started/installation.md)
+- [Quickstart](getting-started/quickstart.md)
+- [Capability/package matrix and deployment boundaries](package-production.md)
+- [CLI, MCP, and service examples](cli/README.md)
+- [Repository structure](architecture/project-structure.md)
+- [Python](../bindings/python/README.md) and [Node.js](../bindings/node/README.md)
 
-1. `architecture/project-structure.md`
-2. `getting-started/installation.md`
-3. `getting-started/quickstart.md`
-4. `cli/README.md`
-5. `releases/0.0.1.md`
-6. `package-production.md`
+## Memory guides
 
-## Memory architecture
+- [Architecture](memory/architecture.md)
+- [Memory types](memory/types/README.md)
+- [Runtime and storage](memory/architecture/README.md)
+- [Payload guides](memory/contracts/README.md)
+- [Pipelines](memory/pipeline/README.md)
+- [Workflows](memory/workflow/README.md)
+- [Operations and measurement targets](memory/operations/README.md)
 
-The memory architecture documentation is already present in:
-
-- `memory/README.md`
-- `memory/architecture.md`
-- `memory/types/README.md`
-- `memory/pipeline/README.md`
-- `memory/contracts/README.md`
-- `memory/workflow/README.md`
-- `memory/operations/README.md`
-
+[0.0.1 release notes](releases/0.0.1.md) and [old help snapshots](cli/help.md) are historical records, not current installation or command references.

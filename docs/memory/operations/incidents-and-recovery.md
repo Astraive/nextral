@@ -1,81 +1,30 @@
-# Incidents and Recovery
+# Incidents and recovery
 
-## 1. Incident categories
+## Triage
 
-| Category | Example |
-|---|---|
-| Retrieval outage | both vector and graph retrieval unavailable |
-| Write-path outage | extraction/embedding writes failing |
-| Graph drift | duplicate/conflicting graph structures rising |
-| Data consistency drift | index count diverges from vector/graph counts |
-| Deletion failure | forget request partially completed |
+1. Identify affected tenant/user scopes and the failing operation; avoid raw content in incident logs.
+2. Distinguish liveness (`/healthz`) from real store readiness (`/readyz`) and from operation-level success.
+3. Inspect canonical state, job status/attempts/leases, outbox backlog and required store receipts.
+4. Restore the actual dependency or credentials before replay. Keep terminal reasons visible.
 
-## 2. Triage sequence
+## Retrieval outages
 
-1. identify impacted pipeline stage(s)
-2. assess user impact radius (`user_id` subset vs global)
-3. decide degraded mode or partial shutdown policy
-4. isolate failing dependency/store
-5. initiate replay/recovery plan
+Enabled vector and graph paths run in parallel. A surviving path can return degraded results; all enabled paths failing returns an explicit error. The host may decide to use session-only context but must not relabel failed retrieval as a successful memory hit. After recovery, check canonical hydration/privacy filtering and representative queries, not only index counts.
 
-## 3. Degraded modes
+## Interrupted writes and workers
 
-| Condition | Allowed degraded mode |
-|---|---|
-| graph path down | vector-only retrieval with marker |
-| vector path down | graph-only retrieval with marker |
-| consolidation down | continue session + queue backlog |
-| graphify down | continue vector writes, replay graphify later |
+Canonical/audit/outbox mutation is transactional in PostgreSQL, not atomic across all stores. Restore the failed vector/graph/archive dependency, invoke `outbox.run`, and inspect acknowledgements. Due jobs with expired durable leases can be reclaimed by `jobs.run`; completed IDs and retry state support resumption. Do not manually declare a job completed to hide a missing external effect.
 
-## 4. Recovery runbooks
+For consolidation, retain the same host input and version when replaying unchanged work. Regenerate new output only under a new version. Host model outages are host responsibilities; Nextral will not synthesize embeddings or summaries as a fallback.
 
-### Retrieval outage
+## Deletion failure
 
-1. verify Qdrant/Neo4j health and network paths
-2. switch to single-path retrieval if one path healthy
-3. drain backlog and restore dual-path operation
-4. validate retrieval quality sample
+Keep the request incomplete until required store receipts confirm removal/redaction. Replay pending cleanup and inspect exact source-derived references, including sessions/summary/archive state and reminders. Never perform blanket substring replacement or delete unrelated manual policies to make a check pass.
 
-### Write-path outage
+Archive manifests with missing legacy source provenance require an integrity-checked, scope-validated object read before source matching; recovery persists the derived source IDs. An unavailable/corrupt object is a cleanup failure, except `NotFound` is acknowledged as tombstoned. Same-key marked tombstones make verified reads return `NotFound`; conditional immutable uploads prevent late resurrection. This does not prove erasure of versions/backups. Forget-scrubbed job requests and terminal job states must survive stale worker completion; claimed writes fence both under the live lease.
 
-1. pause non-critical extraction jobs
-2. preserve raw transcripts and enqueue replay
-3. restore embed/write dependencies
-4. replay from durable queue with idempotent keys
+## Reembed interruption
 
-### Deletion failure
+Resume the same scoped plan with missing vectors and inspect checkpoint/validation status. Do not switch a global collection alias as an improvised repair. See [reembed runbook](reembed-and-backfill.md).
 
-1. mark request as incomplete with explicit store checklist
-2. retry failed store operations
-3. block completion until all store confirmations succeed
-4. issue compliance audit record
-
-## 5. Post-incident review checklist
-
-- root cause and blast radius
-- timeline of detection and mitigation
-- missing alert or noisy alert analysis
-- contract/runbook updates required
-- replay integrity verification
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Backups and restoration drills remain deployment obligations. Record root cause, scope, observed effects, recovery actions and missing alerts; successful health responses alone do not prove restored data integrity.

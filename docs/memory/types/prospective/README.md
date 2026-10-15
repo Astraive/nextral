@@ -1,63 +1,9 @@
-# Prospective Memory
+# Prospective memory
 
-## Index
+Prospective memory links a future reminder/follow-up to an existing owned memory. Scheduling is explicit; consolidation does not automatically infer a calendar action or create reminders from prose.
 
-1. [Purpose](#purpose)
-2. [Primary Stores](#primary-stores)
-3. [Lifecycle](#lifecycle)
-4. [What It Enables](#what-it-enables)
-5. [Failure Mode It Prevents](#failure-mode-it-prevents)
-6. [Builder Addendum: Expanded Control Surface](#builder-addendum-expanded-control-surface)
+PostgreSQL stores schedule, lease/attempt/retry state and outcomes. Hosts poll `nextral.reminders.due`; `nextral.reminders.list` inspects state without dispatching. There is no autonomous installed cron daemon or required Redis reminder queue.
 
+Real delivery uses `NEXTRAL_REMINDER_WEBHOOK_URL` and optional `NEXTRAL_REMINDER_WEBHOOK_TOKEN`. HTTP acknowledgement determines completion; a title cannot simulate a failure or success. Rust applies allowed channel, privacy, priority, deduplication, quiet hours in the supplied IANA timezone, expiry and retry policy. Lifecycle timestamps accept RFC3339 or epoch-second strings; persisted scheduling times use epoch seconds.
 
-## Purpose
-
-Prospective memory tracks what Tony must do in the future: reminders, follow-ups, and commitments extracted from conversation.
-
-## Primary Stores
-
-| Artifact | Backend | Role |
-|---|---|---|
-| Reminder/follow-up records | PostgreSQL | Durable pending work |
-| Dispatch queue | Redis queue | Near-term trigger execution |
-| Proactive trigger dispatch | package callbacks, webhooks, CLI polling, or user-owned schedulers | Cron/calendar-driven activation |
-| High-importance commitment context | Qdrant | Semantic recall for commitments (often high importance) |
-
-## Lifecycle
-
-1. Commitments are extracted during memory consolidation.
-2. Items are normalized into reminder/follow-up records with schedule metadata.
-3. Scheduler scans due items and dispatches trigger jobs.
-4. Completion state and outcomes are logged for future recall.
-
-## What It Enables
-
-- Reliable follow-through on promises made in prior conversations
-- Proactive reminders without re-asking the user
-- Context-aware follow-up generation tied to past commitments
-
-## Failure Mode It Prevents
-
-Without prospective memory, commitments decay into passive history and Tony forgets to act.
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+The host owns downstream action idempotency and user consent. Completion of webhook delivery is not proof that a human read the reminder or an external task finished. See [prospective payloads](../../contracts/prospective-contract.md).

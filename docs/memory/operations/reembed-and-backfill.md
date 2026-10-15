@@ -1,67 +1,30 @@
-# Re-embed and Backfill Operations
+# Scoped reembedding and backfill
 
-## 1. When to run
+## Plan versus execution
 
-- embedding model upgrade
-- chunking strategy change
-- payload schema evolution requiring re-index
-- recovery from historical pipeline defects
+`nextral.reembed.plan` takes `tenant_id`, `source_collection`, `shadow_collection`, `target_embedding_provider`, and `target_embedding_model`. It produces a plan, not embeddings, a completed migration, or a global alias operation.
 
-## 2. Re-embed workflow
+`nextral.jobs.reembed.execute` accepts:
 
-1. define source scope (collections, date range, users)
-2. snapshot index metadata
-3. run embedding generation with target model
-4. dual-write to shadow collection/index
-5. compare retrieval quality and latency
-6. cut over reads to new collection
-7. retire old collection after validation window
+- `plan`: the returned plan
+- `user_id`: the owned user scope within the plan tenant
+- `vectors`: host-generated `{memory_id,vector}` entries
+- `target_dimension`: explicit target dimension
+- `cutover`: optional explicit request to switch validated reads
+- `rollback`: optional explicit request to restore the prior scoped route
 
-## 3. Backfill workflow (transcript -> memories)
+## Migration runbook
 
-1. select sessions not fully consolidated
-2. run extraction/scoring pipeline in batch
-3. write vectors/index rows idempotently
-4. run graphify on accepted items
-5. mark batch checkpoint and completion
+1. Preserve the source collection and create a plan with a distinct shadow destination and target provider/model.
+2. Generate actual target vectors in the host for active owned source records.
+3. Execute with explicit dimension; inspect durable checkpoints, counts, receipts and errors.
+4. A partial vector set reports `awaiting_vectors`; resume the same plan with missing vectors. Do not treat partial progress as completed.
+5. Validate all scoped target records and run representative retrieval/quality comparisons.
+6. Request cutover explicitly only after validation. The effective route persists for the tenant **and user**, leaving peer scopes unchanged.
+7. Retain the source until the deployment's rollback window ends. Request `rollback` explicitly if required and verify the original scoped route.
 
-## 4. Idempotency requirements
+This is not a global Qdrant alias swap, an internal embedding-provider invocation, or an instant dimension rewrite of unrelated users. Subsequent host queries must supply vectors compatible with the effective scoped route. Preserve plan/state across process restarts; source changes can invalidate prior migration assumptions and must be resolved rather than ignored.
 
-- deterministic memory IDs from source keys where possible
-- replay-safe upserts for index rows
-- graph writes via merge semantics
+## Transcript backfill
 
-## 5. Validation checklist
-
-- source item count vs target item count delta
-- retrieval quality benchmark comparison
-- graph edge/node growth reasonability
-- no unresolved terminal job failures
-
-## 6. Rollback strategy
-
-- keep prior vector collection until cutover confidence is achieved
-- maintain read-switch flag for instant rollback
-- preserve migration manifests and checkpoints
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Select sessions explicitly, generate host candidates/vectors, and use versioned fast/deep consolidation with deterministic source provenance. Deep input must match role-prefixed contiguous transcript chunks and actual source IDs. Replays preserve unchanged identities/versions; changed input uses a new version. Inspect real archive and indexing receipts, drain recovery work, and measure retrieval quality before declaring backfill complete.

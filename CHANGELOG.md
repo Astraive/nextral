@@ -4,6 +4,9 @@
 
 - Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
 - Restored the local five-store stack with pinned reachable images, loopback-only ports, and a working MinIO readiness probe.
+- Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
+- Exposed binding experiment/safety controls, restoring prior runtime state on reasoned active-experiment rollback.
+- Added explicit private-CA JWKS trust and provenance-aware archive cleanup with same-key tombstones, immutable uploads and scrubbed-job fencing.
 
 ## 0.1.0
 

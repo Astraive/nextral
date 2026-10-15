@@ -1,54 +1,13 @@
-# Workflow: Message to Memory
+# Workflow: message to memory
 
-## Scenario
+For a message such as “Atlas should use PostgreSQL; remind me Friday,” separate the host's reasoning from runtime operations:
 
-User says: "Let's use PostgreSQL for Atlas and remind me Friday to check migration progress."
+1. Authenticate the user in the host and append a scoped session message.
+2. Supply a host query vector/entities to assemble session tail, summary, policies and retrieved context.
+3. Let the host generate the answer and decide whether this statement should become durable memory.
+4. Have the host extract an explicit decision candidate, graph hints and embedding; call ingestion, or supply candidates plus a nonempty summary in fast consolidation.
+5. Inspect acceptance/rejection and external receipts; drain durable outbox recovery if needed.
+6. If a reminder is intended, resolve Friday/timezone/consent in the host, then explicitly schedule a reminder linked to the accepted owned source memory.
+7. Run host-owned due polling and inspect real delivery outcomes.
 
-## End-to-end flow
-
-1. API receives message with `session_id`.
-2. Message is written to hot session list (Redis).
-3. ContextAssembler fetches hot tail + prior memory layer.
-4. Agent response is synthesized (working memory phase).
-5. On idle/close, fast consolidation runs:
-   - extract decision memory ("use PostgreSQL for Atlas")
-   - extract commitment memory ("remind Friday")
-6. Decision memory path:
-   - vector write to Qdrant
-   - index write to PostgreSQL
-   - Graphify extracts nodes/edges and merges in Neo4j
-7. Commitment memory path:
-   - reminder record created in PostgreSQL
-   - scheduler trigger metadata created for package callbacks, webhooks, CLI polling, or user-owned schedulers
-8. Memory is now retrievable by:
-   - semantic similarity (Qdrant)
-   - relationship traversal (Neo4j)
-   - due schedule checks (prospective path)
-
-## Outcome guarantees
-
-- the decision is durable semantic memory
-- Atlas relationship graph is reinforced
-- follow-up becomes actionable prospective memory
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Appending prose alone guarantees none of extraction, vector indexing, graph enrichment, reminder scheduling or delivery. Deep archival is a separate explicit consolidation lane with validated chunk provenance and an acknowledged S3 body. Stable IDs and versions support replay, not fabricated outcome guarantees.

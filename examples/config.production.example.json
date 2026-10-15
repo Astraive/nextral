@@ -3,7 +3,8 @@
   "stores": {
     "postgres_url": "postgres://nextral:${NEXTRAL_POSTGRES_PASSWORD}@postgres:5432/nextral",
     "redis_url": "redis://redis:6379/0",
-    "qdrant_url": "http://qdrant:6334",
+    "qdrant_url": "http://qdrant:6333",
+    "qdrant_collection": "nextral_memories",
     "neo4j_url": "neo4j://neo4j:7687",
     "s3_endpoint": "http://minio:9000",
     "s3_bucket": "nextral-memory",
