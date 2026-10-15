@@ -1,15 +1,36 @@
 {
   "name": "nextral",
   "version": "0.1.0",
-  "description": "Node package for the Nextral production memory runtime.",
-  "main": "index.js",
-  "types": "index.d.ts",
-  "scripts": {
-    "build": "napi build --platform",
-    "build:debug": "napi build --platform --debug"
+  "description": "Typed Node.js API for the Nextral Rust memory runtime.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Astraive/nextral.git", "directory": "bindings/node" },
+  "homepage": "https://github.com/Astraive/nextral/tree/main/bindings/node",
+  "bugs": { "url": "https://github.com/Astraive/nextral/issues" },
+  "keywords": ["memory", "ai", "rust", "napi"],
+  "type": "commonjs",
+  "main": "api.js",
+  "types": "api.d.ts",
+  "exports": {
+    ".": { "types": "./api.d.ts", "require": "./api.js", "import": "./api.js" },
+    "./package.json": "./package.json"
   },
-  "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
-    "typescript": "^5.6.3"
-  }
+  "files": ["api.js", "api.d.ts", "native-loader.js", "native/*.node", "LICENSE", "README.md"],
+  "engines": { "node": ">=22" },
+  "os": ["win32", "darwin", "linux"],
+  "cpu": ["x64", "arm64"],
+  "scripts": {
+    "build": "node scripts/build.js --release",
+    "build:debug": "node scripts/build.js",
+    "prepack": "node scripts/check-artifacts.js",
+    "release:check": "node scripts/check-artifacts.js --all",
+    "artifacts:collect": "node scripts/collect-artifacts.js",
+    "test": "node --test test/consumer.test.cjs",
+    "test:types": "tsc -p test/tsconfig.json"
+  },
+  "napi": {
+    "name": "nextral",
+    "triples": { "defaults": false, "additional": ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+  },
+  "devDependencies": { "@napi-rs/cli": "2.18.4", "typescript": "5.9.3" },
+  "publishConfig": { "access": "public" }
 }
