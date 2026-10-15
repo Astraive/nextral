@@ -12,6 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
+/// Request to retrieve memories matching a query, with token budget, privacy scope, and scoring weights.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
     pub tenant_id: String,
@@ -79,6 +80,7 @@ pub struct RetrievalTelemetry {
     pub degraded_reasons: Vec<String>,
 }
 
+/// Response containing ranked retrieved items, telemetry, quality score, and safety decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalResponse {
     pub retrieval_id: String,
@@ -148,6 +150,8 @@ where
     if request.query_text.trim().is_empty() {
         return Err(CoreError::InvalidInput("query cannot be empty".to_string()));
     }
+    const MAX_GRAPH_HOPS: u8 = 10;
+    let max_graph_hops = request.max_graph_hops.min(MAX_GRAPH_HOPS);
     let scoring_weights = request.scoring_weights.clone().unwrap_or(ScoringWeights {
         semantic_similarity: 0.5,
         recency: 0.2,
@@ -174,22 +178,36 @@ where
     };
     let records =
         store.list_memories(&request.tenant_id, &request.user_id, &privacy_scope, false)?;
+    let entity_boost = if request.entities.is_empty() {
+        0.0
+    } else {
+        0.3
+    };
     let vector_start = Instant::now();
-    let vector_result: CoreResult<Vec<(MemoryRecord, f32)>> = (|| {
+    let vector_result: CoreResult<Vec<(MemoryRecord, f32)>> = {
         let mut vector_items: Vec<(MemoryRecord, f32)> = records
             .iter()
             .map(|record| {
-                (
-                    record.clone(),
-                    lexical_score(&record.content, &request.query_text),
-                )
+                let mut score = lexical_score(&record.content, &request.query_text);
+                if entity_boost > 0.0 && !request.entities.is_empty() {
+                    let entity_matches = request
+                        .entities
+                        .iter()
+                        .filter(|e| record.entities.iter().any(|re| re.eq_ignore_ascii_case(e)))
+                        .count();
+                    if entity_matches > 0 {
+                        let entity_score = entity_matches as f32 / request.entities.len() as f32;
+                        score = (score + entity_score * entity_boost).min(1.0);
+                    }
+                }
+                (record.clone(), score)
             })
             .filter(|(_, score)| *score > 0.0)
             .collect();
         vector_items.sort_by(|left, right| right.1.total_cmp(&left.1));
         vector_items.truncate(request.top_k_vector);
         Ok(vector_items)
-    })();
+    };
     let vector_ms = vector_start.elapsed().as_millis() as u64;
 
     let graph_start = Instant::now();
@@ -197,7 +215,7 @@ where
         &request.tenant_id,
         &request.user_id,
         &request.query_text,
-        request.max_graph_hops,
+        max_graph_hops,
         &privacy_scope,
     );
     let graph_ms = graph_start.elapsed().as_millis() as u64;
@@ -259,7 +277,12 @@ where
     for (record, semantic_similarity) in &vector_items {
         merged.insert(
             record.id.clone(),
-            item_from_record(record, SourcePath::Vector, *semantic_similarity, &scoring_weights),
+            item_from_record(
+                record,
+                SourcePath::Vector,
+                *semantic_similarity,
+                &scoring_weights,
+            ),
         );
     }
     for memory_id in &graph_ids {
@@ -334,7 +357,11 @@ where
             selected.len() as f32 / merged_candidates as f32
         },
         contradiction_rate,
-        if degraded_reasons.is_empty() { 0.9 } else { 0.5 },
+        if degraded_reasons.is_empty() {
+            0.9
+        } else {
+            0.5
+        },
     );
     let severity = classify_severity(
         quality.overall,
@@ -385,8 +412,10 @@ fn item_from_record(
     let access = (record.access_count as f32 / 10.0).min(1.0);
     // Calculate recency based on how recently the record was created
     // Decay factor: 1.0 for recent, decreasing over time (half-life ~30 days)
-    let now = crate::memory::now_timestamp().parse::<u64>().unwrap_or(0);
-    let created = record.created_at.parse::<u64>().unwrap_or(0);
+    let now = crate::memory::now_timestamp()
+        .parse::<u64>()
+        .unwrap_or(u64::MAX);
+    let created = record.created_at.parse::<u64>().unwrap_or(u64::MAX);
     let age_seconds = now.saturating_sub(created);
     let half_life_seconds = 30 * 24 * 60 * 60; // 30 days
     let recency = if age_seconds == 0 {

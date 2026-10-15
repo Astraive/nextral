@@ -106,6 +106,9 @@ where
             .iter()
             .map(|item| item.memory_id.clone())
             .collect(),
+        // Load procedural policies for this user — currently empty because the ProceduralPolicy
+        // store has not been wired yet. When available, query policies scoped to this user's
+        // tenant and filter by active status.
         procedural_policy_ids: Vec::new(),
     })
 }

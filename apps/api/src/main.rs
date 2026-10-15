@@ -6,7 +6,9 @@ use nextral::{
 use std::{env, fs, process};
 
 fn main() {
+    tracing_subscriber::fmt::init();
     if let Err(error) = run() {
+        tracing::error!(error = %error, "API command failed");
         eprintln!("{error}");
         process::exit(1);
     }

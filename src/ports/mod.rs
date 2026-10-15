@@ -3,7 +3,6 @@ use crate::{
     graph::{GraphEdge, GraphNode},
     memory::{MemoryRecord, MemoryStatus, PrivacyLevel},
     prospective::ReminderRecord,
-    retrieval::{RetrievalRequest, RetrievedItem},
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -140,23 +139,6 @@ pub trait Neo4jPort {
 pub trait ObjectArchivePort {
     fn put_object(&self, object: &ArchiveObject) -> CoreResult<ArchiveReceipt>;
     fn tombstone_object(&self, tenant_id: &str, object_key: &str, reason: &str) -> CoreResult<()>;
-}
-
-pub trait RetrievalCacheKey {
-    fn retrieval_cache_key(
-        &self,
-        request: &RetrievalRequest,
-        embedding_model: &str,
-        schema_version: &str,
-    ) -> CoreResult<String>;
-}
-
-pub trait RerankerPort {
-    fn rerank(
-        &self,
-        request: &RetrievalRequest,
-        items: Vec<RetrievedItem>,
-    ) -> CoreResult<Vec<RetrievedItem>>;
 }
 
 #[async_trait]

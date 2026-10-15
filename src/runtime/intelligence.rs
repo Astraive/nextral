@@ -126,7 +126,15 @@ impl ExperimentRegistry {
         policy_version: String,
         description: String,
     ) -> ExperimentCandidate {
-        let id = deterministic_id(&[&policy_version, &description, "experiment"]);
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = deterministic_id(&[
+            &policy_version,
+            &description,
+            &crate::memory::now_timestamp(),
+            &seq.to_string(),
+            "experiment",
+        ]);
         let candidate = ExperimentCandidate {
             id: id.clone(),
             lane,
@@ -172,7 +180,8 @@ impl ExperimentRegistry {
 
     pub fn status(&self, experiment_id: Option<&str>) -> serde_json::Value {
         if let Some(id) = experiment_id {
-            return serde_json::to_value(self.experiments.get(id)).unwrap_or_else(|_| serde_json::json!(null));
+            return serde_json::to_value(self.experiments.get(id))
+                .unwrap_or(serde_json::Value::Null);
         }
         serde_json::json!({
             "current_lane": self.current_lane,
@@ -182,11 +191,7 @@ impl ExperimentRegistry {
     }
 }
 
-pub fn classify_severity(
-    quality_score: f32,
-    contradiction_rate: f32,
-    degraded: bool,
-) -> Severity {
+pub fn classify_severity(quality_score: f32, contradiction_rate: f32, degraded: bool) -> Severity {
     if contradiction_rate > 0.4 || quality_score < 0.25 {
         Severity::Destructive
     } else if degraded || quality_score < 0.5 {

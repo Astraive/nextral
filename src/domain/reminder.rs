@@ -34,6 +34,24 @@ pub enum ReminderStatus {
     Expired,
 }
 
+impl std::fmt::Display for ReminderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::Draft => "draft",
+            Self::Scheduled => "scheduled",
+            Self::Due => "due",
+            Self::Dispatched => "dispatched",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        };
+        write!(f, "{text}")
+    }
+}
+
+/// A scheduled reminder linked to a source memory, with retry and expiry lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReminderRecord {
     pub id: String,
@@ -96,11 +114,8 @@ impl ReminderRecord {
                 "due_at must be a valid epoch timestamp in seconds".to_string(),
             ));
         }
-        // Validate timezone is non-empty (basic IANA format check)
-        if timezone.trim().is_empty() || !timezone.contains('/') {
-            return Err(CoreError::InvalidInput(
-                "timezone must be a valid IANA timezone (e.g., 'America/New_York', 'Asia/Kolkata')".to_string(),
-            ));
+        if timezone.trim().is_empty() {
+            return Err(CoreError::InvalidInput("timezone is required".to_string()));
         }
         let kind_text = format!("{:?}", kind);
         let dedupe_key =

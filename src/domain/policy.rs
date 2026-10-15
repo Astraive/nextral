@@ -1,6 +1,7 @@
 use crate::memory::{deterministic_id, now_timestamp, PrivacyLevel};
 use serde::{Deserialize, Serialize};
 
+/// A named procedural policy encoding behavioral preferences for a user.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProceduralPolicy {
     pub id: String,
@@ -21,13 +22,33 @@ impl ProceduralPolicy {
         name: impl Into<String>,
         body: impl Into<String>,
         privacy_level: PrivacyLevel,
-    ) -> Self {
+    ) -> crate::contracts::CoreResult<Self> {
         let tenant_id = tenant_id.into();
         let user_id = user_id.into();
         let name = name.into();
         let body = body.into();
+        if tenant_id.trim().is_empty() {
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "tenant_id is required".to_string(),
+            ));
+        }
+        if user_id.trim().is_empty() {
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "user_id is required".to_string(),
+            ));
+        }
+        if name.trim().is_empty() {
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "name is required".to_string(),
+            ));
+        }
+        if body.trim().is_empty() {
+            return Err(crate::contracts::CoreError::InvalidInput(
+                "body cannot be empty".to_string(),
+            ));
+        }
         let now = now_timestamp();
-        Self {
+        Ok(Self {
             id: deterministic_id(&[&tenant_id, &user_id, &name, &body]),
             tenant_id,
             user_id,
@@ -37,6 +58,6 @@ impl ProceduralPolicy {
             enabled: true,
             created_at: now.clone(),
             updated_at: now,
-        }
+        })
     }
 }

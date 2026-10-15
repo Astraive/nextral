@@ -5,6 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// A knowledge graph entity node with tenant isolation and confidence scoring.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphNode {
     pub tenant_id: String,
@@ -17,6 +18,7 @@ pub struct GraphNode {
     pub created_at: String,
 }
 
+/// A typed relationship between two graph nodes, tracking provenance via source memory IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphEdge {
     pub tenant_id: String,
@@ -64,7 +66,13 @@ pub struct GraphifyOutput {
 }
 
 impl GraphNode {
-    pub fn new(tenant_id: &str, user_id: &str, label: &str, name: &str, confidence: f32) -> CoreResult<Self> {
+    pub fn new(
+        tenant_id: &str,
+        user_id: &str,
+        label: &str,
+        name: &str,
+        confidence: f32,
+    ) -> CoreResult<Self> {
         validate_score("confidence", confidence)?;
         let canonical_name = canonicalize(name);
         Ok(Self {
@@ -111,7 +119,13 @@ pub fn graphify_record(record: &MemoryRecord, hints: &[GraphHint]) -> CoreResult
     let mut contradictions = Vec::new();
     for entity in &record.entities {
         if !entity.trim().is_empty() {
-            nodes.push(GraphNode::new(&record.tenant_id, &record.user_id, infer_label(entity), entity, 0.8)?);
+            nodes.push(GraphNode::new(
+                &record.tenant_id,
+                &record.user_id,
+                infer_label(entity),
+                entity,
+                0.8,
+            )?);
         }
     }
 
@@ -151,7 +165,7 @@ pub fn graphify_record(record: &MemoryRecord, hints: &[GraphHint]) -> CoreResult
     dedup_nodes(&mut nodes);
     Ok(GraphifyOutput {
         trace_id: crate::memory::deterministic_id(&[&record.id, &record.user_id, "graphify_trace"]),
-        evidence_count: (nodes.len() + relationships.len()) as u32,
+        evidence_count: u32::try_from(nodes.len() + relationships.len()).unwrap_or(u32::MAX),
         contradiction_class: if contradictions.is_empty() {
             "none".to_string()
         } else if contradictions.len() == 1 {
@@ -177,7 +191,11 @@ pub fn merge_graph(store: &mut impl GraphStore, output: GraphifyOutput) -> CoreR
 }
 
 fn dedup_nodes(nodes: &mut Vec<GraphNode>) {
-    nodes.sort_by(|left, right| left.key.cmp(&right.key));
+    nodes.sort_by(|left, right| {
+        left.user_id
+            .cmp(&right.user_id)
+            .then(left.key.cmp(&right.key))
+    });
     nodes.dedup_by(|left, right| left.user_id == right.user_id && left.key == right.key);
 }
 
@@ -185,10 +203,16 @@ pub fn canonicalize(name: &str) -> String {
     name.trim().to_lowercase().replace(' ', "_")
 }
 
-pub fn connect(edges: &mut Vec<GraphEdge>, tenant_id: &str, from: impl Into<String>, to: impl Into<String>) {
+pub fn connect(
+    edges: &mut Vec<GraphEdge>,
+    tenant_id: &str,
+    user_id: &str,
+    from: impl Into<String>,
+    to: impl Into<String>,
+) {
     let from = from.into();
     let to = to.into();
-    if let Ok(edge) = GraphEdge::new(tenant_id, "default", &from, "RELATED_TO", &to, 0.5, "legacy") {
+    if let Ok(edge) = GraphEdge::new(tenant_id, user_id, &from, "RELATED_TO", &to, 0.5, "legacy") {
         edges.push(edge);
     }
 }

@@ -133,19 +133,41 @@ pub fn execute_due_reminders(
 
     for mut reminder in due {
         let previous = reminder.status.clone();
-        if matches!(previous, ReminderStatus::Scheduled | ReminderStatus::RetryScheduled) {
-            let _ = reminder.transition(ReminderStatus::Due, &request.actor, "window reached")?;
+        if matches!(
+            previous,
+            ReminderStatus::Scheduled | ReminderStatus::RetryScheduled
+        ) {
+            let transition =
+                reminder.transition(ReminderStatus::Due, &request.actor, "window reached")?;
+            receipts.push(StoreReceipt::ok(
+                "reminder_transition",
+                format!("{}_to_{}", transition.from, transition.to),
+                Some(reminder.id.clone()),
+            ));
         }
 
         let dispatch_success = !reminder.title.to_lowercase().contains("fail");
         if dispatch_success {
-            let _ =
-                reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
-            let _ = reminder.transition(
+            let t1 = reminder.transition(
+                ReminderStatus::Dispatched,
+                &request.actor,
+                "dispatch start",
+            )?;
+            let t2 = reminder.transition(
                 ReminderStatus::Completed,
                 &request.actor,
                 "dispatch completed",
             )?;
+            receipts.push(StoreReceipt::ok(
+                "reminder_transition",
+                format!("{}_to_{}", t1.from, t1.to),
+                Some(reminder.id.clone()),
+            ));
+            receipts.push(StoreReceipt::ok(
+                "reminder_transition",
+                format!("{}_to_{}", t2.from, t2.to),
+                Some(reminder.id.clone()),
+            ));
             reminder.next_attempt_at = None;
             store.upsert_reminder(reminder.clone())?;
             receipts.push(StoreReceipt::ok(
@@ -166,15 +188,31 @@ pub fn execute_due_reminders(
             continue;
         }
 
-        let _ = reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
-        let _ = reminder.transition(ReminderStatus::Failed, &request.actor, "dispatch failed")?;
+        let t3 =
+            reminder.transition(ReminderStatus::Dispatched, &request.actor, "dispatch start")?;
+        let t4 = reminder.transition(ReminderStatus::Failed, &request.actor, "dispatch failed")?;
+        receipts.push(StoreReceipt::ok(
+            "reminder_transition",
+            format!("{}_to_{}", t3.from, t3.to),
+            Some(reminder.id.clone()),
+        ));
+        receipts.push(StoreReceipt::ok(
+            "reminder_transition",
+            format!("{}_to_{}", t4.from, t4.to),
+            Some(reminder.id.clone()),
+        ));
         let max_retries = request.max_retries.unwrap_or(3);
         if reminder.attempt_count < max_retries {
-            let _ = reminder.transition(
+            let t5 = reminder.transition(
                 ReminderStatus::RetryScheduled,
                 &request.actor,
                 "retry queued",
             )?;
+            receipts.push(StoreReceipt::ok(
+                "reminder_transition",
+                format!("{}_to_{}", t5.from, t5.to),
+                Some(reminder.id.clone()),
+            ));
             reminder.next_attempt_at = Some(next_attempt_at(
                 &request.due_at_or_before,
                 request.retry_delay_seconds,
@@ -196,7 +234,13 @@ pub fn execute_due_reminders(
                 outcome_severity: Severity::Warning,
             });
         } else {
-            let _ = reminder.transition(ReminderStatus::Expired, &request.actor, "retry exhausted")?;
+            let t6 =
+                reminder.transition(ReminderStatus::Expired, &request.actor, "retry exhausted")?;
+            receipts.push(StoreReceipt::ok(
+                "reminder_transition",
+                format!("{}_to_{}", t6.from, t6.to),
+                Some(reminder.id.clone()),
+            ));
             reminder.next_attempt_at = None;
             store.upsert_reminder(reminder.clone())?;
             receipts.push(StoreReceipt::ok(

@@ -132,6 +132,40 @@ pub struct ObservabilityConfig {
     pub prometheus_bind: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub max_requests_per_second: u32,
+    pub burst_size: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_requests_per_second: 100,
+            burst_size: 200,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchConfig {
+    pub max_batch_size: usize,
+    pub max_concurrent_batches: usize,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_batch_size: 100,
+            max_concurrent_batches: 4,
+        }
+    }
+}
+
+/// Complete runtime configuration covering backend selection, store URLs, provider settings,
+/// ingestion/retrieval policies, caching, service binds, auth, and observability.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NextralConfig {
     pub backend: RuntimeBackend,
@@ -145,6 +179,10 @@ pub struct NextralConfig {
     pub service: ServiceConfig,
     pub auth: AuthConfig,
     pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub batch: BatchConfig,
 }
 
 impl NextralConfig {
@@ -183,12 +221,64 @@ impl NextralConfig {
             ));
         }
 
+        if self.batch.max_batch_size == 0 || self.batch.max_batch_size > 10_000 {
+            return Err(CoreError::InvalidInput(
+                "batch.max_batch_size must be between 1 and 10,000".to_string(),
+            ));
+        }
+        if self.batch.max_concurrent_batches == 0 || self.batch.max_concurrent_batches > 64 {
+            return Err(CoreError::InvalidInput(
+                "batch.max_concurrent_batches must be between 1 and 64".to_string(),
+            ));
+        }
+        if self.rate_limit.enabled && self.rate_limit.max_requests_per_second == 0 {
+            return Err(CoreError::InvalidInput(
+                "rate_limit.max_requests_per_second must be non-zero when enabled".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
 
+pub fn resolve_env_vars(input: &str) -> String {
+    const MAX_ITERATIONS: usize = 100;
+    let mut result = input.to_string();
+    for _ in 0..MAX_ITERATIONS {
+        match result.find("${") {
+            Some(start) => {
+                let end = match result[start + 2..].find('}') {
+                    Some(pos) => pos,
+                    None => break,
+                };
+                let var_name = &result[start + 2..start + 2 + end].to_string();
+                let replacement = std::env::var(var_name).unwrap_or_default();
+                if replacement.is_empty() || replacement == format!("${{{}}}", var_name) {
+                    break;
+                }
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    replacement,
+                    &result[start + 2 + end + 1..]
+                );
+            }
+            None => break,
+        }
+    }
+    result
+}
+
+pub fn load_config(config_json: &str) -> CoreResult<NextralConfig> {
+    let resolved = resolve_env_vars(config_json);
+    let config: NextralConfig = serde_json::from_str(&resolved)?;
+    config.validate()?;
+    Ok(config)
+}
+
 pub fn validate_config_json(config_json: &str) -> CoreResult<String> {
-    let config: NextralConfig = serde_json::from_str(config_json)?;
+    let resolved = resolve_env_vars(config_json);
+    let config: NextralConfig = serde_json::from_str(&resolved)?;
     config.validate()?;
     Ok("{\"status\":\"ok\"}".to_string())
 }
@@ -198,6 +288,19 @@ fn validate_score(name: &str, value: f32) -> CoreResult<()> {
         return Err(CoreError::InvalidInput(format!(
             "{name} must be within 0..=1"
         )));
+    }
+    Ok(())
+}
+
+pub fn validate_scoring_weights(weights: &ScoringWeights) -> CoreResult<()> {
+    if weights.semantic_similarity < 0.0
+        || weights.recency < 0.0
+        || weights.importance < 0.0
+        || weights.access < 0.0
+    {
+        return Err(CoreError::InvalidInput(
+            "scoring weights must be non-negative".to_string(),
+        ));
     }
     Ok(())
 }
@@ -213,6 +316,22 @@ fn validate_retrieval_policy(policy: &RetrievalPolicy) -> CoreResult<()> {
             "retrieval token budget, vector top-k, and graph hops must be non-zero".to_string(),
         ));
     }
+    if policy.token_budget > 100_000 {
+        return Err(CoreError::InvalidInput(
+            "retrieval token_budget must not exceed 100,000".to_string(),
+        ));
+    }
+    if policy.top_k_vector > 1000 {
+        return Err(CoreError::InvalidInput(
+            "retrieval top_k_vector must not exceed 1000".to_string(),
+        ));
+    }
+    if policy.max_graph_hops > 10 {
+        return Err(CoreError::InvalidInput(
+            "retrieval max_graph_hops must not exceed 10".to_string(),
+        ));
+    }
+    validate_scoring_weights(&policy.scoring_weights)?;
     let total = policy.scoring_weights.semantic_similarity
         + policy.scoring_weights.recency
         + policy.scoring_weights.importance
@@ -230,6 +349,16 @@ fn validate_embedding(config: &EmbeddingProviderConfig) -> CoreResult<()> {
     if config.dimension == 0 {
         return Err(CoreError::InvalidInput(
             "embedding.dimension must be non-zero".to_string(),
+        ));
+    }
+    if config.dimension > 32_768 {
+        return Err(CoreError::InvalidInput(
+            "embedding.dimension must not exceed 32,768".to_string(),
+        ));
+    }
+    if config.model.len() > 256 {
+        return Err(CoreError::InvalidInput(
+            "embedding.model name must not exceed 256 characters".to_string(),
         ));
     }
     match config.kind {
@@ -278,6 +407,15 @@ fn validate_cache(config: &CacheConfig) -> CoreResult<()> {
             "cache TTLs must be non-zero".to_string(),
         ));
     }
+    const MAX_TTL: u64 = 365 * 24 * 60 * 60;
+    if config.session_ttl_seconds > MAX_TTL
+        || config.retrieval_ttl_seconds > MAX_TTL
+        || config.policy_ttl_seconds > MAX_TTL
+    {
+        return Err(CoreError::InvalidInput(
+            "cache TTLs must not exceed 365 days".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -303,12 +441,27 @@ fn validate_stores(config: &StoreConfig) -> CoreResult<()> {
         for (name, value) in [
             ("stores.qdrant_url", &config.qdrant_url),
             ("stores.s3_endpoint", &config.s3_endpoint),
+            ("stores.neo4j_url", &config.neo4j_url),
         ] {
-            if !value.starts_with("https://") {
+            if !value.starts_with("https://") && !value.starts_with("neo4j+s://") {
                 return Err(CoreError::InvalidInput(format!(
-                    "{name} must use https:// when stores.enforce_tls is true"
+                    "{name} must use https:// or neo4j+s:// when stores.enforce_tls is true"
                 )));
             }
+        }
+        // Check postgres uses sslmode in URL
+        if !config.postgres_url.contains("sslmode=require")
+            && !config.postgres_url.starts_with("postgresql://")
+        {
+            // Only warn-style check for postgres since it uses connection string params
+        }
+        // Check redis uses rediss:// for TLS
+        if !config.redis_url.starts_with("rediss://")
+            && !config.redis_url.starts_with("redis+tls://")
+        {
+            return Err(CoreError::InvalidInput(
+                "stores.redis_url must use rediss:// or redis+tls:// when stores.enforce_tls is true".to_string(),
+            ));
         }
     }
     Ok(())

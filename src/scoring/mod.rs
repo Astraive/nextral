@@ -20,6 +20,9 @@ pub fn lexical_score(text: &str, query: &str) -> f32 {
     if query_tokens.is_empty() {
         return 0.0;
     }
+    if text.trim().is_empty() {
+        return 0.0;
+    }
 
     let text_lower = text.to_lowercase();
     let overlap = query_tokens

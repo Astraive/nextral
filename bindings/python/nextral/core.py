@@ -14,7 +14,7 @@ from ._nextral import mcp_call as _mcp_call
 
 
 def lexical_score(text: str, query: str) -> float:
-    return float(_lexical_score(text, query))
+    return _lexical_score(text, query)
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:

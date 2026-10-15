@@ -67,5 +67,14 @@
     "enabled": false,
     "otlp_endpoint": null,
     "prometheus_bind": null
+  },
+  "rate_limit": {
+    "enabled": true,
+    "max_requests_per_second": 100,
+    "burst_size": 200
+  },
+  "batch": {
+    "max_batch_size": 100,
+    "max_concurrent_batches": 4
   }
 }

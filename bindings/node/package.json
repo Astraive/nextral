@@ -2,8 +2,8 @@
   "name": "nextral",
   "version": "0.1.0",
   "description": "Node package for the Nextral production memory runtime.",
-  "main": "index.ts",
-  "types": "index.ts",
+  "main": "index.js",
+  "types": "index.d.ts",
   "scripts": {
     "build": "napi build --platform",
     "build:debug": "napi build --platform --debug"

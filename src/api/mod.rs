@@ -60,13 +60,18 @@ pub fn startup_plan(config: &NextralConfig, mode: ServiceMode) -> CoreResult<Ser
     })
 }
 
-pub fn run_service_hosts(config: &NextralConfig, mode: ServiceMode) -> CoreResult<ServiceRuntimeReport> {
+pub fn run_service_hosts(
+    config: &NextralConfig,
+    mode: ServiceMode,
+) -> CoreResult<ServiceRuntimeReport> {
     let plan = startup_plan(config, mode)?;
 
     // Check readiness matrix before starting services
     let readiness = startup_readiness_matrix(config)?;
     if readiness.fail_fast {
-        let unavailable: Vec<&str> = readiness.backends.iter()
+        let unavailable: Vec<&str> = readiness
+            .backends
+            .iter()
             .filter(|b| b.status == "unavailable")
             .map(|b| b.backend.as_str())
             .collect();
@@ -101,13 +106,22 @@ pub fn run_service_hosts(config: &NextralConfig, mode: ServiceMode) -> CoreResul
             ServiceMode::All => {}
         }
     }
+    let mut errors = Vec::new();
     for handle in handles {
-        if let Err(error) = handle.join() {
-            eprintln!("Service listener thread panicked: {:?}", error);
+        match handle.join() {
+            Ok(Some(error)) => errors.push(error),
+            Ok(None) => {}
+            Err(error) => errors.push(format!("listener thread panicked: {:?}", error)),
         }
     }
+    if !errors.is_empty() {
+        return Err(crate::contracts::CoreError::Io(format!(
+            "service startup failed: {}",
+            errors.join("; ")
+        )));
+    }
     Ok(ServiceRuntimeReport {
-        status: "stopped".to_string(),
+        status: "running".to_string(),
         binds,
     })
 }
@@ -169,26 +183,172 @@ pub fn startup_readiness_matrix(config: &NextralConfig) -> CoreResult<StartupRea
     })
 }
 
-fn spawn_listener(bind: String, mode: &'static str) -> thread::JoinHandle<()> {
+fn spawn_listener(bind: String, mode: &'static str) -> thread::JoinHandle<Option<String>> {
     thread::spawn(move || {
         let listener = match TcpListener::bind(&bind) {
             Ok(listener) => listener,
-            Err(_) => return,
+            Err(error) => return Some(format!("{mode} bind failed on {bind}: {error}")),
         };
-        for stream in listener.incoming() {
-            if let Ok(mut stream) = stream {
-                let _ = write_response(&mut stream, mode);
+        let connection_count = std::sync::atomic::AtomicUsize::new(0);
+        for mut stream in listener.incoming().flatten() {
+            let count = connection_count.load(std::sync::atomic::Ordering::Relaxed);
+            if count >= MAX_CONNECTIONS {
+                let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
             }
+            connection_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle_connection(&mut stream, mode);
+            connection_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        None
     })
 }
 
-fn write_response(stream: &mut TcpStream, mode: &str) -> std::io::Result<()> {
-    let body = format!("nextral {mode} service alive");
+const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
+const MAX_CONNECTIONS: usize = 256;
+
+fn handle_connection(stream: &mut TcpStream, mode: &str) -> std::io::Result<()> {
+    use std::io::Read;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let mut buf = [0u8; 8192];
+    let n = stream.read(&mut buf)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let mut lines = request.lines();
+    let request_line = lines.next().unwrap_or("");
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    let method = parts.first().unwrap_or(&"");
+    let path = parts.get(1).unwrap_or(&"");
+
+    if !matches!(
+        *method,
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+    ) {
+        let error_body = serde_json::json!({"error": "method not allowed"}).to_string();
+        let response = format!(
+            "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            error_body.len(),
+            error_body
+        );
+        return stream.write_all(response.as_bytes());
+    }
+
+    let content_length: usize = lines
+        .filter_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .map(|v| v.trim().parse().unwrap_or(0))
+        })
+        .next()
+        .unwrap_or(0);
+
+    if content_length > MAX_REQUEST_BODY_BYTES {
+        let error_body = serde_json::json!({"error": "request body too large", "max_bytes": MAX_REQUEST_BODY_BYTES}).to_string();
+        let response = format!(
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            error_body.len(),
+            error_body
+        );
+        return stream.write_all(response.as_bytes());
+    }
+
+    let body_start = request.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n);
+    let mut body = request[body_start..].to_string();
+    if body.len() < content_length {
+        let remaining = content_length - body.len();
+        if remaining > MAX_REQUEST_BODY_BYTES {
+            let error_body = serde_json::json!({"error": "request body too large"}).to_string();
+            let response = format!(
+                "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                error_body.len(),
+                error_body
+            );
+            return stream.write_all(response.as_bytes());
+        }
+        let mut extra = vec![0u8; remaining];
+        stream.read_exact(&mut extra)?;
+        body.push_str(&String::from_utf8_lossy(&extra));
+    }
+
+    let (status_code, response_body) = route_request(mode, method, path, &body);
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n\r\n{}",
+        status_code.0,
+        status_code.1,
+        response_body.len(),
+        response_body
     );
     stream.write_all(response.as_bytes())
+}
+
+pub fn route_request(
+    mode: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> ((u16, &'static str), String) {
+    let path = path.trim_end_matches('/');
+    let result = match (method, path) {
+        ("GET", "/health") | ("GET", "/v1/health") => {
+            Ok(serde_json::json!({"status": "ok", "mode": mode}).to_string())
+        }
+        ("POST", "/v1/ingest") | ("POST", "/ingest") => crate::package::mcp_call_json(
+            &serde_json::json!({"tool": "nextral.memory.ingest", "payload_json": body.to_string()})
+                .to_string(),
+        )
+        .map_err(|e| e.message),
+        ("POST", "/v1/retrieve") | ("POST", "/retrieve") => crate::package::mcp_call_json(
+            &serde_json::json!({"tool": "nextral.memory.retrieve", "payload_json": body.to_string()})
+                .to_string(),
+        )
+        .map_err(|e| e.message),
+        ("POST", "/v1/forget") | ("POST", "/forget") => crate::package::mcp_call_json(
+            &serde_json::json!({"tool": "nextral.memory.forget", "payload_json": body.to_string()})
+                .to_string(),
+        )
+        .map_err(|e| e.message),
+        ("POST", "/v1/graph/query") | ("POST", "/graph/query") => crate::package::mcp_call_json(
+            &serde_json::json!({"tool": "nextral.graph.query", "payload_json": body.to_string()})
+                .to_string(),
+        )
+        .map_err(|e| e.message),
+        ("POST", "/v1/reminders/due") | ("POST", "/reminders/due") => {
+            crate::package::mcp_call_json(
+                &serde_json::json!({"tool": "nextral.reminders.due", "payload_json": body.to_string()})
+                    .to_string(),
+            )
+            .map_err(|e| e.message)
+        }
+        ("POST", "/v1/batch/ingest") | ("POST", "/batch/ingest") => {
+            crate::package::mcp_call_json(
+                &serde_json::json!({"tool": "nextral.batch.ingest", "payload_json": body.to_string()})
+                    .to_string(),
+            )
+            .map_err(|e| e.message)
+        }
+        ("POST", "/v1/batch/retrieve") | ("POST", "/batch/retrieve") => {
+            crate::package::mcp_call_json(
+                &serde_json::json!({"tool": "nextral.batch.retrieve", "payload_json": body.to_string()})
+                    .to_string(),
+            )
+            .map_err(|e| e.message)
+        }
+        ("POST", "/v1/batch/forget") | ("POST", "/batch/forget") => {
+            crate::package::mcp_call_json(
+                &serde_json::json!({"tool": "nextral.batch.forget", "payload_json": body.to_string()})
+                    .to_string(),
+            )
+            .map_err(|e| e.message)
+        }
+        _ => return ((404, "Not Found"), serde_json::json!({"error": format!("{} {} not found", method, path)}).to_string()),
+    };
+    match result {
+        Ok(body) => ((200, "OK"), body),
+        Err(error) => (
+            (500, "Internal Server Error"),
+            serde_json::json!({"error": error}).to_string(),
+        ),
+    }
 }

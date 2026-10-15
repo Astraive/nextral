@@ -11,11 +11,21 @@ use crate::{
 use postgres::{Client, NoTls, Row};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const POOL_SIZE: usize = 10;
+
 pub struct PostgresAdapter {
     pub url: String,
+    pool: OnceLock<Mutex<Vec<Client>>>,
 }
+
+impl PartialEq for PostgresAdapter {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url
+    }
+}
+impl Eq for PostgresAdapter {}
 
 impl PostgresAdapter {
     pub fn new(url: impl Into<String>) -> CoreResult<Self> {
@@ -25,7 +35,36 @@ impl PostgresAdapter {
                 "postgres_url is required".to_string(),
             ));
         }
-        Ok(Self { url })
+        Ok(Self {
+            url,
+            pool: OnceLock::new(),
+        })
+    }
+
+    fn pool(&self) -> &Mutex<Vec<Client>> {
+        self.pool
+            .get_or_init(|| Mutex::new(Vec::with_capacity(POOL_SIZE)))
+    }
+
+    fn client(&self) -> CoreResult<Client> {
+        let pool = self.pool();
+        let mut pool = pool.lock().map_err(|e| CoreError::Io(e.to_string()))?;
+        if let Some(client) = pool.pop() {
+            return Ok(client);
+        }
+        drop(pool);
+        Client::connect(&self.url, NoTls).map_err(|error| CoreError::Io(error.to_string()))
+    }
+
+    fn return_client(&self, client: Client) {
+        if client.is_closed() {
+            return;
+        }
+        if let Ok(mut pool) = self.pool().lock() {
+            if pool.len() < POOL_SIZE {
+                pool.push(client);
+            }
+        }
     }
 
     pub fn migration_sql(&self) -> &'static str {
@@ -38,14 +77,12 @@ impl PostgresAdapter {
 
     pub fn migrate(&self) -> CoreResult<()> {
         let mut client = self.client()?;
-        client
+        let result = client
             .batch_execute(self.migration_sql())
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?;
         Ok(())
-    }
-
-    fn client(&self) -> CoreResult<Client> {
-        Client::connect(&self.url, NoTls).map_err(|error| CoreError::Io(error.to_string()))
     }
 }
 
@@ -73,7 +110,7 @@ impl PostgresPort for PostgresAdapter {
         let last_accessed_at =
             optional_epoch_seconds(record.last_accessed_at.as_deref(), "last_accessed_at")?;
 
-        let rows_affected = client
+        let result = client
             .execute(
                 r#"
                 INSERT INTO nextral_memories (
@@ -139,7 +176,9 @@ impl PostgresPort for PostgresAdapter {
                     &record.schema_version,
                 ],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        let rows_affected = result?;
         if rows_affected == 0 {
             return Err(CoreError::Conflict(format!(
                 "memory id '{}' already exists in a different tenant/user scope",
@@ -155,7 +194,7 @@ impl PostgresPort for PostgresAdapter {
         memory_id: &str,
     ) -> CoreResult<Option<MemoryRecord>> {
         let mut client = self.client()?;
-        let row = client
+        let result = client
             .query_opt(
                 r#"
                 SELECT id, tenant_id, user_id, session_id, content, content_type, memory_type,
@@ -170,8 +209,9 @@ impl PostgresPort for PostgresAdapter {
                 "#,
                 &[&scope.tenant_id, &scope.user_id, &memory_id],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
-        row.map(row_to_memory).transpose()
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?.map(row_to_memory).transpose()
     }
 
     fn append_session_message(
@@ -183,7 +223,7 @@ impl PostgresPort for PostgresAdapter {
     ) -> CoreResult<String> {
         let id = deterministic_id(&[&scope.tenant_id, &scope.user_id, session_id, role, content]);
         let mut client = self.client()?;
-        client
+        let result = client
             .execute(
                 r#"
                 INSERT INTO nextral_session_messages
@@ -200,7 +240,9 @@ impl PostgresPort for PostgresAdapter {
                     &content,
                 ],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?;
         Ok(id)
     }
 
@@ -213,7 +255,7 @@ impl PostgresPort for PostgresAdapter {
         let created_at = epoch_seconds(&reminder.created_at, "created_at")?;
         let updated_at = epoch_seconds(&reminder.updated_at, "updated_at")?;
         let mut client = self.client()?;
-        client
+        let result = client
             .execute(
                 r#"
                 INSERT INTO nextral_reminders (
@@ -259,7 +301,9 @@ impl PostgresPort for PostgresAdapter {
                     &updated_at,
                 ],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?;
         Ok(())
     }
 
@@ -272,7 +316,7 @@ impl PostgresPort for PostgresAdapter {
             &event.reason,
         ]);
         let mut client = self.client()?;
-        client
+        let result = client
             .execute(
                 r#"
                 INSERT INTO nextral_audit_events
@@ -294,7 +338,9 @@ impl PostgresPort for PostgresAdapter {
                     &metadata,
                 ],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?;
         Ok(())
     }
 
@@ -308,7 +354,7 @@ impl PostgresPort for PostgresAdapter {
         let payload = serde_json::from_str::<Value>(payload_json)?;
         let id = deterministic_id(&[tenant_id, event_type, aggregate_id, payload_json]);
         let mut client = self.client()?;
-        client
+        let result = client
             .execute(
                 r#"
                 INSERT INTO nextral_outbox_events
@@ -318,7 +364,9 @@ impl PostgresPort for PostgresAdapter {
                 "#,
                 &[&id, &tenant_id, &event_type, &aggregate_id, &payload],
             )
-            .map_err(|error| CoreError::Io(error.to_string()))?;
+            .map_err(|error| CoreError::Io(error.to_string()));
+        self.return_client(client);
+        result?;
         Ok(id)
     }
 }
@@ -368,7 +416,14 @@ fn row_to_memory(row: Row) -> CoreResult<MemoryRecord> {
         confidence_score: row.get(10),
         embedding_provider: row.get(11),
         embedding_model: row.get(12),
-        embedding_dim: Some(row.get::<_, i32>(13) as u32),
+        embedding_dim: {
+            let val: i32 = row.get(13);
+            if val >= 0 {
+                Some(val as u32)
+            } else {
+                None
+            }
+        },
         extraction_provider: None,
         extraction_model: None,
         entities: serde_json::from_value(row.get::<_, Value>(14))?,
@@ -384,7 +439,14 @@ fn row_to_memory(row: Row) -> CoreResult<MemoryRecord> {
                 Some(value)
             }
         },
-        access_count: row.get::<_, i64>(20) as u64,
+        access_count: {
+            let val: i64 = row.get(20);
+            if val >= 0 {
+                val as u64
+            } else {
+                0
+            }
+        },
         status: from_text::<MemoryStatus>(row.get(21))?,
         schema_version: row.get(22),
     })

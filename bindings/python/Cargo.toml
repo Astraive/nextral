@@ -11,4 +11,3 @@ crate-type = ["cdylib"]
 [dependencies]
 nextral = { path = "../.." }
 pyo3 = { version = "0.28", features = ["extension-module"] }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }

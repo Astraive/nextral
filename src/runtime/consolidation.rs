@@ -1,7 +1,7 @@
 use crate::{
     config::IngestionPolicy,
     contracts::{CoreError, CoreResult},
-    domain::{RuntimeJob, StoreReceipt},
+    domain::{AuditAction, AuditEvent, RuntimeJob, StoreReceipt},
     ingestion::{ingest_memory, IngestMemoryRequest, IngestMemoryResponse},
     memory::{deterministic_id, now_timestamp, ContentType, MemoryType, SourceType},
     store::{AuditSink, GraphStore, MemoryIndexStore, SessionStore},
@@ -38,11 +38,12 @@ pub fn consolidate_session<T>(
 where
     T: SessionStore + MemoryIndexStore + AuditSink + GraphStore,
 {
+    const MAX_SESSION_MESSAGES: usize = 10_000;
     let messages = store.session_tail(
         &request.tenant_id,
         &request.user_id,
         &request.session_id,
-        usize::MAX,
+        MAX_SESSION_MESSAGES,
     )?;
     if messages.is_empty() {
         return Err(CoreError::NotFound(
@@ -90,19 +91,44 @@ where
         }
     }
 
+    store.emit_audit(AuditEvent::new(
+        deterministic_id(&[
+            &request.tenant_id,
+            &request.session_id,
+            "consolidation_queued",
+        ]),
+        &request.tenant_id,
+        "system",
+        AuditAction::ConsolidationQueued,
+        "session",
+        Some(request.session_id.clone()),
+        format!("{:?} lane consolidation queued", request.lane),
+    ))?;
     let accepted = vec![ingest_memory(store, ingest)?];
     let now = now_timestamp();
+    let tenant_id = request.tenant_id.clone();
+    let session_id = request.session_id.clone();
     let job = RuntimeJob {
-        id: deterministic_id(&[&request.tenant_id, &request.session_id, "consolidation"]),
-        tenant_id: request.tenant_id,
+        id: deterministic_id(&[&tenant_id, &session_id, "consolidation"]),
+        tenant_id,
         job_type: format!("{:?}", request.lane).to_lowercase(),
-        target_id: request.session_id,
+        target_id: session_id,
         status: "completed".to_string(),
         attempts: 1,
         last_error: None,
         created_at: now.clone(),
         updated_at: now,
     };
+    // Use the IDs already moved into the job for the audit event
+    store.emit_audit(AuditEvent::new(
+        deterministic_id(&[&job.tenant_id, &job.target_id, "consolidation_completed"]),
+        &job.tenant_id,
+        "system",
+        AuditAction::ConsolidationCompleted,
+        "session",
+        Some(job.target_id.clone()),
+        "consolidation completed".to_string(),
+    ))?;
     Ok(ConsolidationResponse {
         job,
         accepted,

@@ -1,0 +1,70 @@
+{
+  "backend": "test_memory",
+  "stores": null,
+  "embedding": {
+    "kind": "test",
+    "model": "test-model",
+    "dimension": 128,
+    "endpoint": null,
+    "api_key_env": null
+  },
+  "extraction": {
+    "kind": "test",
+    "model": "test-model",
+    "endpoint": null,
+    "api_key_env": null
+  },
+  "reranker": {
+    "kind": "none",
+    "model": null,
+    "endpoint": null,
+    "api_key_env": null
+  },
+  "ingestion_policy": {
+    "min_importance_score": 0.0,
+    "min_confidence_score": 0.0
+  },
+  "retrieval_policy": {
+    "privacy_scope": ["private"],
+    "token_budget": 1800,
+    "top_k_vector": 12,
+    "max_graph_hops": 2,
+    "scoring_weights": {
+      "semantic_similarity": 0.5,
+      "recency": 0.2,
+      "importance": 0.2,
+      "access": 0.1
+    }
+  },
+  "cache": {
+    "key_prefix": "nextral",
+    "session_ttl_seconds": 7200,
+    "retrieval_ttl_seconds": 120,
+    "policy_ttl_seconds": 300
+  },
+  "service": {
+    "http_bind": "127.0.0.1:8080",
+    "grpc_bind": null,
+    "graphql_bind": null
+  },
+  "auth": {
+    "issuer": null,
+    "audience": null,
+    "jwks_url": null,
+    "service_token_env": null
+  },
+  "observability": {
+    "enabled": false,
+    "otlp_endpoint": null,
+    "prometheus_bind": null
+  },
+  "rate_limit": {
+    "enabled": false,
+    "max_requests_per_second": 100,
+    "burst_size": 200
+  },
+  "batch": {
+    "max_batch_size": 100,
+    "max_concurrent_batches": 4
+  }
+}

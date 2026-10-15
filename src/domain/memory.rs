@@ -8,8 +8,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Current schema version for memory records. Must be bumped on breaking changes.
 pub const CURRENT_SCHEMA_VERSION: &str = "1.0.0";
 
+/// Classifies the semantic nature of a memory's content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {
@@ -24,6 +26,8 @@ pub enum ContentType {
     Pattern,
 }
 
+/// The seven-type memory architecture: Working, Session, Episodic, Semantic,
+/// Relational, Procedural, and Prospective.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
@@ -46,6 +50,7 @@ pub enum SourceType {
     Manual,
 }
 
+/// Privacy classification controlling visibility across tenants and retrieval scopes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyLevel {
@@ -55,6 +60,8 @@ pub enum PrivacyLevel {
     Restricted,
 }
 
+/// Lifecycle state of a memory record. Transitions follow a strict state machine:
+/// Active → SoftDeleted → Redacted, or Active → Archived.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
@@ -64,6 +71,7 @@ pub enum MemoryStatus {
     Archived,
 }
 
+/// Core memory record containing content, metadata, embedding info, and lifecycle state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryRecord {
     pub id: String,
@@ -144,8 +152,17 @@ impl MemoryRecord {
     }
 
     pub fn validate(&self) -> CoreResult<()> {
+        const MAX_CONTENT_LENGTH: usize = 1_000_000;
+        const MAX_ID_LENGTH: usize = 256;
+        const MAX_ENTITIES: usize = 1000;
+        const MAX_TAGS: usize = 1000;
         if self.id.trim().is_empty() {
             return Err(CoreError::InvalidInput("memory id is required".to_string()));
+        }
+        if self.id.len() > MAX_ID_LENGTH {
+            return Err(CoreError::InvalidInput(format!(
+                "memory id must not exceed {MAX_ID_LENGTH} characters"
+            )));
         }
         if self.tenant_id.trim().is_empty() {
             return Err(CoreError::InvalidInput("tenant_id is required".to_string()));
@@ -157,6 +174,21 @@ impl MemoryRecord {
             return Err(CoreError::InvalidInput(
                 "content cannot be empty".to_string(),
             ));
+        }
+        if self.content.len() > MAX_CONTENT_LENGTH {
+            return Err(CoreError::InvalidInput(format!(
+                "content must not exceed {MAX_CONTENT_LENGTH} characters"
+            )));
+        }
+        if self.entities.len() > MAX_ENTITIES {
+            return Err(CoreError::InvalidInput(format!(
+                "entities must not contain more than {MAX_ENTITIES} items"
+            )));
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(CoreError::InvalidInput(format!(
+                "tags must not contain more than {MAX_TAGS} items"
+            )));
         }
         validate_score("importance_score", self.importance_score)?;
         if let Some(score) = self.confidence_score {
@@ -176,6 +208,13 @@ impl MemoryRecord {
             return Err(CoreError::InvalidInput(
                 "working memory must remain ephemeral realtime state".to_string(),
             ));
+        }
+        let policy = crate::domain::RuntimePolicy::default();
+        if !policy.allows_memory_type(&self.memory_type) {
+            return Err(CoreError::InvalidInput(format!(
+                "memory_type {:?} is not allowed by runtime policy",
+                self.memory_type
+            )));
         }
         Ok(())
     }
@@ -228,6 +267,93 @@ impl MemoryRecord {
         self.access_count = self.access_count.saturating_add(1);
         self.last_accessed_at = Some(now_timestamp());
     }
+
+    pub fn add_tag(&mut self, tag: impl Into<String>) {
+        let tag = tag.into();
+        if !self.tags.contains(&tag) {
+            self.tags.push(tag);
+            self.updated_at = now_timestamp();
+        }
+    }
+
+    pub fn remove_tag(&mut self, tag: &str) -> bool {
+        let len = self.tags.len();
+        self.tags.retain(|t| t != tag);
+        if self.tags.len() < len {
+            self.updated_at = now_timestamp();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t == tag)
+    }
+
+    pub fn add_entity(&mut self, entity: impl Into<String>) {
+        let entity = entity.into();
+        if !self.entities.contains(&entity) {
+            self.entities.push(entity);
+            self.updated_at = now_timestamp();
+        }
+    }
+
+    pub fn remove_entity(&mut self, entity: &str) -> bool {
+        let len = self.entities.len();
+        self.entities.retain(|e| e != entity);
+        if self.entities.len() < len {
+            self.updated_at = now_timestamp();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn has_entity(&self, entity: &str) -> bool {
+        self.entities.iter().any(|e| e == entity)
+    }
+
+    pub fn patch(
+        &mut self,
+        content: Option<String>,
+        content_type: Option<ContentType>,
+        importance_score: Option<f32>,
+        confidence_score: Option<Option<f32>>,
+        privacy_level: Option<PrivacyLevel>,
+    ) -> CoreResult<()> {
+        if let Some(c) = content {
+            if c.trim().is_empty() {
+                return Err(CoreError::InvalidInput(
+                    "content cannot be empty".to_string(),
+                ));
+            }
+            if c.len() > 1_000_000 {
+                return Err(CoreError::InvalidInput(
+                    "content must not exceed 1,000,000 characters".to_string(),
+                ));
+            }
+            self.content = c;
+        }
+        if let Some(ct) = content_type {
+            self.content_type = ct;
+        }
+        if let Some(score) = importance_score {
+            crate::memory::validate_score("importance_score", score)?;
+            self.importance_score = score;
+        }
+        if let Some(cs) = confidence_score {
+            if let Some(s) = cs {
+                crate::memory::validate_score("confidence_score", s)?;
+            }
+            self.confidence_score = cs;
+        }
+        if let Some(pl) = privacy_level {
+            self.privacy_level = pl;
+        }
+        self.updated_at = now_timestamp();
+        Ok(())
+    }
 }
 
 pub fn upsert(records: &mut Vec<MemoryRecord>, record: MemoryRecord) {
@@ -253,26 +379,25 @@ pub fn validate_score(name: &str, score: f32) -> CoreResult<()> {
 pub fn now_timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("System time is before UNIX epoch (1970-01-01). Check system clock.")
+        .unwrap_or_default()
         .as_secs()
         .to_string()
 }
 
 pub fn deterministic_id(parts: &[&str]) -> String {
-    // Use FNV-1a hash which is stable across Rust versions and has good distribution
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
-    for part in parts {
-        for byte in part.as_bytes() {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            hasher.update([0xFF]);
         }
-        // Add separator to prevent "ab"+"c" == "a"+"bc" collisions
-        hash ^= 0xFF;
-        hash = hash.wrapping_mul(FNV_PRIME);
+        hasher.update(part.as_bytes());
     }
-    format!("mem_{:016x}", hash)
+    let result = hasher.finalize();
+    format!(
+        "mem_{:016x}",
+        u64::from_be_bytes(result[..8].try_into().unwrap_or([0; 8]))
+    )
 }
 
 pub fn estimate_tokens(text: &str) -> u32 {

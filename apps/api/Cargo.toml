@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 nextral = { path = "../.." }
 serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"

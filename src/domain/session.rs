@@ -1,7 +1,7 @@
 use crate::memory::{deterministic_id, now_timestamp};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMessage {
     pub id: String,
     pub tenant_id: String,
@@ -11,6 +11,7 @@ pub struct SessionMessage {
     pub content: String,
     pub idempotency_key: String,
     pub created_at: String,
+    pub source_metadata: serde_json::Value,
 }
 
 impl SessionMessage {
@@ -26,8 +27,12 @@ impl SessionMessage {
         let user_id = user_id.into();
         let session_id = session_id.into();
         let role = role.into();
-        let content = content.into();
+        let mut content = content.into();
         let idempotency_key = idempotency_key.into();
+        const MAX_MESSAGE_CONTENT: usize = 100_000;
+        if content.len() > MAX_MESSAGE_CONTENT {
+            content.truncate(MAX_MESSAGE_CONTENT);
+        }
         let id = deterministic_id(&[
             &tenant_id,
             &user_id,
@@ -45,6 +50,7 @@ impl SessionMessage {
             content,
             idempotency_key,
             created_at: now_timestamp(),
+            source_metadata: serde_json::json!({}),
         }
     }
 }
@@ -60,7 +66,7 @@ pub struct SessionSummary {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkingContext {
     pub tenant_id: String,
     pub user_id: String,

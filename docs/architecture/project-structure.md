@@ -3,12 +3,38 @@
 ```text
 nextral/
 ├── src/
-│   ├── memory/
-│   ├── retrieval/
-│   ├── graph/
-│   ├── scoring/
-│   ├── runtime/
-│   ├── contracts/
+│   ├── adapters/           # production store implementations
+│   │   ├── postgres.rs
+│   │   ├── redis.rs
+│   │   ├── qdrant.rs
+│   │   ├── neo4j.rs
+│   │   ├── s3.rs
+│   │   └── transport.rs
+│   ├── api/                # HTTP/gRPC/GraphQL server
+│   ├── config/             # configuration types and validation
+│   ├── contracts/          # shared error types
+│   ├── domain/             # core domain types
+│   │   ├── memory.rs
+│   │   ├── graph.rs
+│   │   ├── reminder.rs
+│   │   ├── session.rs
+│   │   ├── policy.rs
+│   │   ├── audit.rs
+│   │   └── runtime_policy.rs
+│   ├── graph/              # graph utilities and re-exports
+│   ├── ingestion.rs        # memory ingestion pipeline
+│   ├── memory/             # memory record types and re-exports
+│   ├── package/            # MCP tools, smoke tests, batch operations
+│   ├── planner.rs          # operation planning
+│   ├── ports/              # trait definitions for adapters
+│   ├── prospective.rs      # reminder types and re-exports
+│   ├── providers/          # provider traits (embedding, extraction, reranker)
+│   ├── retrieval/          # retrieval scoring and execution
+│   ├── runtime/            # orchestration and runtime execution
+│   ├── scoring/            # lexical and multi-factor scoring
+│   ├── store.rs            # test store re-exports
+│   ├── testkit/            # TestMemoryStore for in-memory testing
+│   ├── topology.rs         # memory type to store role mapping
 │   └── lib.rs
 ├── bindings/
 │   ├── python/
@@ -22,11 +48,17 @@ nextral/
 │       ├── Cargo.toml
 │       └── index.ts
 ├── apps/
-│   ├── cli/
-│   ├── mcp/
-│   ├── web/
-│   └── examples/
-├── tests/
+│   ├── api/                # HTTP API server binary
+│   ├── cli/                # CLI application
+│   ├── mcp/                # MCP tool server
+│   ├── web/                # optional web frontend (planned)
+│   └── examples/           # usage examples (planned)
+├── contracts/
+│   ├── http/openapi.json   # HTTP API contract
+│   ├── grpc/nextral.proto  # gRPC service definition
+│   └── graphql/schema.graphql # GraphQL schema
+├── migrations/             # database migration files
+├── tests/                  # integration tests (planned)
 ├── docs/
 ├── scripts/
 ├── Cargo.toml
@@ -52,4 +84,3 @@ nextral/
 
 - Shared graph/memory payloads are represented as Serde-compatible Rust types in the core.
 - Bindings convert those payloads into runtime-native objects without duplicating business logic.
-

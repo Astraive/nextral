@@ -10,11 +10,37 @@ pub struct EvaluationReport {
     pub destructive_events: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanaryGateConfig {
+    pub min_golden_recall: f32,
+    pub min_contradiction_score: f32,
+    pub min_reminder_outcome: f32,
+    pub max_destructive_events: usize,
+}
+
+impl Default for CanaryGateConfig {
+    fn default() -> Self {
+        Self {
+            min_golden_recall: 0.7,
+            min_contradiction_score: 0.7,
+            min_reminder_outcome: 0.7,
+            max_destructive_events: 0,
+        }
+    }
+}
+
 pub fn canary_replay_gate(report: &EvaluationReport) -> bool {
-    report.destructive_events == 0
-        && report.golden_recall_score >= 0.7
-        && report.contradiction_score >= 0.7
-        && report.reminder_outcome_score >= 0.7
+    canary_replay_gate_with_config(report, &CanaryGateConfig::default())
+}
+
+pub fn canary_replay_gate_with_config(
+    report: &EvaluationReport,
+    config: &CanaryGateConfig,
+) -> bool {
+    report.destructive_events <= config.max_destructive_events
+        && report.golden_recall_score >= config.min_golden_recall
+        && report.contradiction_score >= config.min_contradiction_score
+        && report.reminder_outcome_score >= config.min_reminder_outcome
         && report.latency_slo_passed
 }
 

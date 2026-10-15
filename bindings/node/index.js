@@ -310,10 +310,11 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { lexicalScore, validateConfig, e2ESmoke, reembedPlan, ingestRequestSchema } = nativeBinding
+const { lexicalScore, validateConfig, e2ESmoke, reembedPlan, ingestRequestSchema, mcpCall } = nativeBinding
 
 module.exports.lexicalScore = lexicalScore
 module.exports.validateConfig = validateConfig
 module.exports.e2ESmoke = e2ESmoke
 module.exports.reembedPlan = reembedPlan
 module.exports.ingestRequestSchema = ingestRequestSchema
+module.exports.mcpCall = mcpCall
