@@ -31,6 +31,7 @@ def main():
     config = json.loads(args.config.read_text()) if args.config else integration.fixture_config({"http": 18180, "grpc": 18181, "graphql": 18182})
     if config["backend"] != "production_stores":
         raise ValueError("graph smoke requires production_stores")
+    config["retrieval_policy"]["max_graph_hops"] = 10
     env = os.environ.copy()
     if not args.config:
         env.setdefault("NEXTRAL_NEO4J_USER", "neo4j")
@@ -101,6 +102,23 @@ def main():
                 if response["status"] != "accepted":
                     raise AssertionError("graph setup ingestion rejected")
                 created.append((scope, memory_id))
+            for index in range(10):
+                memory_id = f"hop-{index}"
+                request = integration.ingest(owner, memory_id, embedding=[1.0] + [0.0] * (config["embedding"]["dimension"] - 1))
+                request.update(entities=[], graph_hints=[{
+                    "from_label": "Entity", "from_name": f"Hop{index}", "relationship_type": "RELATED_TO",
+                    "to_label": "Entity", "to_name": f"Hop{index + 1}", "confidence": 0.95,
+                }])
+                if call("nextral.memory.ingest", request)["status"] != "accepted":
+                    raise AssertionError("traversal chain ingestion rejected")
+                created.append((owner, memory_id))
+            traversal = integration.retrieval(owner)
+            traversal.update(entities=["Hop0"], query_text="terminal traversal", top_k_vector=0, max_graph_hops=9)
+            if any(item["memory_id"] == "hop-9" for item in call("nextral.graph.query", traversal)["items"]):
+                raise AssertionError("graph traversal crossed its requested nine-hop boundary")
+            traversal["max_graph_hops"] = 10
+            if not any(item["memory_id"] == "hop-9" for item in call("nextral.graph.query", traversal)["items"]):
+                raise AssertionError("graph traversal failed to reach the configured tenth hop")
             initial = source_edges(owner, "source")
             if not initial or not any(set(row[3]) == {"source", "evidence-peer"} for row in initial):
                 raise AssertionError("initial graph did not preserve both canonical sources")
@@ -156,7 +174,7 @@ def main():
                 raise AssertionError("outbox replay resurrected forgotten graph evidence or erased a peer")
             if edges(peer) != peer_before or edges(other) != other_before:
                 raise AssertionError("forget changed graph evidence in another scope")
-            print(json.dumps({"status": "ok", "backend": "production_stores", "initial_graph": True, "canonical_change_invalidated": True, "privacy_change_invalidated": True, "canonical_replay_no_rewrite": True, "scoped_idempotent_replay": True, "duplicate_names_merged": True, "cross_user_and_tenant_isolation": True, "forget_replay_no_resurrection": True, "concurrent_replay_forget_results": race_results}))
+            print(json.dumps({"status": "ok", "backend": "production_stores", "max_graph_hops_verified": 10, "initial_graph": True, "canonical_change_invalidated": True, "privacy_change_invalidated": True, "canonical_replay_no_rewrite": True, "scoped_idempotent_replay": True, "duplicate_names_merged": True, "cross_user_and_tenant_isolation": True, "forget_replay_no_resurrection": True, "concurrent_replay_forget_results": race_results}))
         finally:
             for scope, memory_id in reversed(created):
                 forget(scope, memory_id)
