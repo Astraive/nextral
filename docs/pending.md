@@ -275,14 +275,36 @@ The baseline was not production completion: its dispatcher used an in-memory sto
 - [ ] [#68](https://github.com/Astraive/nextral/issues/68): apply requested replay-policy provenance and measure contradictions through canonical persisted graph replay.
 - [ ] [#69](https://github.com/Astraive/nextral/issues/69): supply and bundle portable manylinux TLS dependencies, then clean-install both architecture wheels.
 - [ ] [#70](https://github.com/Astraive/nextral/issues/70): correct redundant async-macro attributes and pass latest-stable strict Clippy without suppression.
+- [ ] [#71](https://github.com/Astraive/nextral/issues/71): preserve checked trace sequence allocation on supported Rust versions without deprecated atomic APIs.
+- [ ] [#72](https://github.com/Astraive/nextral/issues/72): normalize external artifact paths before strict upload validation.
+- [ ] [#73](https://github.com/Astraive/nextral/issues/73): build checksum-verified official MinIO and mc sources when former registry releases are unavailable.
+- [ ] [#74](https://github.com/Astraive/nextral/issues/74): isolate extracted-crate and native Cargo caches, then verify a current installed Python wheel.
 
 ## Current verification boundary
 
-The last completed local run passed strict all-feature workspace Clippy and 278 Rust tests (six real-store tests ignored). The actual CLI `memory smoke` passed against explicit `test_memory`. Clean installed-artifact consumers passed 13 Python tests and nine Node tests; one Python and two Node production-only cases were skipped. Node declarations and release version consistency also passed. These results do not prove production-store behavior.
+The latest local run passed strict all-feature workspace Clippy and 278 Rust tests (six real-store tests ignored). The rebuilt CLI `memory smoke` passed against explicit `test_memory`. A fresh isolated Python wheel passed its installed consumer suite, including the formerly failing configuration error classification; the current npm tarball passed its clean consumer suite. Node declarations passed.
+
+| Local installed-artifact check | Result | Boundary |
+| --- | --- | --- |
+| Python consumer suite | 13 passed, 1 skipped | Production-only case skipped |
+| Node consumer suite | 9 passed, 2 skipped | Production vectors and measured controls skipped |
+| Python HTTP/Prometheus/OTLP smoke | Passed, including graceful shutdown | Explicit `test_memory`; not production-store evidence |
+
+Workflow lint, daemon-free Compose configuration validation, script syntax and configured Cargo-context resolution passed. These do not prove source-built fixtures or production runtime behavior.
 
 The local Docker daemon became unresponsive during production verification. Integrated five-store, authenticated protocol, telemetry, real-store packaged-consumer and measured research verification remains open until a successful isolated run provides current evidence.
 
 Draft [PR #66](https://github.com/Astraive/nextral/pull/66) carries the integrated implementation. Its first isolated [CI run](https://github.com/Astraive/nextral/actions/runs/38799231532) exposed Rust 1.99 async-macro Clippy errors and missing manylinux OpenSSL build dependencies. These are tracked repairs, not waived checks.
+
+The second isolated [CI run](https://github.com/Astraive/nextral/actions/runs/38802757818), at `a2e26c5`, produced these completed gates:
+
+| Gate | Result |
+| --- | --- |
+| Native package build jobs | 5 passed |
+| Installed Python wheel jobs | 25 passed |
+| Installed npm consumer jobs | 10 passed |
+
+The run still failed: latest-stable Rust deprecated the atomic update API, artifact uploads rejected parent-directory path components, and the MinIO image was unauthorized. Crate packaging and its clean Rust consumer ran successfully before the upload failure. Production and measured research checks did not run successfully. A subsequent local Python configuration regression exposed shared Cargo-cache contamination; source-package verification must not replace native workspace artifacts.
 
 ## Integration contracts
 

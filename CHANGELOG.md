@@ -3,13 +3,16 @@
 ## Unreleased
 
 - Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
-- Restored the local five-store stack with pinned reachable images, loopback-only ports, and a working MinIO readiness probe.
+- Pinned the five-store fixture and loopback ports; build official MinIO/mc releases from checksum-verified source.
 - Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
 - Exposed binding experiment/safety controls, restoring prior runtime state on reasoned active-experiment rollback.
 - Added explicit private-CA JWKS trust and provenance-aware archive cleanup with same-key tombstones, immutable uploads and scrubbed-job fencing.
 - Replaced the yanked transitive ChaCha release with compatible `0.10.2`.
 - Required the corrected async-trait macro and portable bundled-TLS wheel builds.
 - Added applied-policy replay validation and persisted canonical contradiction evidence.
+- Classify malformed caller configuration and tool payloads as invalid input while preserving internal serialization errors.
+- Preserve checked trace sequence allocation across supported Rust versions.
+- Isolate crate verification from native Cargo caches and normalize CI artifact paths.
 
 ## 0.1.0
 
