@@ -29,8 +29,8 @@ jobs:
         os: [ubuntu-22.04, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
@@ -60,14 +60,14 @@ jobs:
           - { os: windows-latest, platform: win32-x64, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -81,7 +81,7 @@ jobs:
       - name: Check Node declarations
         working-directory: bindings/node
         run: npm run test:types
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: native-${{ matrix.platform }}
           path: bindings/node/native/*.node
@@ -91,8 +91,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: '2_28'
-          args: --release --locked --manifest-path bindings/python/Cargo.toml --out artifacts/wheels
-      - uses: actions/upload-artifact@v4
+          # Build against container OpenSSL; repair bundles libssl/libcrypto into the wheel.
+          before-script-linux: dnf install -y openssl-devel pkgconf-pkg-config patchelf
+          args: --release --locked --auditwheel repair --manifest-path bindings/python/Cargo.toml --out artifacts/wheels
+      - uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.platform }}
           path: artifacts/wheels/*.whl
@@ -103,13 +105,13 @@ jobs:
     needs: packages
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: bindings/node/package-lock.json
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: native-*
           path: artifacts/native
@@ -126,7 +128,7 @@ jobs:
       - name: Pack npm artifact
         working-directory: bindings/node
         run: npm pack --pack-destination ${{ runner.temp }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: npm-package
           path: ${{ runner.temp }}/nextral-*.tgz
@@ -148,14 +150,14 @@ jobs:
           - { os: windows-latest, platform: win32-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: npm-package
           path: artifacts/npm
@@ -178,11 +180,11 @@ jobs:
           - { os: windows-latest, platform: win32-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: wheel-${{ matrix.platform }}
           path: artifacts/wheels
@@ -193,8 +195,8 @@ jobs:
     name: Pack and consume Rust core and API crates
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
@@ -202,7 +204,7 @@ jobs:
         run: python scripts/verify-release.py crate-package
       - name: Exercise clean Rust consumer and compile packaged examples and API
         run: python scripts/verify-release.py crate-smoke "${{ env.CARGO_TARGET_DIR }}/package"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rust-crate
           path: ${{ env.CARGO_TARGET_DIR }}/package/nextral-*.crate
@@ -213,18 +215,18 @@ jobs:
     needs: [packages, npm-package, crate]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts/downloads
       - name: Collect release files
         run: python scripts/verify-release.py collect artifacts/downloads artifacts/release
       - name: Check versions, native architectures, package contents and checksums
         run: python scripts/verify-release.py artifacts artifacts/release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release-bundle
           path: artifacts/release/*
@@ -236,21 +238,21 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: bindings/node/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: wheel-linux-x64
           path: artifacts/wheels
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: npm-package
           path: artifacts/npm
@@ -260,7 +262,7 @@ jobs:
         run: bash scripts/e2e-docker.sh --skip-build --wheel-dir artifacts/wheels --npm-package artifacts/npm/*.tgz
       - name: Retain measured replay and native control evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: integration-research
           path: ${{ env.CARGO_TARGET_DIR }}/integration-research/
