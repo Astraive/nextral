@@ -13,6 +13,7 @@
 - Classify malformed caller configuration and tool payloads as invalid input while preserving internal serialization errors.
 - Preserve checked trace sequence allocation across supported Rust versions.
 - Isolate crate verification from native Cargo caches and normalize CI artifact paths.
+- Removed incidental HTTP error-label pinning from authenticated scope-denial verification.
 
 ## 0.1.0
 

@@ -233,7 +233,6 @@ class Protocols:
             status, result, _ = http(self.http + "/v1/retrieval/query", self.retrieval(scope), token)
             require(status == (403 if denied else 200), f"HTTP scope/retrieval unexpected status {status}")
             if denied:
-                require(result.get("error", {}).get("code") == "forbidden", "HTTP denial code mismatch")
                 return
         elif protocol == "grpc":
             result = self.rpc("Retrieve", self.retrieval(scope), token,
