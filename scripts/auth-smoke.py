@@ -321,12 +321,13 @@ class Protocols:
             else:
                 raise AssertionError("gRPC privileged migration unexpectedly succeeded")
         self.record("grpc", label + " migration unavailable", "UNIMPLEMENTED")
-        status, result, _ = http(self.graphql, {"query": "mutation { databaseMigrate }"}, token)
-        errors = result.get("errors", []) if isinstance(result, dict) else []
-        require(status == 200 and errors and all("Unknown field" in item.get("message", "") for item in errors),
+        query = "{ __schema { mutationType { fields { name } } } }"
+        status, result, _ = http(self.graphql, {"query": query}, token)
+        require(status == 200 and not result.get("errors"), "GraphQL schema unavailable")
+        fields = result["data"]["__schema"]["mutationType"]["fields"]
+        require(all(field["name"] != "databaseMigrate" for field in fields),
                 "GraphQL privileged migration unexpectedly exposed")
-        require(not result.get("data"), "GraphQL migration returned data")
-        self.record("graphql", label + " migration unavailable", "unknown field")
+        self.record("graphql", label + " migration unavailable", "absent from mutation schema")
 
 
 def wait_ready(process, ports):
