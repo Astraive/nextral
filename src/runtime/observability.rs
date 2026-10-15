@@ -202,16 +202,22 @@ pub fn start_span(name: &'static str) -> SpanGuard {
     if !TRACE_ENABLED.load(Ordering::Relaxed) {
         return SpanGuard(None);
     }
-    let sequence =
-        match TRACE_SEQUENCE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1)
-        }) {
-            Ok(value) => value,
-            Err(_) => {
-                TRACES_DROPPED.fetch_add(1, Ordering::Relaxed);
-                return SpanGuard(None);
-            }
+    let mut sequence = TRACE_SEQUENCE.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = sequence.checked_add(1) else {
+            TRACES_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return SpanGuard(None);
         };
+        match TRACE_SEQUENCE.compare_exchange_weak(
+            sequence,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(current) => sequence = current,
+        }
+    }
     SpanGuard(Some(SpanData {
         name,
         started_ns: unix_ns(),
