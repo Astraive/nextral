@@ -11,6 +11,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+const MIN_IMPORTANCE_SCORE: f32 = 0.2;
+const MIN_CONFIDENCE_SCORE: f32 = 0.2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IngestMemoryRequest {
     pub id: Option<String>,
@@ -115,10 +118,12 @@ where
     if request.content.trim().is_empty() {
         errors.push("content cannot be empty".to_string());
     }
-    if request.importance_score < request.policy.min_importance_score {
+    let min_importance_score = request.policy.min_importance_score.max(MIN_IMPORTANCE_SCORE);
+    let min_confidence_score = request.policy.min_confidence_score.max(MIN_CONFIDENCE_SCORE);
+    if request.importance_score < min_importance_score {
         errors.push("importance_score is below write threshold".to_string());
     }
-    if request.confidence_score.unwrap_or(0.0) < request.policy.min_confidence_score {
+    if request.confidence_score.unwrap_or(0.0) < min_confidence_score {
         errors.push("confidence_score is below write threshold".to_string());
     }
     if !errors.is_empty() {
