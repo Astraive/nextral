@@ -41,7 +41,7 @@ def run(*args: str | Path, cwd: Path | None = None, env: dict | None = None) -> 
 
 
 def toml(path: Path) -> dict:
-    import tomllib  # Version guards run with Python >=3.11, consumers support 3.10.
+    import tomllib  # Release guards run with Python 3.12; consumers support 3.10.
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
@@ -339,8 +339,20 @@ def extract_crate(package: Path, directory: Path) -> Path:
         archive_members(archive)
         for item in archive.getmembers():
             require((directory / item.name).resolve().is_relative_to(directory), f"Unsafe crate archive path: {item.name}")
-        archive.extractall(directory)
+        archive.extractall(directory, filter="data")
     return directory / package.name.removesuffix(".crate")
+
+
+def cargo_context_env(context: str) -> dict:
+    environment = os.environ.copy()
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=ROOT, env=environment, check=True, capture_output=True, text=True,
+    )
+    target = Path(json.loads(metadata.stdout)["target_directory"])
+    # Archive verification must not replace workspace native artifacts.
+    environment["CARGO_TARGET_DIR"] = str(target / context)
+    return environment
 
 
 def crate_package() -> None:
@@ -349,11 +361,12 @@ def crate_package() -> None:
     for _, manifest in published_packages():
         arguments.extend(["--package", manifest["package"]["name"]])
     # One invocation lets Cargo verify dependent crates using its temporary registry.
-    run(*arguments, cwd=ROOT)
+    run(*arguments, cwd=ROOT, env=cargo_context_env("crate-package"))
 
 
 def crate_smoke(directory: Path) -> None:
     version = version_guard()
+    environment = cargo_context_env("crate-consumer")
     with tempfile.TemporaryDirectory(prefix="nextral-crate-") as temporary:
         consumer = Path(temporary)
         sources = {}
@@ -386,11 +399,11 @@ def crate_smoke(directory: Path) -> None:
             + '[patch.crates-io]\n' + patches,
             encoding="utf-8",
         )
-        run("cargo", "generate-lockfile", "--manifest-path", consumer / "Cargo.toml", cwd=consumer)
+        run("cargo", "generate-lockfile", "--manifest-path", consumer / "Cargo.toml", cwd=consumer, env=environment)
         run("cargo", "build", "--workspace", "--all-targets", "--all-features", "--locked",
-            "--manifest-path", consumer / "Cargo.toml", cwd=consumer)
+            "--manifest-path", consumer / "Cargo.toml", cwd=consumer, env=environment)
         run("cargo", "run", "--locked", "--package", "nextral-release-consumer",
-            "--manifest-path", consumer / "Cargo.toml", cwd=consumer)
+            "--manifest-path", consumer / "Cargo.toml", cwd=consumer, env=environment)
 
 
 def crate_publish(directory: Path) -> None:
@@ -401,12 +414,13 @@ def crate_publish(directory: Path) -> None:
     tag = reference.removeprefix("refs/tags/")
     artifact_guard(directory, tag, require_checksums=True, require_provenance=True)
     version = version_guard(tag)
+    environment = cargo_context_env("crate-publish")
     with tempfile.TemporaryDirectory(prefix="nextral-publish-") as temporary:
         for _, manifest in published_packages():
             name = manifest["package"]["name"]
             source = extract_crate(directory / f"{name}-{version}.crate", Path(temporary))
             # Cargo waits for index availability before the next dependent publication.
-            run("cargo", "publish", "--locked", "--registry", "crates-io", "--manifest-path", source / "Cargo.toml", cwd=source)
+            run("cargo", "publish", "--locked", "--registry", "crates-io", "--manifest-path", source / "Cargo.toml", cwd=source, env=environment)
 
 
 def collect(source: Path, destination: Path) -> None:

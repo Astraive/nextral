@@ -15,6 +15,12 @@
 
 Release artifacts target Windows x64 MSVC, macOS x64/arm64, and glibc Linux x64/arm64. Node release baselines are glibc 2.35 x64 and 2.39 arm64. No Windows arm64, 32-bit, musl/Alpine, Android, FreeBSD, WASM, PyPy, or free-threaded Python artifact support is promised. See binding READMEs for native artifact collection/build commands. Registry installation assumes a published artifact matching the host; source builds require Rust and a linker. A local single-platform npm tarball is not the complete release matrix.
 
+### Artifact verification
+
+`scripts/verify-release.py` resolves Cargo's configured target directory, including `CARGO_TARGET_DIR` and machine-local Cargo configuration. Crate packaging uses `<target>/crate-package`, clean extracted Rust consumers use `<target>/crate-consumer`, and publication verification uses `<target>/crate-publish`. Package archives are under `<target>/crate-package/package`.
+
+Keep these contexts separate from workspace/native builds: Cargo verification of an extracted same-version crate can otherwise leave native builds using the archive's core artifacts rather than current checkout sources. The integration runner builds its Python wheel under `<target>/python-native`. Pre-existing checkout-native binaries are not release evidence; verify clean installed wheels and npm tarballs outside the checkout.
+
 ## Configuration and stores
 
 Start with `examples/config.production.example.json`. Replace deployment placeholders and set referenced environment variables. Rust resolves `${NAME}` configuration references; credential fields ending in `_env` name environment variables rather than containing secrets. Container DNS names in the example are not valid host addresses automatically.
