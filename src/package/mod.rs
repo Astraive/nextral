@@ -200,13 +200,14 @@ fn with_control(
     }
 }
 
+fn invalid_json_input(_: serde_json::Error) -> CoreError {
+    CoreError::InvalidInput("invalid input format".into())
+}
+
 static RUNTIME: OnceLock<Mutex<RuntimeStore>> = OnceLock::new();
 
 pub fn configure_runtime_json(config_json: &str) -> Result<String, PackageError> {
-    let config: crate::config::NextralConfig =
-        serde_json::from_str(&crate::config::resolve_env_vars(config_json))
-            .map_err(CoreError::from)?;
-    config.validate()?;
+    let config = crate::config::load_config(config_json)?;
     crate::runtime::observability::configure(&config.observability)?;
     let backend = serde_json::to_value(&config.backend).map_err(CoreError::from)?;
     let configured = RuntimeStore::configured(config)?;
@@ -287,7 +288,7 @@ pub fn e2e_smoke_json() -> Result<String, PackageError> {
 
 pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
     let request: AdapterSmokeRequest =
-        serde_json::from_str(request_json).map_err(CoreError::from)?;
+        serde_json::from_str(request_json).map_err(invalid_json_input)?;
     validate_adapter_smoke_request(&request)?;
 
     let postgres = PostgresAdapter::new(&request.postgres_url)?;
@@ -483,12 +484,12 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
     if request_json.len() > MAX_PAYLOAD_BYTES {
         return Err(CoreError::InvalidInput("request exceeds maximum payload size".into()).into());
     }
-    let request: McpCallRequest = serde_json::from_str(request_json).map_err(CoreError::from)?;
+    let request: McpCallRequest = serde_json::from_str(request_json).map_err(invalid_json_input)?;
     if request.payload_json.len() > MAX_PAYLOAD_BYTES {
         return Err(CoreError::InvalidInput("tool payload exceeds maximum size".into()).into());
     }
     let payload: serde_json::Value =
-        serde_json::from_str(&request.payload_json).map_err(CoreError::from)?;
+        serde_json::from_str(&request.payload_json).map_err(invalid_json_input)?;
     if request.tool == "nextral.health" {
         return runtime_readiness_json();
     }
@@ -521,8 +522,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
     };
     macro_rules! decode {
         ($ty:ty) => {
-            serde_json::from_value::<$ty>(payload.clone())
-                .map_err(|_| CoreError::InvalidInput("invalid input format".into()))?
+            serde_json::from_value::<$ty>(payload.clone()).map_err(invalid_json_input)?
         };
     }
     macro_rules! value {
@@ -560,7 +560,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 .get("privacy_scope")
                 .map(|v| serde_json::from_value(v.clone()))
                 .transpose()
-                .map_err(CoreError::from)?
+                .map_err(invalid_json_input)?
                 .unwrap_or_else(|| {
                     vec![
                         crate::memory::PrivacyLevel::Private,
@@ -597,7 +597,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                     .get("content_type")
                     .map(|v| serde_json::from_value(v.clone()))
                     .transpose()
-                    .map_err(CoreError::from)?,
+                    .map_err(invalid_json_input)?,
                 payload
                     .get("importance_score")
                     .and_then(|v| v.as_f64())
@@ -609,7 +609,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                     .get("privacy_level")
                     .map(|v| serde_json::from_value(v.clone()))
                     .transpose()
-                    .map_err(CoreError::from)?,
+                    .map_err(invalid_json_input)?,
             )?;
             for (name, add, entity) in [
                 ("add_tags", true, false),
@@ -619,7 +619,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             ] {
                 if let Some(values) = payload.get(name) {
                     for item in serde_json::from_value::<Vec<String>>(values.clone())
-                        .map_err(CoreError::from)?
+                        .map_err(invalid_json_input)?
                     {
                         match (add, entity) {
                             (true, false) => record.add_tag(item),
@@ -639,7 +639,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                     .get("embedding")
                     .map(|v| serde_json::from_value::<Vec<f32>>(v.clone()))
                     .transpose()
-                    .map_err(CoreError::from)?;
+                    .map_err(invalid_json_input)?;
                 store.prepare_embedding(&mut record, embedding.as_deref())?;
             }
             store.update_memory(record.clone())?;
@@ -649,7 +649,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             let privacy = serde_json::from_value::<crate::memory::PrivacyLevel>(
                 payload["privacy_level"].clone(),
             )
-            .map_err(CoreError::from)?;
+            .map_err(invalid_json_input)?;
             let mut policy = crate::domain::ProceduralPolicy::new(
                 tenant,
                 user,
@@ -668,7 +668,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 .get("enabled")
                 .map(|v| serde_json::from_value::<bool>(v.clone()))
                 .transpose()
-                .map_err(CoreError::from)?
+                .map_err(invalid_json_input)?
                 .unwrap_or(true);
             let (policy, receipts) = store.policy_upsert(policy)?;
             serde_json::json!({"policy":policy,"receipts":receipts})
@@ -678,13 +678,13 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 .get("privacy_scope")
                 .map(|v| serde_json::from_value::<Vec<crate::memory::PrivacyLevel>>(v.clone()))
                 .transpose()
-                .map_err(CoreError::from)?;
+                .map_err(invalid_json_input)?;
             let privacy = store.policy_privacy_scope(requested);
             let include_disabled = payload
                 .get("include_disabled")
                 .map(|v| serde_json::from_value::<bool>(v.clone()))
                 .transpose()
-                .map_err(CoreError::from)?
+                .map_err(invalid_json_input)?
                 .unwrap_or(false);
             let mut policies = store.lifecycle_policies(tenant, user)?;
             policies.retain(|p| {
@@ -903,15 +903,18 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                     "nextral.batch.ingest" => {
                         Ok(serde_json::to_value(crate::ingestion::ingest_memory(
                             store,
-                            serde_json::from_value(item.clone())?,
+                            serde_json::from_value(item.clone()).map_err(invalid_json_input)?,
                         )?)?)
                     }
-                    "nextral.batch.retrieve" => Ok(serde_json::to_value(
-                        crate::retrieval::retrieve(store, serde_json::from_value(item.clone())?)?,
-                    )?),
+                    "nextral.batch.retrieve" => {
+                        Ok(serde_json::to_value(crate::retrieval::retrieve(
+                            store,
+                            serde_json::from_value(item.clone()).map_err(invalid_json_input)?,
+                        )?)?)
+                    }
                     _ => Ok(serde_json::to_value(forget_memory(
                         store,
-                        serde_json::from_value(item.clone())?,
+                        serde_json::from_value(item.clone()).map_err(invalid_json_input)?,
                     )?)?),
                 })();
                 match result {
@@ -1011,7 +1014,7 @@ pub struct ReembedPlanRequest {
 
 pub fn reembed_plan_json(request_json: &str) -> Result<String, PackageError> {
     let request: ReembedPlanRequest =
-        serde_json::from_str(request_json).map_err(CoreError::from)?;
+        serde_json::from_str(request_json).map_err(invalid_json_input)?;
     let plan = plan_reembed(
         &request.tenant_id,
         &request.source_collection,
@@ -1104,7 +1107,7 @@ fn validate_adapter_smoke_request(request: &AdapterSmokeRequest) -> CoreResult<(
         ));
     }
     serde_json::from_str::<serde_json::Value>(&request.cache_value_json)
-        .map_err(CoreError::from)?;
+        .map_err(invalid_json_input)?;
     Ok(())
 }
 

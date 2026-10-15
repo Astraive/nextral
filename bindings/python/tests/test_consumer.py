@@ -201,6 +201,9 @@ class InstalledConsumerTests(unittest.TestCase):
         invalid["embedding"]["dimension"] = 0
         with self.assertRaises(nextral.InvalidInputError):
             nextral.validate_config(invalid)
+        with self.assertRaises(nextral.InvalidInputError) as malformed:
+            nextral.configure_runtime({"backend": "unsupported"})
+        self.assertEqual(malformed.exception.code, "invalid_input")
 
     def test_cli_execution_schema_stdin_and_files(self) -> None:
         schema = self.cli("memory", "ingest-schema")

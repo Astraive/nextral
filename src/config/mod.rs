@@ -277,15 +277,14 @@ pub fn resolve_env_vars(input: &str) -> String {
 
 pub fn load_config(config_json: &str) -> CoreResult<NextralConfig> {
     let resolved = resolve_env_vars(config_json);
-    let config: NextralConfig = serde_json::from_str(&resolved)?;
+    let config: NextralConfig = serde_json::from_str(&resolved)
+        .map_err(|_| CoreError::InvalidInput("invalid input format".into()))?;
     config.validate()?;
     Ok(config)
 }
 
 pub fn validate_config_json(config_json: &str) -> CoreResult<String> {
-    let resolved = resolve_env_vars(config_json);
-    let config: NextralConfig = serde_json::from_str(&resolved)?;
-    config.validate()?;
+    load_config(config_json)?;
     Ok("{\"status\":\"ok\"}".to_string())
 }
 

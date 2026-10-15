@@ -55,6 +55,8 @@ test('installed consumer ingests, retrieves, isolates tenants, updates and redac
 
 test('native validation has machine-readable errors and policy rejects low confidence', () => {
   nextral.configureRuntime(testConfig);
+  assert.throws(() => nextral.configureRuntime({ ...testConfig, backend: 'unsupported' }),
+    error => error instanceof nextral.NextralError && error.code === 'invalid_input');
   assert.throws(() => nextral.retrieve(query({ tenant_id: '', user_id: 'consumer' }, 'Atlas')),
     error => error instanceof nextral.NextralError && error.code === 'invalid_input');
   assert.throws(() => nextral.ingestMemory(memory(scope(), 'invalid vector', { embedding: [NaN, 0, 1] })),
