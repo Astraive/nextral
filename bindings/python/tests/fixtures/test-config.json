@@ -1,0 +1,19 @@
+{
+  "backend": "test_memory",
+  "stores": null,
+  "embedding": {"kind": "test", "model": "test", "dimension": 2},
+  "extraction": {"kind": "test", "model": "test"},
+  "reranker": null,
+  "ingestion_policy": {"min_importance_score": 0.0, "min_confidence_score": 0.0},
+  "retrieval_policy": {
+    "privacy_scope": ["private", "shared"],
+    "token_budget": 1800,
+    "top_k_vector": 12,
+    "max_graph_hops": 2,
+    "scoring_weights": {"semantic_similarity": 0.5, "recency": 0.2, "importance": 0.2, "access": 0.1}
+  },
+  "cache": {"key_prefix": "python-consumer", "session_ttl_seconds": 7200, "retrieval_ttl_seconds": 120, "policy_ttl_seconds": 300},
+  "service": {"http_bind": "127.0.0.1:0", "grpc_bind": "127.0.0.1:0", "graphql_bind": "127.0.0.1:0"},
+  "auth": {},
+  "observability": {"enabled": false}
+}
