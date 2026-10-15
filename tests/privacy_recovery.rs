@@ -65,6 +65,7 @@ fn input(
     );
     request.id = Some(id.into());
     request.source_message_ids = vec![source.into()];
+    request.privacy_level = PrivacyLevel::Private;
     request.importance_score = 0.9;
     request.confidence_score = Some(0.95);
     let mut vector = vec![0.0; config.embedding.dimension as usize];
