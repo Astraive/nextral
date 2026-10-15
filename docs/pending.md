@@ -257,6 +257,8 @@ The baseline was not production completion: its dispatcher used an in-memory sto
 - [ ] Configure registry publishing through supported authentication without committing secrets.
 - [ ] Install release artifacts in clean environments and run consumer smoke workflows.
 
+Registry authorization is tracked in [#75](https://github.com/Astraive/nextral/issues/75). GitHub environments `pypi`, `npm`, and `crates-io` now accept only `v*` tags. No repository or repository-available organization registry secrets were present, and the current crates.io job requires `CARGO_REGISTRY_TOKEN`. PyPI/npm account-owned trusted-publisher authorization is not observable through GitHub APIs. No release tag has been created.
+
 ### 6.6 — docs(project): reconcile contracts and completion evidence ([#54](https://github.com/Astraive/nextral/issues/54))
 
 - [ ] Publish phased issue checklist and supported capability matrix.
@@ -265,20 +267,21 @@ The baseline was not production completion: its dispatcher used an in-memory sto
 
 ## Regression acceptance
 
-- [ ] [#60](https://github.com/Astraive/nextral/issues/60): fence stale scheduled-job writes after source forget; verify terminal cancellation and scrubbed request survive a second PostgreSQL connection.
-- [ ] [#61](https://github.com/Astraive/nextral/issues/61): retain archive source provenance across failed consolidation; recover legacy manifests and block late uploads after source-only forget.
-- [ ] [#62](https://github.com/Astraive/nextral/issues/62): give distinct accepted same-ID mutations distinct audit events; reject conflicting explicit event IDs and roll back canonical/outbox changes atomically.
+- [x] [#60](https://github.com/Astraive/nextral/issues/60): fence stale scheduled-job writes after source forget; verify terminal cancellation and scrubbed request survive a second PostgreSQL connection.
+- [x] [#61](https://github.com/Astraive/nextral/issues/61): retain archive source provenance across failed consolidation; recover legacy manifests and block late uploads after source-only forget.
+- [x] [#62](https://github.com/Astraive/nextral/issues/62): give distinct accepted same-ID mutations distinct audit events; reject conflicting explicit event IDs and roll back canonical/outbox changes atomically.
 - [ ] [#63](https://github.com/Astraive/nextral/issues/63): distinguish explicit negation from compatible graph relationships and measure the representative replay suite.
 - [ ] [#64](https://github.com/Astraive/nextral/issues/64): honor the configured traversal maximum through native and production graph paths.
-- [ ] [#65](https://github.com/Astraive/nextral/issues/65): classify malformed tool payloads as invalid input consistently across native consumers.
-- [ ] [#67](https://github.com/Astraive/nextral/issues/67): replace yanked transitive cryptography releases and verify locked workspace/package behavior.
+- [x] [#65](https://github.com/Astraive/nextral/issues/65): classify malformed tool payloads as invalid input consistently across native consumers.
+- [x] [#67](https://github.com/Astraive/nextral/issues/67): replace yanked transitive cryptography releases and verify locked workspace/package behavior.
 - [ ] [#68](https://github.com/Astraive/nextral/issues/68): apply requested replay-policy provenance and measure contradictions through canonical persisted graph replay.
-- [ ] [#69](https://github.com/Astraive/nextral/issues/69): supply and bundle portable manylinux TLS dependencies, then clean-install both architecture wheels.
-- [ ] [#70](https://github.com/Astraive/nextral/issues/70): correct redundant async-macro attributes and pass latest-stable strict Clippy without suppression.
-- [ ] [#71](https://github.com/Astraive/nextral/issues/71): preserve checked trace sequence allocation on supported Rust versions without deprecated atomic APIs.
-- [ ] [#72](https://github.com/Astraive/nextral/issues/72): normalize external artifact paths before strict upload validation.
-- [ ] [#73](https://github.com/Astraive/nextral/issues/73): build checksum-verified official MinIO and mc sources when former registry releases are unavailable.
-- [ ] [#74](https://github.com/Astraive/nextral/issues/74): isolate extracted-crate and native Cargo caches, then verify a current installed Python wheel.
+- [x] [#69](https://github.com/Astraive/nextral/issues/69): supply and bundle portable manylinux TLS dependencies, then clean-install both architecture wheels.
+- [x] [#70](https://github.com/Astraive/nextral/issues/70): correct redundant async-macro attributes and pass latest-stable strict Clippy without suppression.
+- [x] [#71](https://github.com/Astraive/nextral/issues/71): preserve checked trace sequence allocation on supported Rust versions without deprecated atomic APIs.
+- [x] [#72](https://github.com/Astraive/nextral/issues/72): normalize external artifact paths before strict upload validation.
+- [x] [#73](https://github.com/Astraive/nextral/issues/73): build checksum-verified official MinIO and mc sources when former registry releases are unavailable.
+- [x] [#74](https://github.com/Astraive/nextral/issues/74): isolate extracted-crate and native Cargo caches, then verify a current installed Python wheel.
+- [ ] [#76](https://github.com/Astraive/nextral/issues/76): complete authenticated protocol smoke without incidental HTTP error-label pinning.
 
 ## Current verification boundary
 
@@ -292,7 +295,18 @@ The latest local run passed strict all-feature workspace Clippy and 278 Rust tes
 
 Workflow lint, daemon-free Compose configuration validation, script syntax and configured Cargo-context resolution passed. These do not prove source-built fixtures or production runtime behavior.
 
-The local Docker daemon became unresponsive during production verification. Integrated five-store, authenticated protocol, telemetry, real-store packaged-consumer and measured research verification remains open until a successful isolated run provides current evidence.
+Isolated local `crate-package` and `crate-smoke` runs passed after the cache repair: both publishable crates verified, extracted workspace targets/examples/API compiled, and the clean Rust consumer ingested and retrieved its accepted memory. Archives and consumer builds remained in their separate configured D-drive target contexts.
+
+The local Docker daemon remains unresponsive; verification uses isolated GitHub runners instead. The third [CI run](https://github.com/Astraive/nextral/actions/runs/38808491198), at `765e18e`, completed all non-production jobs and reached real-store authenticated protocol checks:
+
+| Isolated gate | Result |
+| --- | --- |
+| Non-production jobs, including latest-stable Rust and release bundle checks | 46 passed |
+| Real-store Rust regressions | 6 passed |
+| Installed Python suite with production scenario | 14 passed, none skipped |
+| Installed Node suite with production vectors and measured controls | 11 passed, none skipped |
+
+All five stores became ready, including source-built MinIO. The remaining failure was an auth-smoke assertion demanding the incidental HTTP error label `forbidden` after correctly receiving HTTP 403. Production telemetry follows auth and remains unexecuted. Graph smoke precedes auth; its completion follows from harness reachability [INFERENCE], but its captured JSON was not printed after the later failure. The integrated run is not yet green.
 
 Draft [PR #66](https://github.com/Astraive/nextral/pull/66) carries the integrated implementation. Its first isolated [CI run](https://github.com/Astraive/nextral/actions/runs/38799231532) exposed Rust 1.99 async-macro Clippy errors and missing manylinux OpenSSL build dependencies. These are tracked repairs, not waived checks.
 
