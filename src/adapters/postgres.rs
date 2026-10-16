@@ -162,10 +162,28 @@ mod enabled {
             })
         }
         fn connect_new(&self) -> CoreResult<Client> {
-            let tls = native_tls::TlsConnector::builder()
-                .build()
-                .map_err(|e| CoreError::Io(e.to_string()))?;
-            let url = self.url.replace("sslmode=verify-full", "sslmode=require");
+            if self.url.contains("sslmode=disable") {
+                return Err(CoreError::InvalidInput(
+                    "insecure PostgreSQL transport mode 'sslmode=disable' is forbidden".into(),
+                ));
+            }
+            let is_verify_ca = self.url.contains("sslmode=verify-ca");
+            let mut builder = native_tls::TlsConnector::builder();
+            if is_verify_ca {
+                builder.danger_accept_invalid_hostnames(true);
+            }
+            if let Ok(ca_path) = std::env::var("PGSSLROOTCERT") {
+                if let Ok(pem) = std::fs::read(&ca_path) {
+                    if let Ok(cert) = native_tls::Certificate::from_pem(&pem) {
+                        builder.add_root_certificate(cert);
+                    }
+                }
+            }
+            let tls = builder.build().map_err(|e| CoreError::Io(e.to_string()))?;
+            let url = self
+                .url
+                .replace("sslmode=verify-full", "sslmode=require")
+                .replace("sslmode=verify-ca", "sslmode=require");
             Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(tls)).map_err(db)
         }
         pub fn checkout(&self, kind: ConnectionKind) -> CoreResult<PooledClient<'_>> {

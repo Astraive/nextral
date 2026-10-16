@@ -353,7 +353,7 @@ impl NextralConfig {
             validate_reranker(reranker)?;
         }
         validate_cache(&self.cache)?;
-        validate_jwks_ca(&self.auth)?;
+        validate_auth_config(&self.auth)?;
 
         if self.backend == RuntimeBackend::ProductionStores {
             let stores = self.stores.as_ref().ok_or_else(|| {
@@ -597,6 +597,22 @@ fn validate_reranker(config: &RerankerProviderConfig) -> CoreResult<()> {
     Ok(())
 }
 
+fn validate_auth_config(config: &AuthConfig) -> CoreResult<()> {
+    validate_jwks_ca(config)?;
+    match (&config.issuer, &config.audience, &config.jwks_url) {
+        (None, None, None) => Ok(()),
+        (Some(_), Some(_), Some(url)) => {
+            if !url.starts_with("https://") {
+                return Err(CoreError::InvalidInput("auth.jwks_url must use HTTPS".into()));
+            }
+            Ok(())
+        }
+        _ => Err(CoreError::InvalidInput(
+            "issuer, audience and jwks_url must be configured together".into(),
+        )),
+    }
+}
+
 fn validate_jwks_ca(config: &AuthConfig) -> CoreResult<()> {
     if let Some(name) = &config.jwks_ca_pem_env {
         require("auth.jwks_ca_pem_env", name)?;
@@ -743,8 +759,8 @@ fn validate_postgres_tls(value: &str) -> CoreResult<()> {
             .first()
             .map(|value| value.trim_matches('\'').to_string())
     };
-    if !matches!(mode.as_deref(), Some("require" | "verify-full")) {
-        return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require or verify-full with certificate verification".into()));
+    if !matches!(mode.as_deref(), Some("require" | "verify-ca" | "verify-full")) {
+        return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require, verify-ca, or verify-full with certificate verification".into()));
     }
     Ok(())
 }
@@ -804,6 +820,8 @@ mod hardening_tests {
                 .is_err()
         );
         assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=require").is_ok());
+        assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=verify-ca").is_ok());
+        assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=disable").is_err());
         assert!(validate_postgres_tls("host=localhost sslmode='verify-full'").is_ok());
         assert!(validate_postgres_tls("host=localhost sslmode=prefer").is_err());
     }

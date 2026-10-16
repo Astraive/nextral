@@ -1,4 +1,5 @@
-mod auth;
+pub mod auth;
+pub use auth::Principal;
 pub mod graphql;
 pub mod grpc;
 
@@ -10,7 +11,7 @@ use crate::{
     config::NextralConfig,
     contracts::{CoreError, CoreResult},
 };
-use auth::{Authenticator, Principal};
+use auth::Authenticator;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -61,7 +62,7 @@ pub struct StartupReadinessMatrix {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     pub status: u16,
     pub code: String,
     pub message: String,
@@ -108,17 +109,66 @@ impl From<crate::package::PackageError> for ApiError {
     }
 }
 
+struct TokenBucket {
+    tokens: f64,
+    last_refill: std::time::Instant,
+}
+
+pub(crate) struct ScopedRateLimiter {
+    enabled: bool,
+    max_rps: f64,
+    burst_size: f64,
+    buckets: parking_lot::Mutex<std::collections::HashMap<(String, String), TokenBucket>>,
+}
+
+impl ScopedRateLimiter {
+    pub(crate) fn new(config: &crate::config::RateLimitConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            max_rps: config.max_requests_per_second as f64,
+            burst_size: config.burst_size as f64,
+            buckets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub(crate) fn check_and_consume(&self, tenant_id: &str, user_id: &str) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        let mut buckets = self.buckets.lock();
+        if buckets.len() > 10_000 {
+            buckets.retain(|_, b| now.duration_since(b.last_refill) < std::time::Duration::from_secs(3600));
+        }
+        let key = (tenant_id.to_string(), user_id.to_string());
+        let bucket = buckets.entry(key).or_insert_with(|| TokenBucket {
+            tokens: self.burst_size,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.max_rps).min(self.burst_size);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(crate) struct ServiceState {
+pub struct ServiceState {
     pub config: Arc<NextralConfig>,
     pub auth: Authenticator,
     pub client: Arc<crate::package::RuntimeClient>,
     permits: Arc<Semaphore>,
     request_permits: Arc<Semaphore>,
+    pub(crate) rate_limiter: Arc<ScopedRateLimiter>,
 }
 
 impl ServiceState {
-    pub(crate) fn new(config: NextralConfig) -> CoreResult<Self> {
+    pub fn new(config: NextralConfig) -> CoreResult<Self> {
         config.validate()?;
         let auth = Authenticator::new(&config)?;
         let client = Arc::new(
@@ -126,11 +176,12 @@ impl ServiceState {
                 .map_err(|e| CoreError::InvalidInput(e.message))?,
         );
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(config.clone()),
             auth,
             client,
             permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            rate_limiter: Arc::new(ScopedRateLimiter::new(&config.rate_limit)),
         })
     }
 
@@ -141,11 +192,12 @@ impl ServiceState {
         config.validate()?;
         let auth = Authenticator::new(&config)?;
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(config.clone()),
             auth,
             client,
             permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            rate_limiter: Arc::new(ScopedRateLimiter::new(&config.rate_limit)),
         })
     }
 
@@ -154,13 +206,22 @@ impl ServiceState {
             .map_err(|e| ApiError::new(503, "unavailable", e.to_string()))?;
         Ok(matrix)
     }
-    pub(crate) async fn call(
+    pub async fn call(
         &self,
         principal: &Principal,
         tool: &'static str,
         mut payload: Value,
     ) -> Result<Value, ApiError> {
         principal.authorize(&payload)?;
+        let tenant_str = payload.get("tenant_id").and_then(Value::as_str).unwrap_or("");
+        let user_str = payload.get("user_id").and_then(Value::as_str).unwrap_or("");
+        if !self.rate_limiter.check_and_consume(tenant_str, user_str) {
+            return Err(ApiError::new(
+                429,
+                "resource_exhausted",
+                "rate limit exceeded for scope",
+            ));
+        }
         self.prepare(tool, &mut payload)?;
         let permit = Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
             ApiError::new(429, "resource_exhausted", "runtime request limit reached")
