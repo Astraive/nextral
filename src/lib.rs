@@ -82,11 +82,22 @@ mod tests {
     fn mcp_call_json(request_json: &str) -> Result<String, crate::package::PackageError> {
         let value: serde_json::Value = serde_json::from_str(request_json).unwrap();
         let tool = value["tool"].as_str().unwrap();
-        let payload_json = value.get("payload_json").and_then(|v| v.as_str()).unwrap_or("{}");
-        static CLIENT: std::sync::OnceLock<crate::package::RuntimeClient> = std::sync::OnceLock::new();
+        let payload_json = value
+            .get("payload_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}");
+        static CLIENT: std::sync::OnceLock<crate::package::RuntimeClient> =
+            std::sync::OnceLock::new();
         let client = CLIENT.get_or_init(test_client);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(client.call_json(tool, payload_json.to_string(), crate::package::CallOptions::default()))
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(client.call_json(
+            tool,
+            payload_json.to_string(),
+            crate::package::CallOptions::default(),
+        ))
     }
 
     #[tokio::test]
@@ -2915,7 +2926,6 @@ mod tests {
         assert!(v.get("entity_count").is_some());
         assert!(v.get("tag_count").is_some());
     }
-
 
     // === FULL END-TO-END MEMORY LIFECYCLE TEST ===
 

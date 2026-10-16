@@ -233,12 +233,24 @@ pub struct ExecutionConfig {
     pub lease_seconds: u32,
 }
 
-fn default_max_in_flight() -> usize { 8 }
-fn default_max_pending() -> usize { 64 }
-fn default_max_pending_bytes() -> usize { 16777216 }
-fn default_request_timeout_ms() -> u64 { 30000 }
-fn default_shutdown_timeout_ms() -> u64 { 30000 }
-fn default_lease_seconds() -> u32 { 30 }
+fn default_max_in_flight() -> usize {
+    8
+}
+fn default_max_pending() -> usize {
+    64
+}
+fn default_max_pending_bytes() -> usize {
+    16777216
+}
+fn default_request_timeout_ms() -> u64 {
+    30000
+}
+fn default_shutdown_timeout_ms() -> u64 {
+    30000
+}
+fn default_lease_seconds() -> u32 {
+    30
+}
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
@@ -260,7 +272,6 @@ fn default_control_namespace() -> String {
 fn default_base_policy_version() -> String {
     "configured-base".to_string()
 }
-
 
 /// Complete runtime configuration covering backend selection, store URLs, provider settings,
 /// ingestion/retrieval policies, caching, service binds, auth, and observability.
@@ -393,12 +404,16 @@ impl NextralConfig {
                 "execution.max_in_flight must be between 1 and 64".to_string(),
             ));
         }
-        if self.execution.max_pending < self.execution.max_in_flight || self.execution.max_pending > 1024 {
+        if self.execution.max_pending < self.execution.max_in_flight
+            || self.execution.max_pending > 1024
+        {
             return Err(CoreError::InvalidInput(
                 "execution.max_pending must be between max_in_flight and 1024".to_string(),
             ));
         }
-        if self.execution.max_pending_bytes < 10485760 || self.execution.max_pending_bytes > 268435456 {
+        if self.execution.max_pending_bytes < 10485760
+            || self.execution.max_pending_bytes > 268435456
+        {
             return Err(CoreError::InvalidInput(
                 "execution.max_pending_bytes must be between 10485760 and 268435456".to_string(),
             ));
@@ -420,10 +435,14 @@ impl NextralConfig {
         }
         if self.control_namespace.is_empty()
             || self.control_namespace.len() > 64
-            || !self.control_namespace.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || !self
+                .control_namespace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(CoreError::InvalidInput(
-                "control_namespace must be 1..=64 characters of ASCII letters, digits, '_' or '-'".to_string(),
+                "control_namespace must be 1..=64 characters of ASCII letters, digits, '_' or '-'"
+                    .to_string(),
             ));
         }
         if self.base_policy_version.is_empty() || self.base_policy_version.len() > 128 {
@@ -603,7 +622,9 @@ fn validate_auth_config(config: &AuthConfig) -> CoreResult<()> {
         (None, None, None) => Ok(()),
         (Some(_), Some(_), Some(url)) => {
             if !url.starts_with("https://") {
-                return Err(CoreError::InvalidInput("auth.jwks_url must use HTTPS".into()));
+                return Err(CoreError::InvalidInput(
+                    "auth.jwks_url must use HTTPS".into(),
+                ));
             }
             Ok(())
         }
@@ -759,7 +780,10 @@ fn validate_postgres_tls(value: &str) -> CoreResult<()> {
             .first()
             .map(|value| value.trim_matches('\'').to_string())
     };
-    if !matches!(mode.as_deref(), Some("require" | "verify-ca" | "verify-full")) {
+    if !matches!(
+        mode.as_deref(),
+        Some("require" | "verify-ca" | "verify-full")
+    ) {
         return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require, verify-ca, or verify-full with certificate verification".into()));
     }
     Ok(())

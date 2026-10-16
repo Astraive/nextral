@@ -2,8 +2,8 @@
 
 use napi::{Error, Result};
 use napi_derive::napi;
-use std::sync::Arc;
 use nextral::package::{CallOptions, RuntimeClient};
+use std::sync::Arc;
 
 fn package_error(error: nextral::package::PackageError) -> Error {
     Error::from_reason(
@@ -84,12 +84,12 @@ impl WorkerHandle {
     }
 }
 
-
 #[napi]
 impl Client {
     #[napi(factory)]
     pub fn create(config_json: String) -> Result<Self> {
-        let config = nextral::config::load_config(&config_json).map_err(|e| package_error(e.into()))?;
+        let config =
+            nextral::config::load_config(&config_json).map_err(|e| package_error(e.into()))?;
         let client = RuntimeClient::from_config(config).map_err(package_error)?;
         Ok(Self {
             client: Arc::new(client),
@@ -143,7 +143,11 @@ impl Client {
     pub async fn start_worker(&self, config_json: String) -> Result<WorkerHandle> {
         let config: nextral::runtime::prospective::WorkerConfig =
             serde_json::from_str(&config_json).map_err(|e| Error::from_reason(e.to_string()))?;
-        let handle = self.client.start_worker(config).await.map_err(package_error)?;
+        let handle = self
+            .client
+            .start_worker(config)
+            .await
+            .map_err(package_error)?;
         Ok(WorkerHandle {
             handle: Arc::new(handle),
         })

@@ -80,12 +80,27 @@ const COUNTERS: [(&str, &str); 22] = [
         "nextral_jobs_age_seconds_total",
         "Age in seconds of observed durable jobs",
     ),
-    ("nextral_admission_admitted_total", "Calls admitted to execution"),
-    ("nextral_admission_rejected_total", "Calls rejected by admission bounds"),
-    ("nextral_queue_timeout_total", "Calls timed out in admission queue"),
-    ("nextral_execution_timeout_total", "Calls timed out during execution"),
+    (
+        "nextral_admission_admitted_total",
+        "Calls admitted to execution",
+    ),
+    (
+        "nextral_admission_rejected_total",
+        "Calls rejected by admission bounds",
+    ),
+    (
+        "nextral_queue_timeout_total",
+        "Calls timed out in admission queue",
+    ),
+    (
+        "nextral_execution_timeout_total",
+        "Calls timed out during execution",
+    ),
     ("nextral_worker_ticks_total", "Worker loop ticks executed"),
-    ("nextral_worker_errors_total", "Worker loop execution errors"),
+    (
+        "nextral_worker_errors_total",
+        "Worker loop execution errors",
+    ),
 ];
 const STAGES: [&str; 3] = ["vector", "graph", "merge"];
 const BACKENDS: [&str; 5] = ["postgres", "redis", "qdrant", "neo4j", "s3"];

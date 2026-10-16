@@ -1,7 +1,9 @@
 use nextral::{
     config::{NextralConfig, RuntimeBackend},
     contracts::{CoreError, CoreResult},
-    domain::{AuditAction, AuditEvent, ReminderKind, ReminderPriority, ReminderRecord, ReminderStatus},
+    domain::{
+        AuditAction, AuditEvent, ReminderKind, ReminderPriority, ReminderRecord, ReminderStatus,
+    },
     package::{CallOptions, RuntimeClient},
     runtime::lifecycle::{
         timestamp_epoch, worker_owner, GuardedWriteResult, LeaseClaim, LeaseResource,
@@ -49,8 +51,26 @@ async fn two_workers_racing_for_one_due_job_claim_only_one_lease() {
     let mut store_a = client.store().clone();
     let mut store_b = client.store().clone();
 
-    let claims_a = store_a.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_a", 1800000000_000000000, 10, 300).unwrap();
-    let claims_b = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_b", 1800000000_000000000, 10, 300).unwrap();
+    let claims_a = store_a
+        .lifecycle_job_claim_due(
+            "tenant_jobs",
+            "user_jobs",
+            "worker_a",
+            1800000000_000000000,
+            10,
+            300,
+        )
+        .unwrap();
+    let claims_b = store_b
+        .lifecycle_job_claim_due(
+            "tenant_jobs",
+            "user_jobs",
+            "worker_b",
+            1800000000_000000000,
+            10,
+            300,
+        )
+        .unwrap();
 
     // Exactly one worker got the claim
     assert_eq!(claims_a.len() + claims_b.len(), 1);
@@ -75,17 +95,31 @@ async fn two_workers_racing_for_one_due_job_claim_only_one_lease() {
     let mut modified_job = claimed_job.clone();
     modified_job.status = "completed".into();
 
-    let save_err = store_a.lifecycle_job_save_guarded(&stale_claim, &modified_job).unwrap_err();
+    let save_err = store_a
+        .lifecycle_job_save_guarded(&stale_claim, &modified_job)
+        .unwrap_err();
     assert!(matches!(save_err, CoreError::LeaseLost(_)));
 
     // Reclaimed fence rejects the old owner even if owner text is reused
-    let new_claim = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", &claim.owner, 1800000000_000000000, 10, 300);
+    let new_claim = store_b.lifecycle_job_claim_due(
+        "tenant_jobs",
+        "user_jobs",
+        &claim.owner,
+        1800000000_000000000,
+        10,
+        300,
+    );
     // If not due or already claimed, returns empty
     assert!(new_claim.unwrap().is_empty());
 
     // Valid claim saves cleanly
-    store_a.lifecycle_job_save_guarded(&claim, &modified_job).unwrap();
-    let fetched = store_a.lifecycle_job_get("tenant_jobs", "user_jobs", &job_id).unwrap().unwrap();
+    store_a
+        .lifecycle_job_save_guarded(&claim, &modified_job)
+        .unwrap();
+    let fetched = store_a
+        .lifecycle_job_get("tenant_jobs", "user_jobs", &job_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.status, "completed");
 
     client.close(Duration::from_secs(5)).await.unwrap();
@@ -99,7 +133,14 @@ async fn reminder_delivery_transition_atomicity_and_audit_dedup() {
 
     // Acquire user lease
     let claim = store
-        .lifecycle_claim_fenced(tenant, Some(user), LeaseResource::RuntimeState, &format!("privacy/{user}"), "test_worker", 300)
+        .lifecycle_claim_fenced(
+            tenant,
+            Some(user),
+            LeaseResource::RuntimeState,
+            &format!("privacy/{user}"),
+            "test_worker",
+            300,
+        )
         .unwrap()
         .unwrap();
 
@@ -143,11 +184,20 @@ async fn reminder_delivery_transition_atomicity_and_audit_dedup() {
 
     // Commit reminder delivery atomically
     store
-        .commit_reminder_delivery(&claim, "delivery/user_reminders/rem_1", &json!({"state": "ok"}), &reminder, &[audit_1])
+        .commit_reminder_delivery(
+            &claim,
+            "delivery/user_reminders/rem_1",
+            &json!({"state": "ok"}),
+            &reminder,
+            &[audit_1],
+        )
         .unwrap();
 
     // Verify all 3 applied together
-    assert!(store.lifecycle_load(tenant, "delivery/user_reminders/rem_1").unwrap().is_some());
+    assert!(store
+        .lifecycle_load(tenant, "delivery/user_reminders/rem_1")
+        .unwrap()
+        .is_some());
     assert_eq!(store.reminders.len(), 1);
     assert_eq!(store.reminders[0].id, "rem_1");
     assert_eq!(store.audit_events.len(), 1);
@@ -197,7 +247,14 @@ async fn fenced_leases_increment_fence_and_reject_lost_owner() {
 
     // Initial claim has fence 1
     let claim1 = store
-        .lifecycle_claim_fenced(tenant, None, LeaseResource::RuntimeState, key, "worker_1", 300)
+        .lifecycle_claim_fenced(
+            tenant,
+            None,
+            LeaseResource::RuntimeState,
+            key,
+            "worker_1",
+            300,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(claim1.fence, 1);
@@ -205,7 +262,14 @@ async fn fenced_leases_increment_fence_and_reject_lost_owner() {
 
     // Competing claim by worker_2 while unexpired fails
     let comp = store
-        .lifecycle_claim_fenced(tenant, None, LeaseResource::RuntimeState, key, "worker_2", 300)
+        .lifecycle_claim_fenced(
+            tenant,
+            None,
+            LeaseResource::RuntimeState,
+            key,
+            "worker_2",
+            300,
+        )
         .unwrap();
     assert!(comp.is_none());
 
@@ -231,7 +295,14 @@ async fn fenced_leases_increment_fence_and_reject_lost_owner() {
 
     // Now worker 2 claims and fence increments to 2
     let claim2 = store
-        .lifecycle_claim_fenced(tenant, None, LeaseResource::RuntimeState, key, "worker_2", 300)
+        .lifecycle_claim_fenced(
+            tenant,
+            None,
+            LeaseResource::RuntimeState,
+            key,
+            "worker_2",
+            300,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(claim2.fence, 2);

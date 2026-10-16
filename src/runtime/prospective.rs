@@ -1,3 +1,5 @@
+use crate::domain::ReminderStatus;
+use crate::runtime::storage::RuntimeStore;
 use crate::{
     contracts::{CoreError, CoreResult},
     runtime::{
@@ -5,14 +7,10 @@ use crate::{
         governance::{retain_memory, ForgetMemoryRequest},
         lifecycle::{durable_save, timestamp_epoch, worker_owner, LifecycleStore},
         observability::{record_job, JobOutcome},
-        reminders::{
-            execute_due_reminders, ExecuteDueRemindersRequest, ExecuteDueRemindersResponse,
-        },
+        reminders::ExecuteDueRemindersRequest,
     },
-    store::{AuditSink, GraphStore, MemoryIndexStore, ReminderStore, SessionStore},
+    store::{AuditSink, GraphStore, MemoryIndexStore, SessionStore},
 };
-use crate::domain::ReminderStatus;
-use crate::runtime::storage::RuntimeStore;
 use serde::{Deserialize, Serialize};
 
 fn default_limit() -> usize {
@@ -235,7 +233,9 @@ where
                         },
                         |store| {
                             if !store.lifecycle_renew_fenced(&claim, request.lease_seconds)? {
-                                return Err(CoreError::LeaseLost("job lease lost during retention".into()));
+                                return Err(CoreError::LeaseLost(
+                                    "job lease lost during retention".into(),
+                                ));
                             }
                             Ok(())
                         },
@@ -346,7 +346,9 @@ impl WorkerConfig {
             }
         }
         if self.actor.trim().is_empty() {
-            return Err(CoreError::InvalidInput("worker actor cannot be empty".into()));
+            return Err(CoreError::InvalidInput(
+                "worker actor cannot be empty".into(),
+            ));
         }
         if self.poll_interval_ms < 100 || self.poll_interval_ms > 60000 {
             return Err(CoreError::InvalidInput(
@@ -496,6 +498,7 @@ pub fn run_worker_tick(
     crate::runtime::observability::record_worker_tick(report.errors == 0 && report.lease_lost == 0);
     Ok(report)
 }
+#[allow(dead_code)]
 fn reminder_request(
     tenant: &str,
     user: &str,
@@ -598,10 +601,7 @@ mod tests {
             execute_lifecycle_jobs(&mut store, runner("160")).unwrap()[0].status,
             "terminal_failed"
         );
-        let job = store
-            .lifecycle_job_get("t", "u", &job.id)
-            .unwrap()
-            .unwrap();
+        let job = store.lifecycle_job_get("t", "u", &job.id).unwrap().unwrap();
         assert_eq!(job.attempts, 2);
     }
 

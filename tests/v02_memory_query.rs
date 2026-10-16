@@ -113,9 +113,27 @@ async fn filters_tags_entities_and_date_intervals() {
 
     // Ingest diverse records
     let items = vec![
-        ("1", "fact", vec!["tag_a", "tag_b"], vec!["ent_1"], "2026-01-01T10:00:00.000000Z"),
-        ("2", "fact", vec!["tag_a"], vec!["ent_1", "ent_2"], "2026-01-02T10:00:00.000000Z"),
-        ("3", "decision", vec!["tag_b"], vec!["ent_2"], "2026-01-03T10:00:00.000000Z"),
+        (
+            "1",
+            "fact",
+            vec!["tag_a", "tag_b"],
+            vec!["ent_1"],
+            "2026-01-01T10:00:00.000000Z",
+        ),
+        (
+            "2",
+            "fact",
+            vec!["tag_a"],
+            vec!["ent_1", "ent_2"],
+            "2026-01-02T10:00:00.000000Z",
+        ),
+        (
+            "3",
+            "decision",
+            vec!["tag_b"],
+            vec!["ent_2"],
+            "2026-01-03T10:00:00.000000Z",
+        ),
     ];
 
     for (id, ct, tags, ents, ts) in items {
@@ -124,7 +142,11 @@ async fn filters_tags_entities_and_date_intervals() {
             tenant,
             user,
             &format!("Content {}", id),
-            if ct == "decision" { ContentType::Decision } else { ContentType::Fact },
+            if ct == "decision" {
+                ContentType::Decision
+            } else {
+                ContentType::Fact
+            },
             MemoryType::Semantic,
             SourceType::Manual,
         );
@@ -147,7 +169,17 @@ async fn filters_tags_entities_and_date_intervals() {
         limit: 10,
         cursor: None,
     };
-    let page: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_tags_all).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_tags_all).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, "1");
 
@@ -163,7 +195,17 @@ async fn filters_tags_entities_and_date_intervals() {
         limit: 10,
         cursor: None,
     };
-    let page_any: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_tags_any).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page_any: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_tags_any).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page_any.items.len(), 2);
 
     // 3. Date interval: [2026-01-02, 2026-01-03) -> only item 2
@@ -179,7 +221,17 @@ async fn filters_tags_entities_and_date_intervals() {
         limit: 10,
         cursor: None,
     };
-    let page_date: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_date).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page_date: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_date).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page_date.items.len(), 1);
     assert_eq!(page_date.items[0].id, "2");
 
@@ -196,7 +248,17 @@ async fn filters_tags_entities_and_date_intervals() {
         limit: 10,
         cursor: None,
     };
-    let page_equal: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_equal).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page_equal: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_equal).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page_equal.items.len(), 0);
 
     // 5. Reversed interval: gte > lt -> invalid_input
@@ -212,7 +274,14 @@ async fn filters_tags_entities_and_date_intervals() {
         limit: 10,
         cursor: None,
     };
-    let err_rev = client.call_json("nextral.memory.list", serde_json::to_string(&q_rev).unwrap(), CallOptions::default()).await.unwrap_err();
+    let err_rev = client
+        .call_json(
+            "nextral.memory.list",
+            serde_json::to_string(&q_rev).unwrap(),
+            CallOptions::default(),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(err_rev.code, "invalid_input");
 }
 
@@ -244,7 +313,17 @@ async fn cursor_tampering_and_mismatch_validation() {
         limit: 2,
         cursor: None,
     };
-    let page1: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q1).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page1: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q1).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let valid_cursor = page1.next_cursor.unwrap();
 
     // Tampered cursor (altered characters) fails
@@ -257,7 +336,14 @@ async fn cursor_tampering_and_mismatch_validation() {
         limit: 2,
         cursor: Some(tampered),
     };
-    let err = client.call_json("nextral.memory.list", serde_json::to_string(&q_tampered).unwrap(), CallOptions::default()).await.unwrap_err();
+    let err = client
+        .call_json(
+            "nextral.memory.list",
+            serde_json::to_string(&q_tampered).unwrap(),
+            CallOptions::default(),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(err.code, "invalid_input");
 
     // Reusing cursor with different filters fails
@@ -272,7 +358,14 @@ async fn cursor_tampering_and_mismatch_validation() {
         limit: 2,
         cursor: Some(valid_cursor.clone()),
     };
-    let err_mismatch = client.call_json("nextral.memory.list", serde_json::to_string(&q_mismatch).unwrap(), CallOptions::default()).await.unwrap_err();
+    let err_mismatch = client
+        .call_json(
+            "nextral.memory.list",
+            serde_json::to_string(&q_mismatch).unwrap(),
+            CallOptions::default(),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(err_mismatch.code, "invalid_input");
 
     // Changing page limit with the same cursor works cleanly
@@ -284,7 +377,17 @@ async fn cursor_tampering_and_mismatch_validation() {
         limit: 10,
         cursor: Some(valid_cursor),
     };
-    let page_change: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_limit_change).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let page_change: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_limit_change).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(page_change.items.len(), 3);
 }
 
@@ -305,7 +408,11 @@ async fn source_tombstone_protection_in_query() {
         SourceType::Manual,
     );
     derived.source_message_ids = vec!["msg_1".into()];
-    client.store().clone().upsert_memory(derived.clone()).unwrap();
+    client
+        .store()
+        .clone()
+        .upsert_memory(derived.clone())
+        .unwrap();
 
     // Default browse shows Active
     let q_active = MemoryQuery {
@@ -316,7 +423,17 @@ async fn source_tombstone_protection_in_query() {
         limit: 10,
         cursor: None,
     };
-    let p1: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_active).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let p1: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_active).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(p1.items.len(), 1);
     assert_eq!(p1.items[0].status, MemoryStatus::Active);
 
@@ -331,7 +448,17 @@ async fn source_tombstone_protection_in_query() {
         .unwrap();
 
     // Default browse excludes forgotten derived memory
-    let p2: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_active).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let p2: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_active).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(p2.items.len(), 0);
 
     // Inactive browse shows derived memory as SoftDeleted
@@ -346,7 +473,17 @@ async fn source_tombstone_protection_in_query() {
         limit: 10,
         cursor: None,
     };
-    let p3: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_inactive).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let p3: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_inactive).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(p3.items.len(), 1);
     assert_eq!(p3.items[0].status, MemoryStatus::SoftDeleted);
 
@@ -359,7 +496,17 @@ async fn source_tombstone_protection_in_query() {
         )
         .unwrap();
 
-    let p4: MemoryPage = serde_json::from_str(&client.call_json("nextral.memory.list", serde_json::to_string(&q_inactive).unwrap(), CallOptions::default()).await.unwrap()).unwrap();
+    let p4: MemoryPage = serde_json::from_str(
+        &client
+            .call_json(
+                "nextral.memory.list",
+                serde_json::to_string(&q_inactive).unwrap(),
+                CallOptions::default(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(p4.items.len(), 1);
     assert_eq!(p4.items[0].content_preview, "[redacted]");
 }

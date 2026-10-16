@@ -1,4 +1,5 @@
 use crate::package::{CallOptions, RuntimeClient};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -9,7 +10,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationMix {
@@ -125,7 +125,9 @@ impl LoadRunner {
                                 "privacy_scope": ["private"]
                             }),
                         )
-                    } else if op_mod < config.mix.ingest_pct + config.mix.retrieve_pct + config.mix.query_pct {
+                    } else if op_mod
+                        < config.mix.ingest_pct + config.mix.retrieve_pct + config.mix.query_pct
+                    {
                         (
                             "nextral.memory.list",
                             json!({
@@ -179,7 +181,8 @@ impl LoadRunner {
 
                     if let Some(target_rps) = config.target_rps {
                         if target_rps > 0 {
-                            let interval_micros = (1_000_000 * config.concurrency as u64) / (target_rps as u64);
+                            let interval_micros =
+                                (1_000_000 * config.concurrency as u64) / (target_rps as u64);
                             tokio::time::sleep(Duration::from_micros(interval_micros)).await;
                         }
                     }
@@ -206,9 +209,21 @@ impl LoadRunner {
         let mut lat_vec = latencies.lock().clone();
         lat_vec.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let p50 = if lat_vec.is_empty() { 0.0 } else { lat_vec[(lat_vec.len() as f64 * 0.50) as usize] };
-        let p95 = if lat_vec.is_empty() { 0.0 } else { lat_vec[(lat_vec.len() as f64 * 0.95).min((lat_vec.len() - 1) as f64) as usize] };
-        let p99 = if lat_vec.is_empty() { 0.0 } else { lat_vec[(lat_vec.len() as f64 * 0.99).min((lat_vec.len() - 1) as f64) as usize] };
+        let p50 = if lat_vec.is_empty() {
+            0.0
+        } else {
+            lat_vec[(lat_vec.len() as f64 * 0.50) as usize]
+        };
+        let p95 = if lat_vec.is_empty() {
+            0.0
+        } else {
+            lat_vec[(lat_vec.len() as f64 * 0.95).min((lat_vec.len() - 1) as f64) as usize]
+        };
+        let p99 = if lat_vec.is_empty() {
+            0.0
+        } else {
+            lat_vec[(lat_vec.len() as f64 * 0.99).min((lat_vec.len() - 1) as f64) as usize]
+        };
 
         let final_counts = status_counts.lock().clone();
 

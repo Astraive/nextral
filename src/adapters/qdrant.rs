@@ -82,7 +82,12 @@ impl QdrantAdapter {
         })?;
         Ok((status, body))
     }
-    pub(crate) fn call(&self, method: Method, path: &str, payload: Option<&Value>) -> CoreResult<Value> {
+    pub(crate) fn call(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<&Value>,
+    ) -> CoreResult<Value> {
         let (status, body) = self.request(method, path, payload)?;
         if !status.is_success() {
             return Err(store_failure(
@@ -396,7 +401,16 @@ impl QdrantPort for QdrantAdapter {
                 must.push(json!({"key": "session_id", "match": {"value": sid}}));
             }
             if let Some(ref st) = filters.source_types {
-                let any_st: Vec<String> = st.iter().map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_string()).collect();
+                let any_st: Vec<String> = st
+                    .iter()
+                    .map(|s| {
+                        serde_json::to_value(s)
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect();
                 must.push(json!({"key": "source_type", "match": {"any": any_st}}));
             }
             if let Some(ref tags_any) = filters.tags_any {

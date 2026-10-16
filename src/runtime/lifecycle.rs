@@ -27,7 +27,6 @@ pub enum GuardedWriteResult {
     Superseded(Value),
 }
 
-
 /// Durable state and externally acknowledged effects used by lifecycle workers.
 /// Claims must be atomic, expire at `now_epoch + lease_seconds`, and fence other owners.
 pub trait LifecycleStore {
@@ -120,10 +119,7 @@ pub trait LifecycleStore {
         lease_seconds: u64,
     ) -> CoreResult<bool>;
 
-    fn lifecycle_release_fenced(
-        &mut self,
-        claim: &LeaseClaim,
-    ) -> CoreResult<()>;
+    fn lifecycle_release_fenced(&mut self, claim: &LeaseClaim) -> CoreResult<()>;
 
     fn lifecycle_save_guarded(
         &mut self,
@@ -158,7 +154,12 @@ pub trait LifecycleStore {
         now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
-    ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, LeaseClaim)>>;
+    ) -> CoreResult<
+        Vec<(
+            crate::runtime::prospective::LifecycleScheduledJob,
+            LeaseClaim,
+        )>,
+    >;
 
     fn lifecycle_job_save_guarded(
         &mut self,
@@ -200,14 +201,16 @@ where
     validate_identity(tenant, user, None)?;
     let owner = worker_owner();
     let key = format!("privacy/{user}");
-    let claim = store.lifecycle_claim_fenced(
-        tenant,
-        Some(user),
-        LeaseResource::RuntimeState,
-        &key,
-        &owner,
-        300,
-    )?.ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
+    let claim = store
+        .lifecycle_claim_fenced(
+            tenant,
+            Some(user),
+            LeaseResource::RuntimeState,
+            &key,
+            &owner,
+            300,
+        )?
+        .ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
     let result = work(store, &claim);
     let release = store.lifecycle_release_fenced(&claim);
     match result {

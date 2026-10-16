@@ -472,11 +472,15 @@ impl MemoryFilters {
         fn validate_terms(terms: &mut Option<Vec<String>>) -> CoreResult<()> {
             if let Some(list) = terms {
                 if list.len() > 32 {
-                    return Err(CoreError::InvalidInput("filter array exceeds 32 entries".into()));
+                    return Err(CoreError::InvalidInput(
+                        "filter array exceeds 32 entries".into(),
+                    ));
                 }
                 for item in list.iter() {
                     if item.is_empty() || item.chars().count() > 256 {
-                        return Err(CoreError::InvalidInput("filter term must be 1..=256 Unicode characters".into()));
+                        return Err(CoreError::InvalidInput(
+                            "filter term must be 1..=256 Unicode characters".into(),
+                        ));
                     }
                 }
                 list.sort();
@@ -491,7 +495,9 @@ impl MemoryFilters {
 
         if let Some(ref session) = self.session_id {
             if session.is_empty() || session.len() > 256 {
-                return Err(CoreError::InvalidInput("session_id must be 1..=256 bytes".into()));
+                return Err(CoreError::InvalidInput(
+                    "session_id must be 1..=256 bytes".into(),
+                ));
             }
         }
         if let Some(ref mut gte) = self.created_at_gte {
@@ -563,13 +569,15 @@ impl MemoryFilters {
             }
         }
         if let Some(ref gte) = self.created_at_gte {
-            let record_created = normalize_rfc3339_micros(&record.created_at).unwrap_or_else(|_| record.created_at.clone());
+            let record_created = normalize_rfc3339_micros(&record.created_at)
+                .unwrap_or_else(|_| record.created_at.clone());
             if record_created < *gte {
                 return false;
             }
         }
         if let Some(ref lt) = self.created_at_lt {
-            let record_created = normalize_rfc3339_micros(&record.created_at).unwrap_or_else(|_| record.created_at.clone());
+            let record_created = normalize_rfc3339_micros(&record.created_at)
+                .unwrap_or_else(|_| record.created_at.clone());
             if record_created >= *lt {
                 return false;
             }
@@ -688,7 +696,10 @@ pub struct MemoryQuery {
     pub privacy_scope: Vec<PrivacyLevel>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub filters: MemoryFilters,
-    #[serde(default = "default_query_limit", deserialize_with = "deserialize_limit_null_default")]
+    #[serde(
+        default = "default_query_limit",
+        deserialize_with = "deserialize_limit_null_default"
+    )]
     pub limit: usize,
     #[serde(default)]
     pub cursor: Option<String>,
@@ -697,20 +708,30 @@ pub struct MemoryQuery {
 impl MemoryQuery {
     pub fn validate(&mut self) -> CoreResult<()> {
         if self.tenant_id.is_empty() || self.tenant_id.len() > 256 {
-            return Err(CoreError::InvalidInput("tenant_id must be 1..=256 bytes".into()));
+            return Err(CoreError::InvalidInput(
+                "tenant_id must be 1..=256 bytes".into(),
+            ));
         }
         if self.user_id.is_empty() || self.user_id.len() > 256 {
-            return Err(CoreError::InvalidInput("user_id must be 1..=256 bytes".into()));
+            return Err(CoreError::InvalidInput(
+                "user_id must be 1..=256 bytes".into(),
+            ));
         }
         if self.limit == 0 || self.limit > 100 {
-            return Err(CoreError::InvalidInput("limit must be between 1 and 100".into()));
+            return Err(CoreError::InvalidInput(
+                "limit must be between 1 and 100".into(),
+            ));
         }
         if let Some(ref c) = self.cursor {
             if c.is_empty() {
-                return Err(CoreError::InvalidInput("cursor cannot be empty string".into()));
+                return Err(CoreError::InvalidInput(
+                    "cursor cannot be empty string".into(),
+                ));
             }
             if c.len() > 4096 {
-                return Err(CoreError::InvalidInput("cursor exceeds maximum size of 4096 bytes".into()));
+                return Err(CoreError::InvalidInput(
+                    "cursor exceeds maximum size of 4096 bytes".into(),
+                ));
             }
         }
         self.filters.validate()?;
@@ -739,10 +760,18 @@ pub fn compute_query_fingerprint(
     let mut sorted_privacy = effective_privacy.to_vec();
     sorted_privacy.sort_by_key(|p| serde_json::to_string(p).unwrap_or_default());
     sorted_privacy.dedup();
-    hasher.update(serde_json::to_string(&sorted_privacy).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(&sorted_privacy)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.update(b":");
     let normalized_filters = filters.normalized();
-    hasher.update(serde_json::to_string(&normalized_filters).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(&normalized_filters)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -758,7 +787,9 @@ pub fn encode_cursor(after_created_at: &str, after_id: &str, fingerprint: &str) 
 
 pub fn decode_cursor(cursor: &str, expected_fingerprint: &str) -> CoreResult<(String, String)> {
     if cursor.is_empty() {
-        return Err(CoreError::InvalidInput("cursor cannot be empty string".into()));
+        return Err(CoreError::InvalidInput(
+            "cursor cannot be empty string".into(),
+        ));
     }
     if cursor.len() > 4096 {
         return Err(CoreError::InvalidInput("cursor exceeds 4096 bytes".into()));
@@ -771,11 +802,19 @@ pub fn decode_cursor(cursor: &str, expected_fingerprint: &str) -> CoreResult<(St
     if val["v"].as_u64() != Some(1) {
         return Err(CoreError::InvalidInput("unsupported cursor version".into()));
     }
-    let after_created = val["after_created_at"].as_str().ok_or_else(|| CoreError::InvalidInput("cursor missing after_created_at".into()))?;
-    let after_id = val["after_id"].as_str().ok_or_else(|| CoreError::InvalidInput("cursor missing after_id".into()))?;
-    let fingerprint = val["scope_filter_sha256"].as_str().ok_or_else(|| CoreError::InvalidInput("cursor missing scope_filter_sha256".into()))?;
+    let after_created = val["after_created_at"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing after_created_at".into()))?;
+    let after_id = val["after_id"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing after_id".into()))?;
+    let fingerprint = val["scope_filter_sha256"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing scope_filter_sha256".into()))?;
     if fingerprint != expected_fingerprint {
-        return Err(CoreError::InvalidInput("cursor filter or scope mismatch".into()));
+        return Err(CoreError::InvalidInput(
+            "cursor filter or scope mismatch".into(),
+        ));
     }
     Ok((after_created.to_string(), after_id.to_string()))
 }

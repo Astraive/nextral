@@ -19,11 +19,10 @@ use crate::{
     store::{AuditSink, GraphStore, MemoryIndexStore, ReminderStore, SessionStore},
     testkit::TestMemoryStore,
 };
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use parking_lot::Mutex;
 use std::sync::Arc;
-
 
 pub struct ProductionStore {
     pub config: NextralConfig,
@@ -389,7 +388,9 @@ impl RuntimeStore {
     pub fn configured(config: NextralConfig) -> CoreResult<Self> {
         config.validate()?;
         match config.backend {
-            RuntimeBackend::TestMemory => Ok(Self::Test(Arc::new(Mutex::new(TestMemoryStore::new())))),
+            RuntimeBackend::TestMemory => {
+                Ok(Self::Test(Arc::new(Mutex::new(TestMemoryStore::new()))))
+            }
             RuntimeBackend::ProductionStores => {
                 Ok(Self::Production(Arc::new(ProductionStore::new(config)?)))
             }
@@ -547,7 +548,8 @@ impl RuntimeStore {
         let backend = match self {
             Self::Test(s) => {
                 let mut guard = s.lock();
-                guard.lifecycle_state
+                guard
+                    .lifecycle_state
                     .remove(&(t.into(), key))
                     .ok_or_else(|| CoreError::NotFound("procedural policy not found".into()))?;
                 guard.emit_audit(audit)?;
@@ -828,14 +830,17 @@ impl ProductionStore {
     }
     pub fn index_repair(&self, tenant: &str, user: &str, limit: usize) -> CoreResult<Value> {
         let route = self.route(tenant, user)?;
-        let claim = self.postgres.claim_fenced(
-            tenant,
-            Some(user),
-            crate::runtime::lifecycle::LeaseResource::RuntimeState,
-            &format!("privacy/{user}"),
-            "index_repair",
-            300,
-        )?.ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
+        let claim = self
+            .postgres
+            .claim_fenced(
+                tenant,
+                Some(user),
+                crate::runtime::lifecycle::LeaseResource::RuntimeState,
+                &format!("privacy/{user}"),
+                "index_repair",
+                300,
+            )?
+            .ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
 
         let res = (|| -> CoreResult<Value> {
             let filter = json!({
@@ -854,7 +859,10 @@ impl ProductionStore {
                     "with_payload": true,
                 })),
             )?;
-            let points = scroll_body["result"]["points"].as_array().cloned().unwrap_or_default();
+            let points = scroll_body["result"]["points"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let mut checked = 0;
             let mut updated = 0;
             let mut removed = 0;
@@ -864,13 +872,19 @@ impl ProductionStore {
                 let payload = &point["payload"];
                 let memory_id = payload["memory_id"].as_str().unwrap_or("");
                 let point_id = &point["id"];
-                let is_legacy = payload.get("metadata_version").and_then(Value::as_u64).unwrap_or(0) == 0;
+                let is_legacy = payload
+                    .get("metadata_version")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    == 0;
 
                 if is_legacy {
                     let canonical = self.get_memory(tenant, user, memory_id)?;
                     if let Some(record) = canonical {
                         if record.status == crate::memory::MemoryStatus::Active {
-                            let micros = crate::runtime::lifecycle::timestamp_nanos(&record.created_at)? / 1000;
+                            let micros =
+                                crate::runtime::lifecycle::timestamp_nanos(&record.created_at)?
+                                    / 1000;
                             let metadata = json!({
                                 "metadata_version": 1,
                                 "session_id": record.session_id,
@@ -881,7 +895,10 @@ impl ProductionStore {
                             });
                             self.qdrant.call(
                                 reqwest::Method::POST,
-                                &format!("/collections/{}/points/payload?wait=true", route.collection),
+                                &format!(
+                                    "/collections/{}/points/payload?wait=true",
+                                    route.collection
+                                ),
                                 Some(&json!({
                                     "payload": metadata,
                                     "points": [point_id]
@@ -891,7 +908,10 @@ impl ProductionStore {
                         } else {
                             self.qdrant.call(
                                 reqwest::Method::POST,
-                                &format!("/collections/{}/points/delete?wait=true", route.collection),
+                                &format!(
+                                    "/collections/{}/points/delete?wait=true",
+                                    route.collection
+                                ),
                                 Some(&json!({
                                     "points": [point_id]
                                 })),
@@ -932,7 +952,9 @@ impl ProductionStore {
                         "with_payload": false,
                     })),
                 )?;
-                scroll_check["result"]["points"].as_array().map_or(0, |pts| pts.len())
+                scroll_check["result"]["points"]
+                    .as_array()
+                    .map_or(0, |pts| pts.len())
             };
             let complete = remaining == 0;
             Ok(json!({
@@ -1343,7 +1365,8 @@ impl<'a> ReminderStore for &'a ProductionStore {
         reminder: &ReminderRecord,
         audits: &[AuditEvent],
     ) -> CoreResult<()> {
-        self.postgres.commit_reminder_delivery(claim, state_key, state, reminder, audits)
+        self.postgres
+            .commit_reminder_delivery(claim, state_key, state, reminder, audits)
     }
 }
 
@@ -1427,8 +1450,14 @@ impl LifecycleStore for TestMemoryStore {
             return Ok(None);
         }
         let new_fence = current_fence + 1;
-        self.lifecycle_fences.insert(entry_key, (owner.to_string(), now + lease_seconds, new_fence));
-        self.lifecycle_leases.insert((tenant.to_string(), key.to_string()), (owner.to_string(), now + lease_seconds));
+        self.lifecycle_fences.insert(
+            entry_key,
+            (owner.to_string(), now + lease_seconds, new_fence),
+        );
+        self.lifecycle_leases.insert(
+            (tenant.to_string(), key.to_string()),
+            (owner.to_string(), now + lease_seconds),
+        );
         Ok(Some(crate::runtime::lifecycle::LeaseClaim {
             tenant_id: tenant.to_string(),
             user_id: user_id.map(str::to_string),
@@ -1452,8 +1481,13 @@ impl LifecycleStore for TestMemoryStore {
                     claim.user_id.clone().unwrap_or_default(),
                     claim.key.clone(),
                 );
-                if let Some((_, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&job_key) {
-                    if locked_by.as_deref() != Some(&claim.owner) || *fence != claim.fence || locked_until.map_or(true, |u| u <= now) {
+                if let Some((_, locked_by, locked_until, fence)) =
+                    self.lifecycle_jobs.get_mut(&job_key)
+                {
+                    if locked_by.as_deref() != Some(&claim.owner)
+                        || *fence != claim.fence
+                        || locked_until.map_or(true, |u| u <= now)
+                    {
                         return Ok(false);
                     }
                     *locked_until = Some(now + lease_seconds);
@@ -1463,14 +1497,19 @@ impl LifecycleStore for TestMemoryStore {
             }
             _ => {
                 let entry_key = (claim.tenant_id.clone(), claim.key.clone());
-                let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&entry_key).cloned() else {
+                let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&entry_key).cloned()
+                else {
                     return Ok(false);
                 };
                 if owner != claim.owner || fence != claim.fence || expiry <= now {
                     return Ok(false);
                 }
-                self.lifecycle_fences.insert(entry_key.clone(), (claim.owner.clone(), now + lease_seconds, claim.fence));
-                self.lifecycle_leases.insert(entry_key, (claim.owner.clone(), now + lease_seconds));
+                self.lifecycle_fences.insert(
+                    entry_key.clone(),
+                    (claim.owner.clone(), now + lease_seconds, claim.fence),
+                );
+                self.lifecycle_leases
+                    .insert(entry_key, (claim.owner.clone(), now + lease_seconds));
                 Ok(true)
             }
         }
@@ -1480,7 +1519,7 @@ impl LifecycleStore for TestMemoryStore {
         &mut self,
         claim: &crate::runtime::lifecycle::LeaseClaim,
     ) -> CoreResult<()> {
-        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let _now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
         match claim.resource {
             crate::runtime::lifecycle::LeaseResource::LifecycleJob => {
                 let job_key = (
@@ -1488,7 +1527,9 @@ impl LifecycleStore for TestMemoryStore {
                     claim.user_id.clone().unwrap_or_default(),
                     claim.key.clone(),
                 );
-                if let Some((_, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&job_key) {
+                if let Some((_, locked_by, locked_until, fence)) =
+                    self.lifecycle_jobs.get_mut(&job_key)
+                {
                     if locked_by.as_deref() == Some(&claim.owner) && *fence == claim.fence {
                         *locked_by = None;
                         *locked_until = None;
@@ -1526,8 +1567,13 @@ impl LifecycleStore for TestMemoryStore {
 
         let target_entry = (claim.tenant_id.clone(), target_key.to_string());
         if let Some(existing) = self.lifecycle_state.get(&target_entry) {
-            if matches!(existing["status"].as_str(), Some("cancelled" | "completed" | "terminal_failed")) {
-                return Ok(crate::runtime::lifecycle::GuardedWriteResult::Superseded(existing.clone()));
+            if matches!(
+                existing["status"].as_str(),
+                Some("cancelled" | "completed" | "terminal_failed")
+            ) {
+                return Ok(crate::runtime::lifecycle::GuardedWriteResult::Superseded(
+                    existing.clone(),
+                ));
             }
         }
 
@@ -1539,8 +1585,13 @@ impl LifecycleStore for TestMemoryStore {
         &mut self,
         job: &crate::runtime::prospective::LifecycleScheduledJob,
     ) -> CoreResult<()> {
-        let key = (job.request.tenant_id.clone(), job.request.user_id.clone(), job.id.clone());
-        self.lifecycle_jobs.insert(key, (job.clone(), None, None, 0));
+        let key = (
+            job.request.tenant_id.clone(),
+            job.request.user_id.clone(),
+            job.id.clone(),
+        );
+        self.lifecycle_jobs
+            .insert(key, (job.clone(), None, None, 0));
         Ok(())
     }
 
@@ -1565,7 +1616,11 @@ impl LifecycleStore for TestMemoryStore {
             .filter(|((t, u, _), _)| t == tenant && u == user)
             .map(|(_, (j, _, _, _))| j.clone())
             .collect::<Vec<_>>();
-        jobs.sort_by(|a, b| a.next_attempt_at.cmp(&b.next_attempt_at).then(a.id.cmp(&b.id)));
+        jobs.sort_by(|a, b| {
+            a.next_attempt_at
+                .cmp(&b.next_attempt_at)
+                .then(a.id.cmp(&b.id))
+        });
         Ok(jobs)
     }
 
@@ -1577,7 +1632,12 @@ impl LifecycleStore for TestMemoryStore {
         now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
-    ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+    ) -> CoreResult<
+        Vec<(
+            crate::runtime::prospective::LifecycleScheduledJob,
+            crate::runtime::lifecycle::LeaseClaim,
+        )>,
+    > {
         let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
 
         let mut candidate_keys: Vec<(String, String, String)> = self
@@ -1588,14 +1648,21 @@ impl LifecycleStore for TestMemoryStore {
                     && u == user
                     && matches!(job.status.as_str(), "queued" | "running" | "retry_pending")
                     && locked_until.map_or(true, |until| until <= now)
-                    && crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at).map_or(false, |due| due <= now_nanos)
+                    && crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at)
+                        .map_or(false, |due| due <= now_nanos)
             })
             .map(|(k, _)| k.clone())
             .collect();
 
         candidate_keys.sort_by(|a, b| {
-            let due_a = self.lifecycle_jobs.get(a).map(|(j, _, _, _)| &j.next_attempt_at);
-            let due_b = self.lifecycle_jobs.get(b).map(|(j, _, _, _)| &j.next_attempt_at);
+            let due_a = self
+                .lifecycle_jobs
+                .get(a)
+                .map(|(j, _, _, _)| &j.next_attempt_at);
+            let due_b = self
+                .lifecycle_jobs
+                .get(b)
+                .map(|(j, _, _, _)| &j.next_attempt_at);
             due_a.cmp(&due_b).then(a.2.cmp(&b.2))
         });
 
@@ -1626,15 +1693,26 @@ impl LifecycleStore for TestMemoryStore {
         job: &crate::runtime::prospective::LifecycleScheduledJob,
     ) -> CoreResult<()> {
         let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
-        let key = (claim.tenant_id.clone(), claim.user_id.clone().unwrap_or_default(), claim.key.clone());
-        let Some((existing, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&key) else {
+        let key = (
+            claim.tenant_id.clone(),
+            claim.user_id.clone().unwrap_or_default(),
+            claim.key.clone(),
+        );
+        let Some((existing, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&key)
+        else {
             return Err(CoreError::NotFound("lifecycle job not found".into()));
         };
-        if locked_by.as_deref() != Some(&claim.owner) || *fence != claim.fence || locked_until.map_or(true, |until| until <= now) {
+        if locked_by.as_deref() != Some(&claim.owner)
+            || *fence != claim.fence
+            || locked_until.map_or(true, |until| until <= now)
+        {
             return Err(CoreError::LeaseLost("job lease expired or lost".into()));
         }
         *existing = job.clone();
-        if matches!(job.status.as_str(), "completed" | "terminal_failed" | "cancelled" | "retry_pending" | "queued") {
+        if matches!(
+            job.status.as_str(),
+            "completed" | "terminal_failed" | "cancelled" | "retry_pending" | "queued"
+        ) {
             *locked_by = None;
             *locked_until = None;
         }
@@ -2227,7 +2305,8 @@ impl<'a> LifecycleStore for &'a ProductionStore {
         owner: &str,
         lease_seconds: u64,
     ) -> CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>> {
-        self.postgres.claim_fenced(tenant, user_id, resource, key, owner, lease_seconds)
+        self.postgres
+            .claim_fenced(tenant, user_id, resource, key, owner, lease_seconds)
     }
 
     fn lifecycle_renew_fenced(
@@ -2286,8 +2365,14 @@ impl<'a> LifecycleStore for &'a ProductionStore {
         now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
-    ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
-        self.postgres.job_claim_due(tenant, user, owner, now_nanos, limit, lease_seconds)
+    ) -> CoreResult<
+        Vec<(
+            crate::runtime::prospective::LifecycleScheduledJob,
+            crate::runtime::lifecycle::LeaseClaim,
+        )>,
+    > {
+        self.postgres
+            .job_claim_due(tenant, user, owner, now_nanos, limit, lease_seconds)
     }
 
     fn lifecycle_job_save_guarded(

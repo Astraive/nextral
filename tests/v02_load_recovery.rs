@@ -33,8 +33,14 @@ async fn portable_load_runner_executes_operation_mix_and_reports_metrics() {
     let report: LoadReport = runner.run().await;
 
     assert!(report.total_requests > 0, "Expected requests to run");
-    assert!(report.successful_requests > 0, "Expected successful requests");
-    assert_eq!(report.total_requests, report.successful_requests + report.failed_requests);
+    assert!(
+        report.successful_requests > 0,
+        "Expected successful requests"
+    );
+    assert_eq!(
+        report.total_requests,
+        report.successful_requests + report.failed_requests
+    );
     assert!(report.achieved_rps > 0.0, "Expected positive achieved RPS");
     assert!(report.status_counts.contains_key("200_ok"));
 }
@@ -81,7 +87,10 @@ async fn overload_scenario_queuing_and_rejection_under_saturation() {
     }
 
     assert!(successes >= 1, "At least 1 request should succeed");
-    assert!(rejections >= 1, "At least 1 request should be rejected due to queue saturation");
+    assert!(
+        rejections >= 1,
+        "At least 1 request should be rejected due to queue saturation"
+    );
 
     // After backlog drains, system recovers and normal requests succeed
     let recover_res = client
@@ -91,7 +100,10 @@ async fn overload_scenario_queuing_and_rejection_under_saturation() {
             CallOptions::default(),
         )
         .await;
-    assert!(recover_res.is_ok(), "Client should recover after saturation clears");
+    assert!(
+        recover_res.is_ok(),
+        "Client should recover after saturation clears"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -124,7 +136,10 @@ async fn store_recovery_scenario_handles_lease_expiry_and_reacquisition() {
             300,
         )
         .unwrap();
-    assert!(claim_b.is_none(), "Worker B should be blocked while worker A holds active lease");
+    assert!(
+        claim_b.is_none(),
+        "Worker B should be blocked while worker A holds active lease"
+    );
 
     // Worker A releases lease
     store.lifecycle_release_fenced(&claim_a).unwrap();
@@ -140,7 +155,10 @@ async fn store_recovery_scenario_handles_lease_expiry_and_reacquisition() {
             300,
         )
         .unwrap();
-    assert!(claim_b_after.is_some(), "Worker B should acquire lease after worker A releases");
+    assert!(
+        claim_b_after.is_some(),
+        "Worker B should acquire lease after worker A releases"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -167,11 +185,18 @@ async fn drain_shutdown_under_load_completes_in_flight_without_torn_state() {
 
     // The in-flight request should have succeeded cleanly
     let inflight_res = inflight.await.unwrap();
-    assert!(inflight_res.is_ok(), "In-flight request should complete cleanly during drain");
+    assert!(
+        inflight_res.is_ok(),
+        "In-flight request should complete cleanly during drain"
+    );
 
     // Subsequent calls are rejected
     let post_close = client
-        .call_json("nextral.test.delay", json!({}).to_string(), CallOptions::default())
+        .call_json(
+            "nextral.test.delay",
+            json!({}).to_string(),
+            CallOptions::default(),
+        )
         .await;
     assert!(post_close.is_err());
     assert_eq!(post_close.unwrap_err().code, "conflict");

@@ -206,7 +206,13 @@ async fn all_protocols_share_runtime_and_execute_every_declared_operation() {
         .await
         .unwrap();
     assert!(result.get("errors").is_none(), "{result}");
-    assert!(result["data"]["memories"]["items"].as_array().unwrap().len() >= 1);
+    assert!(
+        result["data"]["memories"]["items"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 1
+    );
 
     let gql_repair = "mutation { repairIndex(tenantId: \"protocol-tenant\", limit: 10) { repaired remaining complete } }";
     let result: Value = client

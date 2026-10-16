@@ -67,7 +67,10 @@ pub trait MemoryIndexStore: Sync {
         user_id: &str,
         ids: &[&str],
     ) -> CoreResult<Vec<MemoryRecord>>;
-    fn query_memories(&self, request: &crate::memory::MemoryQuery) -> CoreResult<crate::memory::MemoryPage>;
+    fn query_memories(
+        &self,
+        request: &crate::memory::MemoryQuery,
+    ) -> CoreResult<crate::memory::MemoryPage>;
     fn list_memories(
         &self,
         tenant_id: &str,

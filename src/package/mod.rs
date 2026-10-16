@@ -1,4 +1,5 @@
 use crate::contracts::{CoreError, CoreResult};
+use crate::providers::Clock;
 use crate::{
     adapters::{
         neo4j::Neo4jAdapter, postgres::PostgresAdapter, qdrant::QdrantAdapter, redis::RedisAdapter,
@@ -30,14 +31,13 @@ use crate::{
     runtime::{lifecycle::LifecycleStore, storage::RuntimeStore},
     store::{MemoryIndexStore, TestMemoryStore},
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
-use parking_lot::Mutex;
 use std::time::Duration;
-use crate::providers::Clock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageError {
@@ -69,7 +69,8 @@ pub struct ShutdownReport {
 
 pub struct ServiceHandle {
     pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
-    pub(crate) join_handle: Mutex<Option<tokio::task::JoinHandle<CoreResult<crate::api::ServiceRuntimeReport>>>>,
+    pub(crate) join_handle:
+        Mutex<Option<tokio::task::JoinHandle<CoreResult<crate::api::ServiceRuntimeReport>>>>,
     pub(crate) binds: Vec<String>,
 }
 
@@ -105,9 +106,10 @@ impl std::fmt::Debug for WorkerHandle {
     }
 }
 
-
 impl WorkerHandle {
-    pub async fn tick(&self) -> Result<crate::runtime::prospective::WorkerTickReport, PackageError> {
+    pub async fn tick(
+        &self,
+    ) -> Result<crate::runtime::prospective::WorkerTickReport, PackageError> {
         let Ok(_guard) = self.tick_lock.try_lock() else {
             return Err(PackageError {
                 code: "conflict".into(),
@@ -299,7 +301,9 @@ fn with_control(
             write_res,
             crate::runtime::lifecycle::GuardedWriteResult::Superseded(_)
         ) {
-            return Err(CoreError::LeaseLost("control plane write superseded".into()));
+            return Err(CoreError::LeaseLost(
+                "control plane write superseded".into(),
+            ));
         }
         Ok(result)
     })();
@@ -339,7 +343,9 @@ struct AdmissionGuard {
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
         self.inner.pending_count.fetch_sub(1, Ordering::Release);
-        self.inner.pending_bytes.fetch_sub(self.bytes, Ordering::Release);
+        self.inner
+            .pending_bytes
+            .fetch_sub(self.bytes, Ordering::Release);
     }
 }
 
@@ -415,9 +421,9 @@ impl RuntimeClient {
             if current_count >= max_pending {
                 crate::runtime::observability::record_admission(false);
                 return Err(PackageError {
-                  code: "resource_exhausted".into(),
-                  message: "admission capacity exceeded".into(),
-                  execution_status: Some("not_started".into()),
+                    code: "resource_exhausted".into(),
+                    message: "admission capacity exceeded".into(),
+                    execution_status: Some("not_started".into()),
                 });
             }
             match self.inner.pending_count.compare_exchange_weak(
@@ -460,8 +466,11 @@ impl RuntimeClient {
         crate::runtime::observability::record_admission(true);
 
         let request_timeout_ms = self.inner.config.execution.request_timeout_ms;
-        let effective_timeout_ms = options.timeout_ms.map_or(request_timeout_ms, |t| t.min(request_timeout_ms));
-        let deadline = self.inner.clock.monotonic_now() + Duration::from_millis(effective_timeout_ms);
+        let effective_timeout_ms = options
+            .timeout_ms
+            .map_or(request_timeout_ms, |t| t.min(request_timeout_ms));
+        let deadline =
+            self.inner.clock.monotonic_now() + Duration::from_millis(effective_timeout_ms);
 
         let sem = Arc::clone(&self.inner.in_flight_semaphore);
         let cancel = options.cancellation_token.clone();
@@ -627,9 +636,10 @@ impl RuntimeClient {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let join_handle = tokio::spawn(async move {
-            crate::api::serve_client(client_clone, token, ready_tx).await
-        });
+        let join_handle =
+            tokio::spawn(
+                async move { crate::api::serve_client(client_clone, token, ready_tx).await },
+            );
 
         let binds = ready_rx.await.map_err(|_| PackageError {
             code: "io".into(),
@@ -996,7 +1006,10 @@ fn dispatch_tool_impl(
     let store = &mut store;
     let result = match tool {
         "nextral.test.delay" => {
-            let ms = payload.get("delay_ms").and_then(|v| v.as_u64()).unwrap_or(100);
+            let ms = payload
+                .get("delay_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100);
             std::thread::sleep(Duration::from_millis(ms));
             serde_json::json!({"status": "delayed"})
         }
@@ -1047,7 +1060,7 @@ fn dispatch_tool_impl(
         }
         "nextral.memory.search_by_tag" => {
             let tag = string_field("tag")?;
-            let mut query = crate::memory::MemoryQuery {
+            let query = crate::memory::MemoryQuery {
                 tenant_id: tenant.to_string(),
                 user_id: user.to_string(),
                 privacy_scope: Vec::new(),
@@ -1063,7 +1076,7 @@ fn dispatch_tool_impl(
         }
         "nextral.memory.search_by_entity" => {
             let entity = string_field("entity")?;
-            let mut query = crate::memory::MemoryQuery {
+            let query = crate::memory::MemoryQuery {
                 tenant_id: tenant.to_string(),
                 user_id: user.to_string(),
                 privacy_scope: Vec::new(),
@@ -1080,7 +1093,9 @@ fn dispatch_tool_impl(
         "nextral.index.repair" => {
             let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
             if limit == 0 || limit > 1000 {
-                return Err(CoreError::InvalidInput("limit must be between 1 and 1000".into()).into());
+                return Err(
+                    CoreError::InvalidInput("limit must be between 1 and 1000".into()).into(),
+                );
             }
             let res = match store {
                 RuntimeStore::Test(_) => serde_json::json!({
@@ -1093,11 +1108,15 @@ fn dispatch_tool_impl(
                 }),
                 RuntimeStore::Production(p) => {
                     let mut r = p.index_repair(tenant, user, limit)?;
-                    let repaired = r.get("repaired").and_then(|v| v.as_u64()).or_else(|| {
-                        let u = r.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let rm = r.get("removed").and_then(|v| v.as_u64()).unwrap_or(0);
-                        Some(u + rm)
-                    }).unwrap_or(0);
+                    let repaired = r
+                        .get("repaired")
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| {
+                            let u = r.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let rm = r.get("removed").and_then(|v| v.as_u64()).unwrap_or(0);
+                            Some(u + rm)
+                        })
+                        .unwrap_or(0);
                     r["repaired"] = serde_json::json!(repaired);
                     r
                 }
@@ -1522,10 +1541,7 @@ fn dispatch_tool_impl(
         }
         other => return Err(CoreError::InvalidInput(format!("unknown MCP tool: {other}")).into()),
     };
-    if matches!(
-        tool,
-        "nextral.consolidation.run" | "nextral.jobs.run"
-    ) {
+    if matches!(tool, "nextral.consolidation.run" | "nextral.jobs.run") {
         store.drain_outbox(tenant)?;
     }
     Ok(result.to_string())

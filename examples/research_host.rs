@@ -95,11 +95,7 @@ fn call(tool: &str, payload: Value) -> CoreResult<Value> {
         .enable_all()
         .build()?;
     let output = rt
-        .block_on(client.call_json(
-            tool,
-            payload.to_string(),
-            package::CallOptions::default(),
-        ))
+        .block_on(client.call_json(tool, payload.to_string(), package::CallOptions::default()))
         .map_err(|error| CoreError::Conflict(format!("{}: {}", error.code, error.message)))?;
     Ok(serde_json::from_str(&output)?)
 }
@@ -356,6 +352,7 @@ fn run() -> CoreResult<HostResponse> {
                     policy_version: Some(policy_version.clone()),
                     trace_id: None,
                     scoring_weights: None,
+                    filters: None,
                 },
             )?;
             if response.status != RetrievalStatus::Ok {

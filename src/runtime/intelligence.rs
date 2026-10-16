@@ -256,7 +256,10 @@ impl ExperimentRegistry {
                 candidate.policy_version.clone(),
             ),
             experiment_id: self.active_experiment_id.replace(candidate.id.clone()),
-            scoring_weights: std::mem::replace(&mut self.scoring_weights, candidate.scoring_weights.clone()),
+            scoring_weights: std::mem::replace(
+                &mut self.scoring_weights,
+                candidate.scoring_weights.clone(),
+            ),
             token_budget: std::mem::replace(&mut self.token_budget, candidate.token_budget),
             top_k_vector: std::mem::replace(&mut self.top_k_vector, candidate.top_k_vector),
         });

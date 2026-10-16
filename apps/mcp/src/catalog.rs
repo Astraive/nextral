@@ -240,28 +240,34 @@ fn enqueue_job() -> Value {
 }
 
 fn memory_filters() -> Value {
-    object(json!({
-        "content_types": nullable(strings()),
-        "memory_types": nullable(strings()),
-        "statuses": nullable(strings()),
-        "session_id": nullable(json!({"type":"string"})),
-        "tags_any": nullable(strings()),
-        "tags_all": nullable(strings()),
-        "entities_any": nullable(strings()),
-        "entities_all": nullable(strings()),
-        "created_after": nullable(json!({"type":"string"})),
-        "created_before": nullable(json!({"type":"string"}))
-    }), &[])
+    object(
+        json!({
+            "content_types": nullable(strings()),
+            "memory_types": nullable(strings()),
+            "statuses": nullable(strings()),
+            "session_id": nullable(json!({"type":"string"})),
+            "tags_any": nullable(strings()),
+            "tags_all": nullable(strings()),
+            "entities_any": nullable(strings()),
+            "entities_all": nullable(strings()),
+            "created_after": nullable(json!({"type":"string"})),
+            "created_before": nullable(json!({"type":"string"}))
+        }),
+        &[],
+    )
 }
 
 fn memory_query() -> Value {
-    scoped(json!({
-        "filters": nullable(memory_filters()),
-        "limit": nullable(json!({"type":"integer","minimum":1,"maximum":1000})),
-        "cursor": nullable(json!({"type":"string"})),
-        "include_inactive": nullable(json!({"type":"boolean"})),
-        "privacy_scope": nullable(json!({"type":"array","items":privacy()}))
-    }), &[])
+    scoped(
+        json!({
+            "filters": nullable(memory_filters()),
+            "limit": nullable(json!({"type":"integer","minimum":1,"maximum":1000})),
+            "cursor": nullable(json!({"type":"string"})),
+            "include_inactive": nullable(json!({"type":"boolean"})),
+            "privacy_scope": nullable(json!({"type":"array","items":privacy()}))
+        }),
+        &[],
+    )
 }
 
 fn build_tools() -> Vec<Value> {

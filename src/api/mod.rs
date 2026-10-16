@@ -138,7 +138,9 @@ impl ScopedRateLimiter {
         let now = std::time::Instant::now();
         let mut buckets = self.buckets.lock();
         if buckets.len() > 10_000 {
-            buckets.retain(|_, b| now.duration_since(b.last_refill) < std::time::Duration::from_secs(3600));
+            buckets.retain(|_, b| {
+                now.duration_since(b.last_refill) < std::time::Duration::from_secs(3600)
+            });
         }
         let key = (tenant_id.to_string(), user_id.to_string());
         let bucket = buckets.entry(key).or_insert_with(|| TokenBucket {
@@ -213,7 +215,10 @@ impl ServiceState {
         mut payload: Value,
     ) -> Result<Value, ApiError> {
         principal.authorize(&payload)?;
-        let tenant_str = payload.get("tenant_id").and_then(Value::as_str).unwrap_or("");
+        let tenant_str = payload
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let user_str = payload.get("user_id").and_then(Value::as_str).unwrap_or("");
         if !self.rate_limiter.check_and_consume(tenant_str, user_str) {
             return Err(ApiError::new(
@@ -452,12 +457,10 @@ pub fn startup_readiness_matrix(config: &NextralConfig) -> CoreResult<StartupRea
     Ok(serde_json::from_value(store.readiness())?)
 }
 
-
 fn shutdown_sender() -> &'static watch::Sender<bool> {
     static SHUTDOWN: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(false).0);
     &SHUTDOWN
 }
-
 
 pub fn run_service_hosts(
     config: &NextralConfig,
@@ -470,7 +473,6 @@ pub fn run_service_hosts(
     };
     run_blocking(config.clone(), modes)
 }
-
 
 fn run_blocking(
     config: NextralConfig,
@@ -568,7 +570,9 @@ pub(crate) async fn serve_state_ready<F>(
     state: ServiceState,
     modes: Vec<ServiceMode>,
     shutdown: F,
-    mut ready_sender: Option<tokio::sync::oneshot::Sender<Result<Vec<String>, crate::package::PackageError>>>,
+    mut ready_sender: Option<
+        tokio::sync::oneshot::Sender<Result<Vec<String>, crate::package::PackageError>>,
+    >,
 ) -> CoreResult<ServiceRuntimeReport>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -588,7 +592,9 @@ where
     if active.is_empty() {
         let err = CoreError::InvalidInput("at least one service mode is required".into());
         if let Some(tx) = ready_sender.take() {
-            let _ = tx.send(Err(crate::package::PackageError::from(CoreError::InvalidInput("at least one service mode is required".into()))));
+            let _ = tx.send(Err(crate::package::PackageError::from(
+                CoreError::InvalidInput("at least one service mode is required".into()),
+            )));
         }
         return Err(err);
     }

@@ -553,9 +553,13 @@ pub fn promotion_replay_gate(evidence: &PromotionEvidence) -> CoreResult<()> {
             );
         }
     }
-    if let (Some(conf_left), Some(conf_right)) = (&left.configuration_digest, &right.configuration_digest) {
+    if let (Some(conf_left), Some(conf_right)) =
+        (&left.configuration_digest, &right.configuration_digest)
+    {
         if conf_left != conf_right {
-            return invalid("promotion evidence reports must match the same measured system configuration");
+            return invalid(
+                "promotion evidence reports must match the same measured system configuration",
+            );
         }
     }
     if !meets_thresholds(candidate, &CanaryGateConfig::default())

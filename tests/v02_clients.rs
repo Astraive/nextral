@@ -74,7 +74,10 @@ async fn independent_clients_execute_concurrently_without_global_lock() {
     assert_eq!(list_b_json["items"].as_array().unwrap().len(), 0);
 
     // Closing client A does not stop or affect client B
-    let report_a = client_a.close(Duration::from_secs(5)).await.expect("close A");
+    let report_a = client_a
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close A");
     assert!(report_a.drained);
 
     // Client B can still execute
@@ -84,7 +87,10 @@ async fn independent_clients_execute_concurrently_without_global_lock() {
         .expect("health B");
     assert!(health_b.contains("ready"));
 
-    let report_b = client_b.close(Duration::from_secs(5)).await.expect("close B");
+    let report_b = client_b
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close B");
     assert!(report_b.drained);
 }
 
@@ -157,11 +163,7 @@ async fn admission_bounds_queue_and_rejection() {
     // Third call submitted while pending is full (pending_count == max_pending = 2):
     // Must immediately return resource_exhausted with not_started
     let err3 = client
-        .call_json(
-            "nextral.health",
-            "{}".into(),
-            CallOptions::default(),
-        )
+        .call_json("nextral.health", "{}".into(), CallOptions::default())
         .await
         .unwrap_err();
     assert_eq!(err3.code, "resource_exhausted");
@@ -259,7 +261,8 @@ async fn cancellation_before_dispatch_does_not_mutate() {
     let list = client
         .call_json(
             "nextral.memory.list",
-            serde_json::json!({ "tenant_id": "cancel_tenant", "user_id": "cancel_user" }).to_string(),
+            serde_json::json!({ "tenant_id": "cancel_tenant", "user_id": "cancel_user" })
+                .to_string(),
             CallOptions::default(),
         )
         .await

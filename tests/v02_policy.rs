@@ -150,8 +150,20 @@ async fn versioned_retrieval_execution_policy_applies_dynamically_without_restar
     let exp_id = exp_val["id"].as_str().unwrap();
 
     // Promote the experiment with qualification evidence
-    let baseline_rep = make_report("run_base", "policy-v1", 3, Some("qualification"), Some("digest123"));
-    let cand_rep = make_report("run_cand", "policy-v2-canary", 4, Some("qualification"), Some("digest123"));
+    let baseline_rep = make_report(
+        "run_base",
+        "policy-v1",
+        3,
+        Some("qualification"),
+        Some("digest123"),
+    );
+    let cand_rep = make_report(
+        "run_cand",
+        "policy-v2-canary",
+        4,
+        Some("qualification"),
+        Some("digest123"),
+    );
     let promote_res = client
         .call_json(
             "experiments.promote",
@@ -228,31 +240,76 @@ async fn versioned_retrieval_execution_policy_applies_dynamically_without_restar
 #[tokio::test]
 async fn research_evidence_binds_to_measured_config_and_rejects_calibration_stage() {
     // Calibration stage evidence must be rejected by promotion gate
-    let cal_baseline = make_report("run1", "policy-v1", 3, Some("calibration"), Some("digest123"));
-    let cal_cand = make_report("run2", "policy-v2", 4, Some("calibration"), Some("digest123"));
+    let cal_baseline = make_report(
+        "run1",
+        "policy-v1",
+        3,
+        Some("calibration"),
+        Some("digest123"),
+    );
+    let cal_cand = make_report(
+        "run2",
+        "policy-v2",
+        4,
+        Some("calibration"),
+        Some("digest123"),
+    );
     let cal_ev = PromotionEvidence {
         baseline: cal_baseline,
         candidate: cal_cand,
     };
-    assert!(promotion_replay_gate(&cal_ev).is_err(), "calibration evidence must be rejected");
+    assert!(
+        promotion_replay_gate(&cal_ev).is_err(),
+        "calibration evidence must be rejected"
+    );
 
     // Mismatched configuration digests must be rejected
-    let diff_baseline = make_report("run1", "policy-v1", 3, Some("qualification"), Some("digestA"));
-    let diff_cand = make_report("run2", "policy-v2", 4, Some("qualification"), Some("digestB"));
+    let diff_baseline = make_report(
+        "run1",
+        "policy-v1",
+        3,
+        Some("qualification"),
+        Some("digestA"),
+    );
+    let diff_cand = make_report(
+        "run2",
+        "policy-v2",
+        4,
+        Some("qualification"),
+        Some("digestB"),
+    );
     let diff_ev = PromotionEvidence {
         baseline: diff_baseline,
         candidate: diff_cand,
     };
-    assert!(promotion_replay_gate(&diff_ev).is_err(), "mismatched configuration digest must be rejected");
+    assert!(
+        promotion_replay_gate(&diff_ev).is_err(),
+        "mismatched configuration digest must be rejected"
+    );
 
     // Matching qualification evidence passes
-    let qual_baseline = make_report("run1", "policy-v1", 3, Some("qualification"), Some("digestA"));
-    let qual_cand = make_report("run2", "policy-v2", 4, Some("qualification"), Some("digestA"));
+    let qual_baseline = make_report(
+        "run1",
+        "policy-v1",
+        3,
+        Some("qualification"),
+        Some("digestA"),
+    );
+    let qual_cand = make_report(
+        "run2",
+        "policy-v2",
+        4,
+        Some("qualification"),
+        Some("digestA"),
+    );
     let qual_ev = PromotionEvidence {
         baseline: qual_baseline,
         candidate: qual_cand,
     };
-    assert!(promotion_replay_gate(&qual_ev).is_ok(), "qualification evidence with matching config must pass");
+    assert!(
+        promotion_replay_gate(&qual_ev).is_ok(),
+        "qualification evidence with matching config must pass"
+    );
 }
 
 #[tokio::test]
@@ -288,7 +345,10 @@ async fn fenced_policy_rollout_rejects_conflicting_lease() {
         )
         .await;
 
-    assert!(res.is_err(), "Expected client operation to fail due to active lease fence");
+    assert!(
+        res.is_err(),
+        "Expected client operation to fail due to active lease fence"
+    );
     let err = res.unwrap_err();
     assert_eq!(err.code, "conflict");
 
@@ -308,5 +368,8 @@ async fn fenced_policy_rollout_rejects_conflicting_lease() {
             CallOptions::default(),
         )
         .await;
-    assert!(res_after.is_ok(), "Operation must succeed after lease is released");
+    assert!(
+        res_after.is_ok(),
+        "Operation must succeed after lease is released"
+    );
 }

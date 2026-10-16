@@ -10,10 +10,18 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
 /// Request to retrieve memories matching a query, with token budget, privacy scope, and scoring weights.
-fn default_token_budget() -> u32 { 1800 }
-fn default_top_k_vector() -> usize { 12 }
-fn default_max_graph_hops() -> u8 { 2 }
-fn default_privacy_scope() -> Vec<PrivacyLevel> { vec![PrivacyLevel::Private] }
+fn default_token_budget() -> u32 {
+    1800
+}
+fn default_top_k_vector() -> usize {
+    12
+}
+fn default_max_graph_hops() -> u8 {
+    2
+}
+fn default_privacy_scope() -> Vec<PrivacyLevel> {
+    vec![PrivacyLevel::Private]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
@@ -351,7 +359,10 @@ where
             || record.user_id != request.user_id
             || record.status != crate::memory::MemoryStatus::Active
             || !privacy_scope.contains(&record.privacy_level)
-            || request.filters.as_ref().map_or(false, |f| !f.matches(&record))
+            || request
+                .filters
+                .as_ref()
+                .map_or(false, |f| !f.matches(&record))
         {
             continue;
         }

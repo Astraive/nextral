@@ -57,8 +57,8 @@ fn run() -> Result<(), String> {
                 .unwrap_or("{}");
             let mut config = nextral::config::NextralConfig::default();
             config.backend = nextral::config::RuntimeBackend::TestMemory;
-            let client = nextral::package::RuntimeClient::from_config(config)
-                .map_err(|e| e.message)?;
+            let client =
+                nextral::package::RuntimeClient::from_config(config).map_err(|e| e.message)?;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

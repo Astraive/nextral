@@ -1,6 +1,4 @@
-use nextral::{
-    config::{NextralConfig, RateLimitConfig, RuntimeBackend, StoreConfig},
-};
+use nextral::config::{NextralConfig, RateLimitConfig, RuntimeBackend, StoreConfig};
 use serde_json::json;
 use std::time::Duration;
 
@@ -35,12 +33,16 @@ async fn scoped_token_bucket_enforces_burst_and_rejects_without_cross_tenant_int
 
     // First 3 requests consume the burst
     for _ in 0..3 {
-        let res = state.call(&principal, "nextral.memory.ingest", payload_a.clone()).await;
+        let res = state
+            .call(&principal, "nextral.memory.ingest", payload_a.clone())
+            .await;
         assert!(res.is_ok(), "Expected burst request to succeed");
     }
 
     // 4th request exceeds burst and must be rejected with 429 resource_exhausted
-    let res4 = state.call(&principal, "nextral.memory.ingest", payload_a.clone()).await;
+    let res4 = state
+        .call(&principal, "nextral.memory.ingest", payload_a.clone())
+        .await;
     assert!(res4.is_err(), "Expected 4th request to exceed rate limit");
     let err = res4.unwrap_err();
     assert_eq!(err.status, 429);
@@ -58,13 +60,23 @@ async fn scoped_token_bucket_enforces_burst_and_rejects_without_cross_tenant_int
         "confidence_score": 0.5
     });
 
-    let res_b = state.call(&principal, "nextral.memory.ingest", payload_b.clone()).await;
-    assert!(res_b.is_ok(), "Independent scope should succeed despite scope A being exhausted");
+    let res_b = state
+        .call(&principal, "nextral.memory.ingest", payload_b.clone())
+        .await;
+    assert!(
+        res_b.is_ok(),
+        "Independent scope should succeed despite scope A being exhausted"
+    );
 
     // Wait for refill (10 rps = 1 token per 100ms)
     tokio::time::sleep(Duration::from_millis(250)).await;
-    let res_a_refilled = state.call(&principal, "nextral.memory.ingest", payload_a.clone()).await;
-    assert!(res_a_refilled.is_ok(), "Scope A should succeed after token refill");
+    let res_a_refilled = state
+        .call(&principal, "nextral.memory.ingest", payload_a.clone())
+        .await;
+    assert!(
+        res_a_refilled.is_ok(),
+        "Scope A should succeed after token refill"
+    );
 }
 
 fn valid_store_config(pg_url: &str) -> StoreConfig {
@@ -89,30 +101,54 @@ async fn postgres_tls_verification_modes_are_strictly_enforced() {
     let mut config = NextralConfig::default();
     config.backend = RuntimeBackend::ProductionStores;
     // Insecure sslmode=disable must be rejected
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=disable"));
-    assert!(config.validate().is_err(), "sslmode=disable must be rejected");
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=disable",
+    ));
+    assert!(
+        config.validate().is_err(),
+        "sslmode=disable must be rejected"
+    );
 
     // Unverified sslmode=prefer must be rejected
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=prefer"));
-    assert!(config.validate().is_err(), "sslmode=prefer must be rejected");
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=prefer",
+    ));
+    assert!(
+        config.validate().is_err(),
+        "sslmode=prefer must be rejected"
+    );
 
     // Verified modes require, verify-ca, verify-full must be accepted by config validation
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=require"));
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=require",
+    ));
     let res = config.validate();
     if let Err(ref e) = res {
         eprintln!("validate error: {e}");
     }
     assert!(res.is_ok(), "sslmode=require must be valid");
 
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=verify-ca"));
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=verify-ca",
+    ));
     assert!(config.validate().is_ok(), "sslmode=verify-ca must be valid");
 
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=verify-full"));
-    assert!(config.validate().is_ok(), "sslmode=verify-full must be valid");
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=verify-full",
+    ));
+    assert!(
+        config.validate().is_ok(),
+        "sslmode=verify-full must be valid"
+    );
 
     // Duplicate conflicting sslmodes must be rejected
-    config.stores = Some(valid_store_config("postgresql://localhost:5432/db?sslmode=require&sslmode=verify-full"));
-    assert!(config.validate().is_err(), "multiple sslmode parameters must be rejected");
+    config.stores = Some(valid_store_config(
+        "postgresql://localhost:5432/db?sslmode=require&sslmode=verify-full",
+    ));
+    assert!(
+        config.validate().is_err(),
+        "multiple sslmode parameters must be rejected"
+    );
 }
 
 #[tokio::test]
@@ -127,5 +163,8 @@ async fn jwks_auth_requires_valid_https_and_rejects_empty_keyset() {
 
     // HTTPS is accepted by config
     config.auth.jwks_url = Some("https://secure.example.com/jwks.json".into());
-    assert!(config.validate().is_ok(), "HTTPS jwks_url must be valid in config");
+    assert!(
+        config.validate().is_ok(),
+        "HTTPS jwks_url must be valid in config"
+    );
 }

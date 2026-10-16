@@ -275,9 +275,12 @@ where
             "actor, positive lease and retry delay are required".into(),
         ));
     }
-    crate::runtime::lifecycle::with_user_lease(store, &request.tenant_id, &request.user_id, |store, claim| {
-        execute_claimed(store, claim, &request, now, now_nanos)
-    })
+    crate::runtime::lifecycle::with_user_lease(
+        store,
+        &request.tenant_id,
+        &request.user_id,
+        |store, claim| execute_claimed(store, claim, &request, now, now_nanos),
+    )
 }
 
 fn execute_claimed<T>(
@@ -517,7 +520,9 @@ where
         persist_delivery(store, claim, &state)?;
         let outcome = store.lifecycle_dispatch(&state.reminder);
         if !store.lifecycle_renew_fenced(claim, request.lease_seconds)? {
-            return Err(CoreError::LeaseLost("user lease lost during reminder dispatch".into()));
+            return Err(CoreError::LeaseLost(
+                "user lease lost during reminder dispatch".into(),
+            ));
         }
         match outcome {
             Ok(receipt) if acknowledged(&receipt) => {

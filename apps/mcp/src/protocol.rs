@@ -161,11 +161,18 @@ impl Server {
                         Err(e) => return Some(error(id, -32603, e.message)),
                     },
                 };
-                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => return Some(error(id, -32603, e.to_string())),
                 };
-                match rt.block_on(client.call_json(name, arguments.to_string(), CallOptions::default())) {
+                match rt.block_on(client.call_json(
+                    name,
+                    arguments.to_string(),
+                    CallOptions::default(),
+                )) {
                     Ok(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(value) => {
                             let structured = if value.is_object() {

@@ -221,7 +221,8 @@ mod enabled {
                 None => match self.connect_new() {
                     Ok(c) => c,
                     Err(e) => {
-                        let mut inner = lock.lock().map_err(|_| CoreError::Io("pool lock".into()))?;
+                        let mut inner =
+                            lock.lock().map_err(|_| CoreError::Io("pool lock".into()))?;
                         match kind {
                             ConnectionKind::Foreground => {
                                 inner.active_foreground = inner.active_foreground.saturating_sub(1);
@@ -587,7 +588,10 @@ mod enabled {
                 Self::outbox_write(tx, &r.tenant_id, "memory.sync", &r.id, &plan)
             })
         }
-        pub fn query_memories(&self, request: &crate::memory::MemoryQuery) -> CoreResult<crate::memory::MemoryPage> {
+        pub fn query_memories(
+            &self,
+            request: &crate::memory::MemoryQuery,
+        ) -> CoreResult<crate::memory::MemoryPage> {
             let mut req = request.clone();
             req.validate()?;
 
@@ -779,7 +783,7 @@ mod enabled {
                 Ok(crate::memory::MemoryPage { items, next_cursor })
             })
         }
-        
+
         pub fn list_memories(&self, s: &TenantUserScope) -> CoreResult<Vec<MemoryRecord>> {
             self.scoped(&s.tenant_id,&s.user_id,|tx|tx.query("SELECT record_json FROM nextral_memories WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at,id",&[&s.tenant_id,&s.user_id]).map_err(db)?.into_iter().map(|r|serde_json::from_value(r.get(0)).map_err(CoreError::from)).collect())
         }
@@ -1106,7 +1110,10 @@ mod enabled {
             })
         }
 
-        pub fn job_enqueue(&self, job: &crate::runtime::prospective::LifecycleScheduledJob) -> CoreResult<()> {
+        pub fn job_enqueue(
+            &self,
+            job: &crate::runtime::prospective::LifecycleScheduledJob,
+        ) -> CoreResult<()> {
             self.scoped(&job.request.tenant_id, &job.request.user_id, |tx| {
                 let req_json = serde_json::to_value(&job.request)?;
                 let next_due = timestamp_seconds(&job.next_attempt_at)?;
@@ -1118,7 +1125,12 @@ mod enabled {
             })
         }
 
-        pub fn job_get(&self, tenant: &str, user: &str, id: &str) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
+        pub fn job_get(
+            &self,
+            tenant: &str,
+            user: &str,
+            id: &str,
+        ) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
             self.scoped(tenant, user, |tx| {
                 let row = tx.query_opt(
                     "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
@@ -1146,7 +1158,11 @@ mod enabled {
             })
         }
 
-        pub fn job_list(&self, tenant: &str, user: &str) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
+        pub fn job_list(
+            &self,
+            tenant: &str,
+            user: &str,
+        ) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
             self.scoped(tenant, user, |tx| {
                 let rows = tx.query(
                     "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 ORDER BY next_attempt_at ASC, id ASC",
@@ -1182,7 +1198,12 @@ mod enabled {
             now_nanos: u128,
             limit: usize,
             lease_seconds: u64,
-        ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+        ) -> CoreResult<
+            Vec<(
+                crate::runtime::prospective::LifecycleScheduledJob,
+                crate::runtime::lifecycle::LeaseClaim,
+            )>,
+        > {
             let due_epoch = (now_nanos / 1_000_000_000) as f64;
             self.scoped(tenant, user, |tx| {
                 let rows = tx.query(

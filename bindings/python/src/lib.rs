@@ -1,6 +1,6 @@
+use nextral::package::{CallOptions, RuntimeClient};
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use std::sync::Arc;
-use nextral::package::{CallOptions, RuntimeClient};
 
 create_exception!(_nextral, NativeError, PyException);
 
@@ -169,9 +169,8 @@ impl Client {
     }
 
     fn start_worker(&self, py: Python<'_>, config_json: &str) -> PyResult<PyWorkerHandle> {
-        let config: nextral::runtime::prospective::WorkerConfig =
-            serde_json::from_str(config_json)
-                .map_err(|e| NativeError::new_err(("invalid_input".to_string(), e.to_string())))?;
+        let config: nextral::runtime::prospective::WorkerConfig = serde_json::from_str(config_json)
+            .map_err(|e| NativeError::new_err(("invalid_input".to_string(), e.to_string())))?;
         let client = self.client.clone();
         let rt = self.rt.clone();
         let handle = py
@@ -194,7 +193,10 @@ impl Client {
         let client = self.client.clone();
         let rt = self.rt.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handle = client.start_worker(config).await.map_err(map_package_error)?;
+            let handle = client
+                .start_worker(config)
+                .await
+                .map_err(map_package_error)?;
             Ok(PyWorkerHandle {
                 handle: Arc::new(handle),
                 rt,

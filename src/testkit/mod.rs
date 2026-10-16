@@ -64,7 +64,9 @@ impl TestMemoryStore {
                 if record.status == MemoryStatus::Active {
                     record.status = MemoryStatus::SoftDeleted;
                 }
-                if tombstone["redact"].as_bool() == Some(true) || tombstone["status"].as_str() == Some("redacted") {
+                if tombstone["redact"].as_bool() == Some(true)
+                    || tombstone["status"].as_str() == Some("redacted")
+                {
                     record.content = "[redacted]".into();
                     record.entities.clear();
                     record.tags.clear();
@@ -153,7 +155,11 @@ impl MemoryIndexStore for TestMemoryStore {
         if let Some(filters) = filters {
             let mut filtered = Vec::new();
             for (id, score) in hits {
-                if let Some(record) = self.memories.iter().find(|m| m.tenant_id == tenant_id && m.user_id == user_id && m.id == id) {
+                if let Some(record) = self
+                    .memories
+                    .iter()
+                    .find(|m| m.tenant_id == tenant_id && m.user_id == user_id && m.id == id)
+                {
                     let protected = self.protect_record(record.clone());
                     if filters.matches(&protected) {
                         filtered.push((id, score));
@@ -368,14 +374,17 @@ impl MemoryIndexStore for TestMemoryStore {
         }
 
         candidates.sort_by(|a, b| {
-            let a_time = crate::memory::normalize_rfc3339_micros(&a.created_at).unwrap_or_else(|_| a.created_at.clone());
-            let b_time = crate::memory::normalize_rfc3339_micros(&b.created_at).unwrap_or_else(|_| b.created_at.clone());
+            let a_time = crate::memory::normalize_rfc3339_micros(&a.created_at)
+                .unwrap_or_else(|_| a.created_at.clone());
+            let b_time = crate::memory::normalize_rfc3339_micros(&b.created_at)
+                .unwrap_or_else(|_| b.created_at.clone());
             b_time.cmp(&a_time).then(b.id.cmp(&a.id))
         });
 
         if let Some((after_created_at, after_id)) = after {
             candidates.retain(|r| {
-                let r_time = crate::memory::normalize_rfc3339_micros(&r.created_at).unwrap_or_else(|_| r.created_at.clone());
+                let r_time = crate::memory::normalize_rfc3339_micros(&r.created_at)
+                    .unwrap_or_else(|_| r.created_at.clone());
                 r_time < after_created_at || (r_time == after_created_at && r.id < after_id)
             });
         }
@@ -384,8 +393,13 @@ impl MemoryIndexStore for TestMemoryStore {
         let paged_records: Vec<_> = candidates.into_iter().take(req.limit).collect();
         let next_cursor = if has_next {
             if let Some(last) = paged_records.last() {
-                let last_time = crate::memory::normalize_rfc3339_micros(&last.created_at).unwrap_or_else(|_| last.created_at.clone());
-                Some(crate::memory::encode_cursor(&last_time, &last.id, &fingerprint))
+                let last_time = crate::memory::normalize_rfc3339_micros(&last.created_at)
+                    .unwrap_or_else(|_| last.created_at.clone());
+                Some(crate::memory::encode_cursor(
+                    &last_time,
+                    &last.id,
+                    &fingerprint,
+                ))
             } else {
                 None
             }
@@ -780,12 +794,18 @@ impl ReminderStore for TestMemoryStore {
         if owner != claim.owner || fence != claim.fence || expiry <= now {
             return Err(CoreError::LeaseLost("user lease expired or lost".into()));
         }
-        if claim.tenant_id != reminder.tenant_id || claim.user_id.as_deref() != Some(&reminder.user_id) {
-            return Err(CoreError::InvalidInput("scope mismatch for reminder delivery".into()));
+        if claim.tenant_id != reminder.tenant_id
+            || claim.user_id.as_deref() != Some(&reminder.user_id)
+        {
+            return Err(CoreError::InvalidInput(
+                "scope mismatch for reminder delivery".into(),
+            ));
         }
 
-        self.lifecycle_state
-            .insert((reminder.tenant_id.clone(), state_key.to_string()), state.clone());
+        self.lifecycle_state.insert(
+            (reminder.tenant_id.clone(), state_key.to_string()),
+            state.clone(),
+        );
         if let Some(pos) = self
             .reminders
             .iter()

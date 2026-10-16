@@ -33,7 +33,8 @@ impl JwksCache {
                     let certificate =
                         reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|_| {
                             CoreError::InvalidInput(
-                                "JWKS CA environment variable must contain a PEM certificate".into(),
+                                "JWKS CA environment variable must contain a PEM certificate"
+                                    .into(),
                             )
                         })?;
                     client = client.add_root_certificate(certificate);
