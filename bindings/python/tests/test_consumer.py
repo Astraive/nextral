@@ -97,6 +97,29 @@ class InstalledConsumerTests(unittest.TestCase):
         nextral.forget({**self.scope, "memory_id": memory_id, "actor": "consumer", "reason": "erase", "redact": True})
         self.assertNotIn(memory_id, [item["memory_id"] for item in nextral.retrieve(self.retrieval_request())["items"]])
 
+    def test_eligible_sessions_use_native_appends(self) -> None:
+        for session_id in ("aged-a", "aged-b"):
+            for index in range(2):
+                nextral.append_session({
+                    **self.scope, "session_id": session_id, "role": "user",
+                    "content": f"message {index}", "idempotency_key": f"{session_id}-{index}",
+                })
+        request: nextral.EligibleSessionsRequest = {
+            **self.scope, "inactive_at_or_before": "9999-12-31T23:59:59Z",
+        }
+        rows: list[nextral.EligibleSession] = nextral.eligible_sessions(request)
+        self.assertEqual({row["session_id"] for row in rows}, {"aged-a", "aged-b"})
+        self.assertEqual([row["message_count"] for row in rows], [2, 2])
+        self.assertTrue(all(row["last_message_at"].endswith(("Z", "+00:00")) for row in rows))
+        self.assertEqual(nextral.eligible_sessions({**request, "limit": 1}), rows[:1])
+        self.assertEqual(nextral.eligible_sessions({**request, "user_id": "other"}), [])
+        self.assertEqual(nextral.eligible_sessions({
+            **request, "inactive_at_or_before": "1970-01-01T00:00:00Z",
+        }), [])
+        for limit in (0, 1001):
+            with self.assertRaises(nextral.InvalidInputError):
+                nextral.eligible_sessions({**request, "limit": limit})
+
     def test_session_host_extraction_and_reminders(self) -> None:
         session_id = uuid.uuid4().hex
         appended = nextral.append_session({

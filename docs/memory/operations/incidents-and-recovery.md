@@ -23,6 +23,12 @@ Keep the request incomplete until required store receipts confirm removal/redact
 
 Archive manifests with missing legacy source provenance require an integrity-checked, scope-validated object read before source matching; recovery persists the derived source IDs. An unavailable/corrupt object is a cleanup failure, except `NotFound` is acknowledged as tombstoned. Same-key marked tombstones make verified reads return `NotFound`; conditional immutable uploads prevent late resurrection. This does not prove erasure of versions/backups. Forget-scrubbed job requests and terminal job states must survive stale worker completion; claimed writes fence both under the live lease.
 
+## Schema deployment
+
+Run explicit migrations with the schema-owning role before using a restricted runtime role. Migration history must be a checksum-matching, contiguous prefix of the application's ordered migrations; unknown versions, gaps and changed checksums block migration and readiness. Concurrent migrators serialize under a PostgreSQL transaction advisory lock.
+
+Do not delete or rewrite history to force readiness. Restore the matching application/schema version or investigate the incompatible state before retrying. Upgrade verification uses isolated databases with a populated legacy transcript, concurrent migrators and a cross-owner canonical write race.
+
 ## Reembed interruption
 
 Resume the same scoped plan with missing vectors and inspect checkpoint/validation status. Do not switch a global collection alias as an improvised repair. See [reembed runbook](reembed-and-backfill.md).

@@ -13,6 +13,19 @@ mod enabled {
     use sha2::{Digest, Sha256};
     use std::sync::Mutex;
 
+    const MIGRATIONS: [(&str, &str); 2] = [
+        (
+            "0001",
+            include_str!("../../migrations/postgres/0001_core_schema.sql"),
+        ),
+        (
+            "0002",
+            include_str!("../../migrations/postgres/0002_runtime_durability.sql"),
+        ),
+    ];
+    const MIGRATION_HISTORY: &str =
+        "SELECT version,checksum FROM nextral_schema_migrations ORDER BY version";
+
     pub struct PostgresAdapter {
         pub url: String,
         pool: Mutex<Vec<Client>>,
@@ -42,6 +55,26 @@ mod enabled {
             digest.update(b"\n");
         }
         format!("{:x}", digest.finalize())
+    }
+    fn verify_migration_history(rows: &[postgres::Row]) -> CoreResult<()> {
+        for (index, row) in rows.iter().enumerate() {
+            let version: &str = row.try_get(0).map_err(db)?;
+            let checksum: &str = row.try_get(1).map_err(db)?;
+            let Some((expected, sql)) = MIGRATIONS.get(index) else {
+                return Err(CoreError::Conflict("unknown migration history".into()));
+            };
+            if version != *expected {
+                return Err(CoreError::Conflict(
+                    "unknown or noncontiguous migration history".into(),
+                ));
+            }
+            if checksum != migration_checksum(sql) {
+                return Err(CoreError::Conflict(format!(
+                    "migration checksum mismatch: {expected}"
+                )));
+            }
+        }
+        Ok(())
     }
     fn timestamp_seconds(value: &str) -> CoreResult<f64> {
         Ok(crate::runtime::lifecycle::timestamp_nanos(value)? as f64 / 1_000_000_000.0)
@@ -97,36 +130,20 @@ mod enabled {
             Ok(value)
         }
         pub fn migration_sql(&self) -> &'static str {
-            include_str!("../../migrations/postgres/0001_core_schema.sql")
+            MIGRATIONS[0].1
         }
         pub fn health(&self) -> AdapterHealth {
             AdapterHealth::configured("postgres")
         }
         pub fn readiness(&self) -> CoreResult<Value> {
             let mut client = self.client()?;
-            for (version, sql) in [
-                ("0001", self.migration_sql()),
-                (
-                    "0002",
-                    include_str!("../../migrations/postgres/0002_runtime_durability.sql"),
-                ),
-            ] {
-                let row = client
-                    .query_opt(
-                        "SELECT checksum FROM nextral_schema_migrations WHERE version=$1",
-                        &[&version],
-                    )
-                    .map_err(db)?
-                    .ok_or_else(|| {
-                        CoreError::Conflict(format!(
-                            "required migration {version} has not been applied"
-                        ))
-                    })?;
-                if row.get::<_, String>(0) != migration_checksum(sql) {
-                    return Err(CoreError::Conflict(format!(
-                        "migration checksum mismatch: {version}"
-                    )));
-                }
+            let history = client.query(MIGRATION_HISTORY, &[]).map_err(db)?;
+            verify_migration_history(&history)?;
+            if history.len() != MIGRATIONS.len() {
+                return Err(CoreError::Conflict(format!(
+                    "required migration {} has not been applied",
+                    MIGRATIONS[history.len()].0
+                )));
             }
             Ok(json!({"status":"ready"}))
         }
@@ -136,36 +153,60 @@ mod enabled {
             tx.query_one("SELECT pg_advisory_xact_lock(1852143217)", &[])
                 .map_err(db)?;
             tx.batch_execute("CREATE TABLE IF NOT EXISTS nextral_schema_migrations(version TEXT PRIMARY KEY,checksum TEXT NOT NULL,applied_at TIMESTAMPTZ NOT NULL DEFAULT now())").map_err(db)?;
-            for (version, sql) in [
-                ("0001", self.migration_sql()),
-                (
-                    "0002",
-                    include_str!("../../migrations/postgres/0002_runtime_durability.sql"),
-                ),
-            ] {
+            let history = tx.query(MIGRATION_HISTORY, &[]).map_err(db)?;
+            verify_migration_history(&history)?;
+            for (version, sql) in &MIGRATIONS[history.len()..] {
                 let checksum = migration_checksum(sql);
-                if let Some(row) = tx
-                    .query_opt(
-                        "SELECT checksum FROM nextral_schema_migrations WHERE version=$1",
-                        &[&version],
-                    )
-                    .map_err(db)?
-                {
-                    if row.get::<_, String>(0) != checksum {
-                        return Err(CoreError::Conflict(format!(
-                            "migration checksum mismatch: {version}"
-                        )));
-                    }
-                } else {
-                    tx.batch_execute(sql).map_err(db)?;
-                    tx.execute(
-                        "INSERT INTO nextral_schema_migrations(version,checksum) VALUES($1,$2)",
-                        &[&version, &checksum],
-                    )
-                    .map_err(db)?;
-                }
+                tx.batch_execute(sql).map_err(db)?;
+                tx.execute(
+                    "INSERT INTO nextral_schema_migrations(version,checksum) VALUES($1,$2)",
+                    &[version, &checksum],
+                )
+                .map_err(db)?;
             }
             tx.commit().map_err(db)
+        }
+        pub fn eligible_sessions(
+            &self,
+            scope: &TenantUserScope,
+            inactive_at_or_before: &str,
+            limit: usize,
+        ) -> CoreResult<Vec<crate::domain::EligibleSession>> {
+            if limit == 0 || limit > 1000 {
+                return Err(CoreError::InvalidInput(
+                    "session eligibility limit must be between 1 and 1000".into(),
+                ));
+            }
+            if scope.user_id.trim().is_empty() {
+                return Err(CoreError::InvalidInput("user_id required".into()));
+            }
+            let cutoff = timestamp_seconds(inactive_at_or_before)?;
+            let limit = limit as i64;
+            self.scoped(&scope.tenant_id, &scope.user_id, |tx| {
+                tx.query(
+                    r#"SELECT session_id,
+                        to_char(MAX(created_at) AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                        COUNT(*)
+                    FROM nextral_session_messages
+                    WHERE tenant_id=$1 AND user_id=$2
+                    GROUP BY session_id
+                    HAVING MAX(created_at)<=to_timestamp($3)
+                    ORDER BY MAX(created_at),session_id COLLATE "C"
+                    LIMIT $4"#,
+                    &[&scope.tenant_id, &scope.user_id, &cutoff, &limit],
+                )
+                .map_err(db)?
+                .into_iter()
+                .map(|row| {
+                    Ok(crate::domain::EligibleSession {
+                        session_id: row.try_get(0).map_err(db)?,
+                        last_message_at: row.try_get(1).map_err(db)?,
+                        message_count: row.try_get::<_, i64>(2).map_err(db)? as u64,
+                    })
+                })
+                .collect()
+            })
         }
         fn memory_write(tx: &mut Transaction<'_>, r: &MemoryRecord) -> CoreResult<()> {
             tx.query_one(

@@ -27,6 +27,7 @@ _COMMANDS = {
     },
     "session": {
         "append": "nextral.session.append",
+        "eligible": "nextral.session.eligible",
         "context": "nextral.session.context",
     },
     "graph": {"query": "nextral.graph.query", "graphify": "nextral.graph.graphify"},

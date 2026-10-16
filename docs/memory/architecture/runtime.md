@@ -12,6 +12,7 @@ The host authenticates embedded/CLI/MCP callers and supplies tenant/user scope. 
 2. Persist the warm transcript and refresh the bounded Redis tail.
 3. Supply a query vector/entities and request working context.
 4. Receive session tail, summary, policies and retrieved memories with token accounting.
+   The response also includes `degraded_reasons`: Redis unavailability falls back to the canonical warm transcript rather than silently returning an empty tail.
 5. Let the host run its own agent/model/tool loop and discard transient reasoning as appropriate.
 
 No internal `MemoryAgent`, Claude call, prompt runner, or `asyncio` pipeline is implied by these steps.

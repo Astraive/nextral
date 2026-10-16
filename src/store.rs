@@ -114,6 +114,13 @@ pub trait ReminderStore {
 }
 
 pub trait SessionStore {
+    fn eligible_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        inactive_at_or_before: &str,
+        limit: usize,
+    ) -> CoreResult<Vec<crate::domain::EligibleSession>>;
     fn hot_tail_status(
         &self,
         tenant_id: &str,
@@ -128,4 +135,11 @@ pub trait SessionStore {
         session_id: &str,
         limit: usize,
     ) -> CoreResult<Vec<SessionMessage>>;
+    fn session_tail_with_status(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        session_id: &str,
+        limit: usize,
+    ) -> CoreResult<(Vec<SessionMessage>, Vec<String>)>;
 }

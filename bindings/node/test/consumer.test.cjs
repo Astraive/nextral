@@ -69,6 +69,31 @@ test('native validation has machine-readable errors and policy rejects low confi
   assert.equal(rejected.record_id, null);
 });
 
+test('eligible sessions reflect native appends, counts, cutoff and scope', () => {
+  nextral.configureRuntime(testConfig);
+  const owner = scope();
+  for (const session_id of ['aged-a', 'aged-b']) for (let i = 0; i < 2; i++) {
+    nextral.appendSessionMessage({ ...owner, session_id, role: 'user', content: `message ${i}`,
+      idempotency_key: `${session_id}-${i}` });
+  }
+  const request = { ...owner, inactive_at_or_before: '9999-12-31T23:59:59Z' };
+  const rows = nextral.eligibleSessions(request);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(new Set(rows.map(row => row.session_id)), new Set(['aged-a', 'aged-b']));
+  for (const row of rows) {
+    assert.equal(row.message_count, 2);
+    assert.ok(Number.isFinite(Date.parse(row.last_message_at)));
+    assert.match(row.last_message_at, /(?:Z|\+00:00)$/);
+  }
+  assert.deepEqual(rows, [...rows].sort((a, b) =>
+    Date.parse(a.last_message_at) - Date.parse(b.last_message_at) || a.session_id.localeCompare(b.session_id)));
+  assert.deepEqual(nextral.eligibleSessions({ ...request, limit: 1 }), rows.slice(0, 1));
+  assert.deepEqual(nextral.eligibleSessions({ ...request, user_id: 'other' }), []);
+  assert.deepEqual(nextral.eligibleSessions({ ...request, inactive_at_or_before: '1970-01-01T00:00:00Z' }), []);
+  for (const limit of [0, 1001]) assert.throws(() => nextral.eligibleSessions({ ...request, limit }),
+    error => error.code === 'invalid_input');
+});
+
 test('session and batch operations expose real stored state', () => {
   nextral.configureRuntime(testConfig);
   const owner = scope();

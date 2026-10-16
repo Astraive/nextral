@@ -504,8 +504,69 @@ impl AuditSink for TestMemoryStore {
 }
 
 impl SessionStore for TestMemoryStore {
+    fn eligible_sessions(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        inactive_at_or_before: &str,
+        limit: usize,
+    ) -> CoreResult<Vec<crate::domain::EligibleSession>> {
+        crate::runtime::lifecycle::validate_identity(tenant_id, user_id, None)?;
+        if !(1..=1000).contains(&limit) {
+            return Err(CoreError::InvalidInput(
+                "eligible session limit must be 1..=1000".into(),
+            ));
+        }
+        let cutoff = crate::runtime::lifecycle::timestamp_nanos(inactive_at_or_before)?;
+        let mut sessions = std::collections::HashMap::<&str, (u128, u64)>::new();
+        for message in self
+            .session_messages
+            .iter()
+            .filter(|message| message.tenant_id == tenant_id && message.user_id == user_id)
+        {
+            let time = crate::runtime::lifecycle::timestamp_nanos(&message.created_at)?;
+            let entry = sessions.entry(&message.session_id).or_insert((time, 0));
+            entry.0 = entry.0.max(time);
+            entry.1 += 1;
+        }
+        let mut sessions = sessions
+            .into_iter()
+            .filter(|(_, (time, _))| *time <= cutoff)
+            .collect::<Vec<_>>();
+        sessions.sort_unstable_by(|(a_id, (a_time, _)), (b_id, (b_time, _))| {
+            a_time.cmp(b_time).then(a_id.cmp(b_id))
+        });
+        sessions
+            .into_iter()
+            .take(limit)
+            .map(|(session_id, (time, message_count))| {
+                let seconds = i64::try_from(time / 1_000_000_000).map_err(|_| {
+                    CoreError::InvalidInput("timestamp exceeds RFC3339 range".into())
+                })?;
+                let timestamp =
+                    chrono::DateTime::from_timestamp(seconds, (time % 1_000_000_000) as u32)
+                        .ok_or_else(|| {
+                            CoreError::InvalidInput("timestamp exceeds RFC3339 range".into())
+                        })?;
+                Ok(crate::domain::EligibleSession {
+                    session_id: session_id.into(),
+                    last_message_at: timestamp.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                    message_count,
+                })
+            })
+            .collect()
+    }
     fn hot_tail_status(&self, t: &str, u: &str, s: &str) -> CoreResult<(usize, Vec<String>)> {
         Ok((self.session_tail(t, u, s, 20)?.len(), Vec::new()))
+    }
+    fn session_tail_with_status(
+        &self,
+        tenant: &str,
+        user: &str,
+        session: &str,
+        limit: usize,
+    ) -> CoreResult<(Vec<SessionMessage>, Vec<String>)> {
+        Ok((self.session_tail(tenant, user, session, limit)?, Vec::new()))
     }
     fn append_session_message(&mut self, message: SessionMessage) -> CoreResult<()> {
         if let Some(existing) = self.session_messages.iter().find(|existing| {

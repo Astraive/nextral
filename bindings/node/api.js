@@ -90,6 +90,7 @@ exports.memoryStats = request => call('nextral.memory.stats', request);
 exports.searchByTag = request => call('nextral.memory.search_by_tag', request);
 exports.searchByEntity = request => call('nextral.memory.search_by_entity', request);
 exports.appendSessionMessage = request => call('nextral.session.append', request);
+exports.eligibleSessions = request => call('nextral.session.eligible', request);
 exports.workingContext = request => call('nextral.session.context', request);
 exports.queryGraph = request => call('nextral.graph.query', request);
 exports.graphify = request => call('nextral.graph.graphify', request);

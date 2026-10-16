@@ -9,6 +9,22 @@ from __future__ import annotations
 from typing import Any, Literal, TypedDict
 
 
+class _EligibleSessionsFields(TypedDict):
+    tenant_id: str
+    user_id: str
+    inactive_at_or_before: str
+
+
+class EligibleSessionsRequest(_EligibleSessionsFields, total=False):
+    limit: int
+
+
+class EligibleSession(TypedDict):
+    session_id: str
+    last_message_at: str
+    message_count: int
+
+
 class IngestionPolicy(TypedDict):
     min_importance_score: float
     min_confidence_score: float

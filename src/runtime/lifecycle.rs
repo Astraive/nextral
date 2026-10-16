@@ -39,6 +39,8 @@ pub trait LifecycleStore {
         key: &str,
         body: &Value,
     ) -> CoreResult<StoreReceipt>;
+    /// Verify actual archived source coverage before scheduled source erasure.
+    fn lifecycle_verify_archive_sources(&self, memory: &MemoryRecord) -> CoreResult<()>;
     /// Return one real acknowledgement or failure receipt for every configured backend.
     /// Remove derived summaries, source transcripts, archives and shadow vectors as well.
     fn lifecycle_forget(

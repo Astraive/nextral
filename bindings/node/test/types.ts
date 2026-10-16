@@ -9,6 +9,7 @@ import {
   createExperiment, promoteExperiment, rollbackExperiment, experimentStatus,
   getSafetyPolicy, setSafetyPolicy, scoredSearch, type PromotionEvidence,
   type RuntimeConfig, type IngestMemoryRequest, type RetrievalRequest,
+  eligibleSessions, type EligibleSessionsRequest, type EligibleSession,
 } from 'nextral';
 
 const policy = { min_importance_score: 0, min_confidence_score: 0 };
@@ -34,6 +35,10 @@ configureRuntime({
   },
 });
 const scope = { tenant_id: 'types', user_id: 'consumer' };
+const eligibility: EligibleSessionsRequest = { ...scope, inactive_at_or_before: '2026-01-01T00:00:00Z', limit: 100 };
+const eligible: EligibleSession[] = eligibleSessions(eligibility);
+const lastActivity: string | undefined = eligible[0]?.last_message_at;
+const messageCount: number | undefined = eligible[0]?.message_count;
 const input: IngestMemoryRequest = { ...scope, content: 'Atlas uses PostgreSQL', content_type: 'decision',
   memory_type: 'semantic', source_type: 'manual', source_message_ids: [], importance_score: 1,
   entities: ['Atlas'], tags: [], privacy_level: 'private', graph_hints: [], policy, embedding: [1, 0, 0] };
@@ -46,6 +51,7 @@ const forgotten = { ...scope, memory_id: id, actor: 'consumer', reason: 'cleanup
 forgetMemory(forgotten);
 appendSessionMessage({ ...scope, session_id: 'session', role: 'user', content: result, privacy_level: 'private' }).degraded_reasons;
 workingContext(query).session_tail;
+const degradedReasons: string[] = workingContext(query).degraded_reasons;
 consolidate({ ...scope, session_id: 'session', lane: 'fast', policy, version: '1', summary: result, candidates: [input], chunk_messages: 100 });
 scheduleReminder({ ...scope, source_memory_id: id, kind: 'task', title: 'Review', due_at: '1800000000', timezone: 'UTC', channel: 'webhook' });
 executeDueReminders({ ...scope, due_at_or_before: '1800000000', actor: 'consumer', retry_delay_seconds: 30, privacy_scope: ['private'], lease_seconds: 300 });

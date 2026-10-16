@@ -15,6 +15,38 @@ fn default_privacy() -> PrivacyLevel {
     PrivacyLevel::Private
 }
 
+fn default_eligible_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EligibleSessionsRequest {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub inactive_at_or_before: String,
+    #[serde(default = "default_eligible_limit")]
+    pub limit: usize,
+}
+
+pub fn eligible_sessions(
+    store: &impl SessionStore,
+    request: EligibleSessionsRequest,
+) -> CoreResult<Vec<crate::domain::EligibleSession>> {
+    crate::runtime::lifecycle::validate_identity(&request.tenant_id, &request.user_id, None)?;
+    if !(1..=1000).contains(&request.limit) {
+        return Err(CoreError::InvalidInput(
+            "eligible session limit must be 1..=1000".into(),
+        ));
+    }
+    crate::runtime::lifecycle::timestamp_nanos(&request.inactive_at_or_before)?;
+    store.eligible_sessions(
+        &request.tenant_id,
+        &request.user_id,
+        &request.inactive_at_or_before,
+        request.limit,
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppendSessionMessageRequest {
     pub tenant_id: String,
@@ -169,6 +201,7 @@ where
     });
     let mut session_summary = None;
     let mut session_tail = Vec::new();
+    let mut degraded_reasons = Vec::new();
     if let Some(session_id) = &request.session_id {
         if let Some(value) = store.lifecycle_load(
             &request.tenant_id,
@@ -195,12 +228,13 @@ where
                 session_summary = Some(summary);
             }
         }
-        let tail = store.session_tail(
+        let (tail, tail_degradation) = store.session_tail_with_status(
             &request.tenant_id,
             &request.user_id,
             session_id,
             hot_tail_limit,
         )?;
+        degraded_reasons = tail_degradation;
         for message in tail.into_iter().rev() {
             if message.tenant_id != request.tenant_id
                 || message.user_id != request.user_id
@@ -255,6 +289,7 @@ where
         session_summary,
         retrieved_memories,
         token_estimate: initial_budget - remaining,
+        degraded_reasons,
     })
 }
 
@@ -270,6 +305,105 @@ fn consume_budget(remaining: &mut u32, cost: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn eligibility_uses_scoped_latest_instants_and_deterministic_metadata() {
+        let mut store = crate::store::TestMemoryStore::new();
+        for (tenant, user, session, time, key) in [
+            ("t", "u", "old", "1", "1"),
+            ("t", "u", "a", "1970-01-01T01:00:02+01:00", "2"),
+            ("t", "u", "a", "2", "3"),
+            ("t", "u", "b", "1970-01-01T00:00:02Z", "4"),
+            ("t", "u", "B", "2", "10"),
+            ("t", "u", "active", "1", "5"),
+            ("t", "u", "active", "3", "6"),
+            ("t", "u", "future", "9999999999", "7"),
+            ("other", "u", "foreign", "0", "8"),
+            ("t", "other", "foreign", "0", "9"),
+        ] {
+            let mut message = SessionMessage::new(tenant, user, session, "user", "private", key);
+            message.created_at = time.into();
+            store.append_session_message(message).unwrap();
+        }
+        let request = EligibleSessionsRequest {
+            tenant_id: "t".into(),
+            user_id: "u".into(),
+            inactive_at_or_before: "1970-01-01T00:00:02Z".into(),
+            limit: 4,
+        };
+        let selected = eligible_sessions(&store, request.clone()).unwrap();
+        let metadata = selected.iter().map(|item| {
+            (
+                item.session_id.as_str(),
+                crate::runtime::lifecycle::timestamp_nanos(&item.last_message_at).unwrap(),
+                item.message_count,
+            )
+        });
+        assert!(
+            metadata.eq([
+                ("old", 1_000_000_000, 1),
+                ("B", 2_000_000_000, 1),
+                ("a", 2_000_000_000, 2),
+                ("b", 2_000_000_000, 1),
+            ]),
+            "{selected:?}"
+        );
+        assert_eq!(
+            eligible_sessions(
+                &store,
+                EligibleSessionsRequest {
+                    limit: 1,
+                    ..request
+                }
+            )
+            .unwrap(),
+            selected[..1]
+        );
+    }
+
+    #[test]
+    fn eligibility_validates_boundaries_and_timestamp_inputs() {
+        let store = crate::store::TestMemoryStore::new();
+        let request: EligibleSessionsRequest = serde_json::from_value(serde_json::json!({
+            "tenant_id":"t", "user_id":"u", "inactive_at_or_before":"0",
+        }))
+        .unwrap();
+        for limit in [0, 1001] {
+            assert!(eligible_sessions(
+                &store,
+                EligibleSessionsRequest {
+                    limit,
+                    ..request.clone()
+                }
+            )
+            .is_err());
+        }
+        assert!(eligible_sessions(
+            &store,
+            EligibleSessionsRequest {
+                inactive_at_or_before: "not-a-time".into(),
+                ..request.clone()
+            }
+        )
+        .is_err());
+        assert!(eligible_sessions(
+            &store,
+            EligibleSessionsRequest {
+                tenant_id: "../t".into(),
+                ..request.clone()
+            }
+        )
+        .is_err());
+        assert!(eligible_sessions(
+            &store,
+            EligibleSessionsRequest {
+                limit: 1000,
+                ..request
+            }
+        )
+        .unwrap()
+        .is_empty());
+    }
+
     #[test]
     fn message_truncation_preserves_utf8_boundary() {
         let message = SessionMessage::new("t", "u", "s", "user", "界".repeat(40_000), "key");

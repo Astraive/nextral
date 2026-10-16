@@ -102,6 +102,12 @@ export interface MemoryStats extends Scope {
 export interface AppendSessionMessageRequest extends Scope {
   session_id: string; role: string; content: string; idempotency_key?: string | null; privacy_level?: PrivacyLevel;
 }
+export interface EligibleSessionsRequest extends Scope {
+  inactive_at_or_before: string; limit?: number;
+}
+export interface EligibleSession {
+  session_id: string; last_message_at: string; message_count: number;
+}
 export interface SessionMessage extends Scope {
   id: string; session_id: string; role: string; content: string; idempotency_key: string;
   created_at: string; source_metadata: Json;
@@ -111,6 +117,7 @@ export interface WorkingContext extends Scope {
   procedural_policy_ids: string[];
   procedural_policies: ProceduralPolicy[]; session_summary: SessionSummary | null;
   retrieved_memories: RetrievedItem[]; token_estimate: number;
+  degraded_reasons: string[];
 }
 export interface SessionSummary extends Scope { id: string; session_id: string; summary: string; source_message_ids: string[]; created_at: string }
 export interface ProceduralPolicy extends Scope { id: string; name: string; body: string; privacy_level: PrivacyLevel; enabled: boolean; created_at: string; updated_at: string }
@@ -179,6 +186,8 @@ export function memoryStats(request: Scope): MemoryStats;
 export function searchByTag(request: Scope & { tag: string }): MemoryRecord[];
 export function searchByEntity(request: Scope & { entity: string }): MemoryRecord[];
 export function appendSessionMessage(request: AppendSessionMessageRequest): { message_id: string; hot_tail_count: number; degraded_reasons: string[] };
+/** Scoped sessions inactive at the cutoff, ordered by oldest activity then session ID. Limit defaults to 100 (1–1000). */
+export function eligibleSessions(request: EligibleSessionsRequest): EligibleSession[];
 export function workingContext(request: RetrievalRequest): WorkingContext;
 export function queryGraph(request: RetrievalRequest): { items: RetrievedItem[] };
 export function graphify(request: Scope & { memory_id: string; hints?: GraphHint[] }): GraphifyResponse;

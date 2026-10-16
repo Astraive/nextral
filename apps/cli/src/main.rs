@@ -21,6 +21,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "nextral.memory.search_by_entity",
     ),
     ("session", "append", "nextral.session.append"),
+    ("session", "eligible", "nextral.session.eligible"),
     ("session", "context", "nextral.session.context"),
     ("policy", "upsert", "nextral.policy.upsert"),
     ("policy", "list", "nextral.policy.list"),

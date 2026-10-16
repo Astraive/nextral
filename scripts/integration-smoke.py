@@ -234,6 +234,16 @@ def exercise_lifecycles(py_call, node_call, scope, ids, query, compose, env):
                           source_message_ids=[message_id for message_id, _ in messages])
     deep = dict(scope, session_id="session_integration", lane="deep", policy=POLICY,
                 version="integration-deep-v1", summary=None, candidates=[deep_candidate], chunk_messages=100)
+    eligible_request = dict(scope, inactive_at_or_before=datetime.now(timezone.utc).isoformat(), limit=100)
+    eligible = py_call("nextral.session.eligible", eligible_request)
+    selected = next((item for item in eligible if item["session_id"] == deep["session_id"]), None)
+    if selected is None or selected["message_count"] != len(messages):
+        raise AssertionError(f"host could not select its durable session for deep work: {eligible}")
+    queued_deep = py_call("nextral.jobs.enqueue", dict(scope, session_id=selected["session_id"],
+                         trigger="deep", run_at=str(int(time.time())), consolidation=deep))
+    jobs = node_call("runJobs", dict(scope, now=str(int(time.time()) + 1), limit=100, lease_seconds=30))
+    if not any(job["id"] == queued_deep["id"] and job["status"] == "completed" for job in jobs):
+        raise AssertionError(f"host-selected deep job did not complete: {jobs}")
     archived = py_call("nextral.consolidation.run", deep)
     archive_receipts = [receipt for receipt in archived["receipts"]
                         if receipt["operation"] == "archive_transcript" and receipt["status"] == "ok"]
@@ -284,10 +294,15 @@ def exercise_lifecycles(py_call, node_call, scope, ids, query, compose, env):
             "hot_messages": len(hot), "warm_messages": len(messages), "callback_attempts": 2}
 
 
-def exercise_scheduled_jobs(py_call, node_call, scope):
+def exercise_scheduled_jobs(py_call, node_call, scope, compose, env):
     owner = dict(scope, user_id="retention-worker")
     memory_id = scope["tenant_id"] + "_retention"
-    py_call("nextral.memory.ingest", ingest(owner, memory_id, "episodic"))
+    source = py_call("nextral.session.append", dict(owner, session_id="retention-session",
+                     role="user", content="Preserve this source until real deep archival",
+                     idempotency_key="retention-source", privacy_level="private"))
+    candidate = ingest(owner, memory_id, "episodic")
+    candidate.update(session_id="retention-session", source_message_ids=[source["message_id"]])
+    py_call("nextral.memory.ingest", candidate)
     now = int(time.time())
     request = dict(owner, session_id="retention-session", trigger="retention",
                    run_at=str(now + 120), memory_ids=[memory_id], redact=True, max_attempts=2)
@@ -300,10 +315,47 @@ def exercise_scheduled_jobs(py_call, node_call, scope):
     if node_call("runJobs", dict(owner, now=str(now), limit=10, lease_seconds=30)):
         raise AssertionError("retention executed before its durable due time")
     execution = dict(owner, now=str(now + 121), limit=10, lease_seconds=30)
+    blocked = node_call("runJobs", execution)
+    if not any(job["id"] == queued["id"] and job["status"] == "retry_pending"
+               and job["attempts"] == 1 and job["last_error"] for job in blocked):
+        raise AssertionError(f"unarchived source retention did not defer: {blocked}")
+    before_archive = node_call("listMemories", dict(owner, include_inactive=True))
+    preserved = next(record for record in before_archive if record["id"] == memory_id)
+    if (preserved["status"] != "active" or preserved["content"] != candidate["content"]
+            or preserved["embedding"] != candidate["embedding"]):
+        raise AssertionError("scheduled retention changed canonical source before deep archive")
+    context_query = dict(retrieval(owner), session_id="retention-session")
+    tail = node_call("workingContext", context_query)["session_tail"]
+    if [(message["id"], message["content"]) for message in tail] != [
+            (source["message_id"], "Preserve this source until real deep archival")]:
+        raise AssertionError("scheduled retention changed the unarchived transcript")
+    deep_candidate = dict(candidate, content="user: Preserve this source until real deep archival")
+    deep = dict(owner, session_id="retention-session", lane="deep", policy=POLICY,
+                version="retention-verified-deep", candidates=[deep_candidate], chunk_messages=100)
+    archived = py_call("nextral.consolidation.run", deep)
+    if archived["job"]["status"] != "completed" or not any(
+            receipt["operation"] == "archive_transcript" and receipt["status"] == "ok"
+            for receipt in archived["receipts"]):
+        raise AssertionError(f"real deep archiving did not acknowledge storage: {archived}")
+    archive_key = next(receipt["target_id"] for receipt in archived["receipts"]
+                       if receipt["operation"] == "archive_transcript" and receipt["status"] == "ok")
+    archive = json_run(compose + ["run", "--rm", "--no-deps", "-T",
+                       "-e", "NEXTRAL_S3_ACCESS_KEY", "-e", "NEXTRAL_S3_SECRET_KEY",
+                       "--entrypoint", "/bin/sh", "mc", "-c",
+                       'mc alias set local http://minio:9000 "$NEXTRAL_S3_ACCESS_KEY" "$NEXTRAL_S3_SECRET_KEY" >/dev/null && mc cat "local/nextral-memory/$1"',
+                       "nextral-retention-archive-check", archive_key], env=env)
+    if (archive["tenant_id"] != owner["tenant_id"] or archive["user_id"] != owner["user_id"]
+            or archive["session_id"] != "retention-session"
+            or [(message["id"], message["content"]) for message in archive["messages"]]
+            != [(source["message_id"], "Preserve this source until real deep archival")]):
+        raise AssertionError("retention deep archive did not preserve its actual scoped source")
+    if node_call("runJobs", execution):
+        raise AssertionError("retention retried before its durable retry deadline")
+    execution["now"] = str(now + 182)
     completed = node_call("runJobs", execution)
     if not any(job["id"] == queued["id"] and job["status"] == "completed"
-               and job["attempts"] == 1 for job in completed):
-        raise AssertionError(f"scheduled retention did not complete: {completed}")
+               and job["attempts"] == 2 for job in completed):
+        raise AssertionError(f"archived scheduled retention did not complete on retry: {completed}")
     records = node_call("listMemories", dict(owner, include_inactive=True))
     record = next(record for record in records if record["id"] == memory_id)
     if record["status"] != "redacted" or record["embedding"] is not None:
@@ -316,6 +368,15 @@ def exercise_scheduled_jobs(py_call, node_call, scope):
     if not any(job["id"] == missing["id"] and job["status"] == "terminal_failed"
                and job["last_error"] for job in failed):
         raise AssertionError("terminal retention failure did not persist its cause")
+    standalone_id = memory_id + "_standalone"
+    standalone = ingest(owner, standalone_id, "episodic")
+    standalone["session_id"] = None
+    py_call("nextral.memory.ingest", standalone)
+    standalone_job = py_call("nextral.jobs.enqueue", dict(request, memory_ids=[standalone_id],
+                            run_at=str(now), max_attempts=1))
+    if not any(job["id"] == standalone_job["id"] and job["status"] == "completed"
+               for job in node_call("runJobs", execution)):
+        raise AssertionError("standalone memory retention incorrectly required a transcript archive")
     return {"completed_job_id": queued["id"], "terminal_job_id": missing["id"]}
 
 
@@ -546,7 +607,7 @@ REVOKE INSERT, UPDATE, DELETE ON nextral_schema_migrations FROM nextral_integrat
             for caller in (lambda: py_call("nextral.memory.retrieve", query), lambda: node_call("retrieve", query), lambda: cli_call("nextral.memory.retrieve", query)):
                 assert_recalled(caller(), ids["semantic"])
             lifecycle = exercise_lifecycles(py_call, node_call, scope, ids, query, compose, env)
-            scheduled_jobs = exercise_scheduled_jobs(py_call, node_call, scope)
+            scheduled_jobs = exercise_scheduled_jobs(py_call, node_call, scope, compose, env)
             messages = [
                 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"nextral-integration","version":"1"}}},
                 {"jsonrpc":"2.0","method":"notifications/initialized"},

@@ -22,7 +22,10 @@ use crate::{
             execute_due_reminders, schedule_reminder, ExecuteDueRemindersRequest,
             ScheduleReminderRequest,
         },
-        session::{append_session_message, assemble_working_context, AppendSessionMessageRequest},
+        session::{
+            append_session_message, assemble_working_context, eligible_sessions,
+            AppendSessionMessageRequest, EligibleSessionsRequest,
+        },
     },
     runtime::{lifecycle::LifecycleStore, storage::RuntimeStore},
     store::{MemoryIndexStore, TestMemoryStore},
@@ -730,6 +733,9 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             decode!(AppendSessionMessageRequest),
             20
         )?),
+        "nextral.session.eligible" => {
+            value!(eligible_sessions(store, decode!(EligibleSessionsRequest))?)
+        }
         "nextral.session.context" => value!(assemble_working_context(
             store,
             decode!(RetrievalRequest),

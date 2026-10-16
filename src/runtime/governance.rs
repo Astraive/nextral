@@ -70,6 +70,56 @@ where
     }
 }
 
+pub(crate) fn retain_memory<T>(
+    store: &mut T,
+    request: ForgetMemoryRequest,
+    fence_job: impl FnOnce(&mut T) -> CoreResult<()>,
+) -> CoreResult<ForgetMemoryResponse>
+where
+    T: MemoryIndexStore + LifecycleStore + AuditSink,
+{
+    crate::runtime::lifecycle::validate_identity(&request.tenant_id, &request.user_id, None)?;
+    crate::store::validate_scope_component(&request.memory_id, "memory_id")?;
+    let tenant = request.tenant_id.clone();
+    let user = request.user_id.clone();
+    let lock = format!("privacy/{user}");
+    let owner = worker_owner();
+    crate::runtime::lifecycle::renew_lease(store, &tenant, &lock, &owner, 300)?;
+    let result = (|| {
+        let record = store
+            .get_memory(&tenant, &user, &request.memory_id)?
+            .ok_or_else(|| CoreError::NotFound("memory not found".into()))?;
+        // Resume an authorized erasure even if its archive has already been purged.
+        let mut erasure_started = store
+            .lifecycle_load(&tenant, &format!("forget/{}/{}", user, request.memory_id))?
+            .is_some();
+        if !erasure_started {
+            for source in &record.source_message_ids {
+                erasure_started |= store
+                    .lifecycle_load(&tenant, &format!("forgotten-source/{user}/{source}"))?
+                    .is_some();
+            }
+        }
+        if !erasure_started {
+            store.lifecycle_verify_archive_sources(&record)?;
+        }
+        crate::runtime::lifecycle::renew_lease(store, &tenant, &lock, &owner, 300)?;
+        fence_job(store)?;
+        forget_claimed(store, &request)
+    })();
+    let release = store.lifecycle_release(&tenant, &lock, &owner);
+    match result {
+        Ok(response) => {
+            release?;
+            Ok(response)
+        }
+        Err(error) => {
+            let _ = release;
+            Err(error)
+        }
+    }
+}
+
 fn forget_claimed<T>(
     store: &mut T,
     request: &ForgetMemoryRequest,

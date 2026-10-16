@@ -13,6 +13,7 @@ from .core import (
     enqueue_job,
     due_reminders,
     e2e_smoke,
+    eligible_sessions,
     execute_reembed,
     experiment_status,
     get_job,
@@ -61,6 +62,8 @@ from .errors import (
 )
 from .types import (
     ConsolidationRequest,
+    EligibleSession,
+    EligibleSessionsRequest,
     IngestRequest,
     IngestionPolicy,
     LifecycleJobRequest,
@@ -72,6 +75,7 @@ from .types import (
 
 __all__ = [
     "__version__",
+    "eligible_sessions", "EligibleSession", "EligibleSessionsRequest",
     "adapter_smoke", "append_session", "batch_forget", "batch_ingest", "batch_retrieve",
     "configure_runtime", "consolidate", "create_experiment", "due_reminders", "e2e_smoke",
     "execute_reembed", "experiment_status", "forget", "graph_query", "graphify", "health",

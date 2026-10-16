@@ -6,6 +6,10 @@
 
 Retention jobs require explicit nonempty `memory_ids`, no consolidation payload, and optional `redact`. There is no automatic global date-based purge or partition drop. The host chooses eligibility and legal retention policy.
 
+For host-driven aged-session selection, call `nextral.session.eligible` with `{tenant_id,user_id,inactive_at_or_before,limit?}`. The cutoff is parsed as a timestamp; only sessions whose latest message is at or before it are returned, oldest first with session ID tie-breaking. Each array item contains `session_id`, RFC3339 UTC `last_message_at`, and `message_count`; limit defaults to 100 and must be 1–1000. Select those sessions, produce deterministic deep candidates and enqueue deep jobs. This is discovery, not automatic consolidation or a new daemon.
+
+Scheduled retention of session-backed memory waits for verified deep archive completion covering the actual stored source messages, with real S3 object bytes verified before deletion/redaction. Fast summaries, planned/pending manifests, or archive metadata alone are not proof of coverage. Complete deep consolidation and required archive receipts before retrying blocked retention. This is completion-before-purge, not archive-preserving warm pruning: existing archive tombstoning/redaction still applies. Standalone memory without raw-message sources remains eligible for scheduled retention; explicit privacy forget does not wait for archival.
+
 ## Run and recover
 
 `nextral.jobs.run` takes `{tenant_id,user_id,now,limit?,lease_seconds?}`. It claims due work using durable leases, persists attempts/retry state, and records completed memory IDs plus errors. `jobs.list/get` inspect persisted jobs. Restarts recover due work and expired claims; choose a lease duration that accommodates actual store latency and monitor retry/backlog growth.

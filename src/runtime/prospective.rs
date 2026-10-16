@@ -2,7 +2,7 @@ use crate::{
     contracts::{CoreError, CoreResult},
     runtime::{
         consolidation::{consolidate_session, ConsolidationLane, ConsolidationRequest},
-        governance::{forget_memory, ForgetMemoryRequest},
+        governance::{retain_memory, ForgetMemoryRequest},
         lifecycle::{durable_save, timestamp_epoch, worker_owner, LifecycleStore},
         observability::{record_job, JobOutcome},
         reminders::{
@@ -269,7 +269,7 @@ where
                     if job.completed_memory_ids.contains(&id) {
                         continue;
                     }
-                    let response = forget_memory(
+                    let response = retain_memory(
                         store,
                         ForgetMemoryRequest {
                             tenant_id: request.tenant_id.clone(),
@@ -278,6 +278,15 @@ where
                             actor: "retention_worker".into(),
                             reason: "scheduled retention".into(),
                             redact: job.request.redact,
+                        },
+                        |store| {
+                            crate::runtime::lifecycle::renew_lease(
+                                store,
+                                &request.tenant_id,
+                                &key,
+                                &owner,
+                                request.lease_seconds,
+                            )
                         },
                     )?;
                     if response.status != "completed" {
@@ -642,6 +651,172 @@ mod tests {
             max_attempts: 2,
         };
         (store, request)
+    }
+
+    #[test]
+    fn planned_archive_manifest_cannot_authorize_retention() {
+        let (mut store, host) = fast_job(LifecycleTrigger::Close);
+        let fast = consolidate_session(&mut store, host.consolidation.unwrap()).unwrap();
+        let memory_id = fast.accepted[0].record_id.as_ref().unwrap();
+        let memory = store.get_memory("t", "u", memory_id).unwrap().unwrap();
+        store
+            .lifecycle_save(
+                "t",
+                "archive/planned",
+                &serde_json::json!({
+                    "tenant_id":"t", "user_id":"u", "session_id":"s",
+                    "source_message_ids":memory.source_message_ids,
+                    "upload_status":"pending",
+                }),
+            )
+            .unwrap();
+        let mut request = retention_request();
+        request.memory_ids = vec![memory_id.clone()];
+        enqueue_lifecycle_job(&mut store, request).unwrap();
+        assert_eq!(
+            execute_lifecycle_jobs(&mut store, runner("100")).unwrap()[0].status,
+            "retry_pending"
+        );
+        assert_eq!(
+            store
+                .get_memory("t", "u", memory_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::memory::MemoryStatus::Active
+        );
+        assert_eq!(store.session_tail("t", "u", "s", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retention_preserves_sources_until_archiving_then_recovers_and_purges() {
+        let (mut store, host) = fast_job(LifecycleTrigger::Close);
+        let mut deep = host.consolidation.unwrap();
+        let fast = consolidate_session(&mut store, deep.clone()).unwrap();
+        let memory_id = fast.accepted[0].record_id.clone().unwrap();
+        let before = store.get_memory("t", "u", &memory_id).unwrap().unwrap();
+        let mut request = retention_request();
+        request.memory_ids = vec![memory_id.clone()];
+        enqueue_lifecycle_job(&mut store, request).unwrap();
+        let waiting = execute_lifecycle_jobs(&mut store, runner("100")).unwrap();
+        assert_eq!(waiting[0].status, "retry_pending");
+        assert_eq!(
+            store.get_memory("t", "u", &memory_id).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(store.session_tail("t", "u", "s", 100).unwrap().len(), 1);
+        assert!(store
+            .lifecycle_load("t", &format!("forget/u/{memory_id}"))
+            .unwrap()
+            .is_none());
+
+        let chunks = crate::runtime::consolidation::transcript_chunks(
+            &store.session_tail("t", "u", "s", 100).unwrap(),
+            100,
+        )
+        .unwrap();
+        deep.lane = ConsolidationLane::Deep;
+        deep.summary = None;
+        deep.version = "retention-archive".into();
+        deep.candidates[0].content = chunks[0].0.clone();
+        deep.candidates[0].source_message_ids = chunks[0].1.clone();
+        let archived = consolidate_session(&mut store, deep).unwrap();
+        assert!(archived.receipts.iter().any(|receipt| {
+            receipt.operation == "archive_transcript"
+                && crate::runtime::lifecycle::acknowledged(receipt)
+        }));
+        assert_eq!(
+            execute_lifecycle_jobs(&mut store, runner("160")).unwrap()[0].status,
+            "completed"
+        );
+        assert_eq!(
+            store
+                .get_memory("t", "u", &memory_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::memory::MemoryStatus::Redacted
+        );
+        assert!(store.session_tail("t", "u", "s", 100).unwrap().is_empty());
+        assert!(store.lifecycle_list("t", "archive/").unwrap().is_empty());
+    }
+
+    #[test]
+    fn retention_rejects_metadata_claims_for_unstored_transcript_messages() {
+        let (mut store, host) = fast_job(LifecycleTrigger::Close);
+        let fast = consolidate_session(&mut store, host.consolidation.unwrap()).unwrap();
+        let memory_id = fast.accepted[0].record_id.clone().unwrap();
+        let message = store.session_tail("t", "u", "s", 100).unwrap().remove(0);
+        let extra =
+            crate::domain::SessionMessage::new("t", "u", "s", "user", "Unarchived source", "m2");
+        store.append_session_message(extra.clone()).unwrap();
+        let mut related = crate::memory::MemoryRecord::new(
+            "related",
+            "t",
+            "u",
+            "Combined sources",
+            crate::memory::ContentType::Fact,
+            crate::memory::MemoryType::Semantic,
+            crate::memory::SourceType::Manual,
+        );
+        related.session_id = Some("s".into());
+        related.source_message_ids = vec![message.id.clone(), extra.id.clone()];
+        store.upsert_memory(related).unwrap();
+        let before = store.session_tail("t", "u", "s", 100).unwrap();
+        store
+            .lifecycle_archive(
+                "t",
+                "claimed-coverage",
+                &serde_json::json!({
+                    "tenant_id":"t", "user_id":"u", "session_id":"s",
+                    "source_message_ids":[message.id, extra.id], "messages":[message],
+                }),
+            )
+            .unwrap();
+        let mut request = retention_request();
+        request.memory_ids = vec![memory_id.clone()];
+        enqueue_lifecycle_job(&mut store, request).unwrap();
+        assert_eq!(
+            execute_lifecycle_jobs(&mut store, runner("100")).unwrap()[0].status,
+            "retry_pending"
+        );
+        assert_eq!(
+            store
+                .get_memory("t", "u", &memory_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::memory::MemoryStatus::Active
+        );
+        assert_eq!(store.session_tail("t", "u", "s", 100).unwrap(), before);
+    }
+
+    #[test]
+    fn retention_rejects_archive_identifiers_without_transcript_payloads() {
+        let (mut store, host) = fast_job(LifecycleTrigger::Close);
+        let fast = consolidate_session(&mut store, host.consolidation.unwrap()).unwrap();
+        let memory_id = fast.accepted[0].record_id.clone().unwrap();
+        let before = store.session_tail("t", "u", "s", 100).unwrap();
+        store.lifecycle_archive("t", "metadata-only", &serde_json::json!({
+            "tenant_id":"t", "user_id":"u", "session_id":"s",
+            "messages":[{"id":before[0].id, "tenant_id":"t", "user_id":"u", "session_id":"s"}],
+        })).unwrap();
+        let mut request = retention_request();
+        request.memory_ids = vec![memory_id.clone()];
+        enqueue_lifecycle_job(&mut store, request).unwrap();
+        assert_eq!(
+            execute_lifecycle_jobs(&mut store, runner("100")).unwrap()[0].status,
+            "retry_pending"
+        );
+        assert_eq!(
+            store
+                .get_memory("t", "u", &memory_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::memory::MemoryStatus::Active
+        );
+        assert_eq!(store.session_tail("t", "u", "s", 100).unwrap(), before);
     }
 
     #[test]

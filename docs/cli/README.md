@@ -20,7 +20,7 @@ The named command groups execute the corresponding tools:
 | Group | Operations |
 | --- | --- |
 | `memory` | `ingest`, `retrieve`, `get`, `list`, `update`, `stats`, `search-by-tag`, `search-by-entity`, `forget` |
-| `session` | `append`, `context` |
+| `session` | `append`, `eligible`, `context` |
 | `policy` | `upsert`, `list`, `remove` |
 | `graph` | `query`, `graphify` |
 | `reminders` | `schedule`, `due`, `list` |

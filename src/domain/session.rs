@@ -60,6 +60,13 @@ impl SessionMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EligibleSession {
+    pub session_id: String,
+    pub last_message_at: String,
+    pub message_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
     pub tenant_id: String,
@@ -82,4 +89,6 @@ pub struct WorkingContext {
     pub session_summary: Option<SessionSummary>,
     pub retrieved_memories: Vec<crate::retrieval::RetrievedItem>,
     pub token_estimate: u32,
+    #[serde(default)]
+    pub degraded_reasons: Vec<String>,
 }

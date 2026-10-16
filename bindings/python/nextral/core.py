@@ -13,6 +13,7 @@ from typing import Any
 
 from . import _nextral as _native
 from .errors import SerializationError, from_core_error
+from .types import EligibleSession, EligibleSessionsRequest
 
 JsonObject = dict[str, Any]
 Request = Mapping[str, Any]
@@ -128,6 +129,11 @@ def search_by_entity(request: Request) -> list[JsonObject]:
 
 def append_session(request: Request) -> JsonObject:
     return mcp_call("nextral.session.append", request)
+
+
+def eligible_sessions(request: EligibleSessionsRequest) -> list[EligibleSession]:
+    """List scoped inactive sessions, oldest first; limit defaults to 100 (1–1000)."""
+    return mcp_call("nextral.session.eligible", request)
 
 
 def session_context(request: Request) -> JsonObject:

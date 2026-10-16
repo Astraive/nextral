@@ -249,6 +249,98 @@ fn archive_source_ids(body: &Value) -> CoreResult<Vec<String>> {
     ids.dedup();
     Ok(ids)
 }
+fn archived_transcript_sources(body: &Value, tenant: &str, user: &str) -> CoreResult<Vec<String>> {
+    let messages = body["messages"]
+        .as_array()
+        .ok_or_else(|| CoreError::InvalidInput("archive transcript messages required".into()))?;
+    if body["tenant_id"].as_str() != Some(tenant)
+        || body["user_id"].as_str() != Some(user)
+        || body["session_id"].as_str().is_none_or(str::is_empty)
+        || messages.is_empty()
+        || messages.len() > 100_000
+    {
+        return Err(CoreError::Conflict(
+            "archive transcript scope mismatch".into(),
+        ));
+    }
+    let mut ids = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message["tenant_id"].as_str() != Some(tenant)
+            || message["user_id"].as_str() != Some(user)
+            || message["session_id"] != body["session_id"]
+            || message["role"]
+                .as_str()
+                .is_none_or(|role| role.trim().is_empty())
+            || message["content"]
+                .as_str()
+                .is_none_or(|content| content.trim().is_empty())
+        {
+            return Err(CoreError::Conflict(
+                "archive transcript payload or scope mismatch".into(),
+            ));
+        }
+        let id = message["id"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| CoreError::InvalidInput("archive message ID required".into()))?;
+        ids.push(id.to_owned());
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn required_archive_sources<T>(store: &T, memory: &MemoryRecord) -> CoreResult<Vec<String>>
+where
+    T: MemoryIndexStore + SessionStore,
+{
+    if memory.session_id.is_none() && memory.source_message_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut sources = memory.source_message_ids.clone();
+    if let Some(session) = &memory.session_id {
+        let messages = store.session_tail(&memory.tenant_id, &memory.user_id, session, 100_001)?;
+        if messages.len() > 100_000 {
+            return Err(CoreError::InvalidInput(
+                "retention session exceeds archive bound".into(),
+            ));
+        }
+        sources.extend(messages.into_iter().map(|message| message.id));
+    }
+    let privacy = [
+        PrivacyLevel::Shared,
+        PrivacyLevel::Private,
+        PrivacyLevel::Sensitive,
+        PrivacyLevel::Restricted,
+    ];
+    if !memory.source_message_ids.is_empty() {
+        for derived in store.list_memories(&memory.tenant_id, &memory.user_id, &privacy, true)? {
+            if derived
+                .source_message_ids
+                .iter()
+                .any(|id| memory.source_message_ids.contains(id))
+            {
+                sources.extend(derived.source_message_ids);
+            }
+        }
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    Ok(sources)
+}
+
+fn require_source_coverage(
+    required: &[String],
+    covered: &std::collections::HashSet<String>,
+) -> CoreResult<()> {
+    if required.iter().any(|source| !covered.contains(source)) {
+        return Err(CoreError::InvalidInput(
+            "retention requires verified archive source coverage".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl RuntimeStore {
     pub fn configured(config: NextralConfig) -> CoreResult<Self> {
         config.validate()?;
@@ -928,6 +1020,15 @@ impl AuditSink for ProductionStore {
     }
 }
 impl SessionStore for ProductionStore {
+    fn eligible_sessions(
+        &self,
+        t: &str,
+        u: &str,
+        cutoff: &str,
+        limit: usize,
+    ) -> CoreResult<Vec<crate::domain::EligibleSession>> {
+        self.postgres.eligible_sessions(&scope(t, u), cutoff, limit)
+    }
     fn append_session_message(&mut self, m: SessionMessage) -> CoreResult<()> {
         self.postgres.append_message(&m)?;
         let s = scope(&m.tenant_id, &m.user_id);
@@ -985,10 +1086,20 @@ impl SessionStore for ProductionStore {
         id: &str,
         limit: usize,
     ) -> CoreResult<Vec<SessionMessage>> {
+        Ok(self.session_tail_with_status(t, u, id, limit)?.0)
+    }
+    fn session_tail_with_status(
+        &self,
+        t: &str,
+        u: &str,
+        id: &str,
+        limit: usize,
+    ) -> CoreResult<(Vec<SessionMessage>, Vec<String>)> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let s = scope(t, u);
+        let mut degraded_reasons = Vec::new();
         if limit <= 20 {
             if let Ok(values) = self.redis.hot_tail_read(&s, id, 20) {
                 if let Ok(mut tail) = values
@@ -1006,16 +1117,18 @@ impl SessionStore for ProductionStore {
                         if tail.len() > limit {
                             tail.drain(..tail.len() - limit);
                         }
-                        return Ok(tail);
+                        return Ok((tail, degraded_reasons));
                     }
                 }
+                degraded_reasons.push("redis_hot_tail_missing_or_stale:warm_fallback".into());
             } else {
                 crate::runtime::observability::record_store_error(
                     crate::runtime::observability::StoreBackend::Redis,
                 );
+                degraded_reasons.push("redis_unavailable:warm_fallback".into());
             }
         }
-        self.postgres.session_tail(&s, id, limit)
+        Ok((self.postgres.session_tail(&s, id, limit)?, degraded_reasons))
     }
 }
 impl ReminderStore for ProductionStore {
@@ -1066,7 +1179,7 @@ dispatch!(MemoryIndexStore {
 });
 dispatch!(GraphStore {merge_node(&mut Self,n:GraphNode)->CoreResult<()>;merge_edge(&mut Self,e:GraphEdge)->CoreResult<()>;graph_memory_ids(&Self,t:&str,u:&str,q:&str,h:u8,p:&[PrivacyLevel])->CoreResult<Vec<String>>;});
 dispatch!(AuditSink {emit_audit(&mut Self,e:AuditEvent)->CoreResult<()>;});
-dispatch!(SessionStore {hot_tail_status(&Self,t:&str,u:&str,s:&str)->CoreResult<(usize,Vec<String>)>;append_session_message(&mut Self,m:SessionMessage)->CoreResult<()>;session_tail(&Self,t:&str,u:&str,s:&str,l:usize)->CoreResult<Vec<SessionMessage>>;});
+dispatch!(SessionStore {eligible_sessions(&Self,t:&str,u:&str,c:&str,l:usize)->CoreResult<Vec<crate::domain::EligibleSession>>;hot_tail_status(&Self,t:&str,u:&str,s:&str)->CoreResult<(usize,Vec<String>)>;append_session_message(&mut Self,m:SessionMessage)->CoreResult<()>;session_tail(&Self,t:&str,u:&str,s:&str,l:usize)->CoreResult<Vec<SessionMessage>>;session_tail_with_status(&Self,t:&str,u:&str,s:&str,l:usize)->CoreResult<(Vec<SessionMessage>,Vec<String>)>;});
 dispatch!(ReminderStore {upsert_reminder(&mut Self,r:ReminderRecord)->CoreResult<()>;list_due_reminders(&Self,t:&str,u:&str,c:&str)->CoreResult<Vec<ReminderRecord>>;});
 
 impl LifecycleStore for TestMemoryStore {
@@ -1146,6 +1259,28 @@ impl LifecycleStore for TestMemoryStore {
     }
     fn lifecycle_archive(&mut self, t: &str, k: &str, v: &Value) -> CoreResult<StoreReceipt> {
         self.lifecycle_save(t, &format!("archive/{k}"), v)
+    }
+    fn lifecycle_verify_archive_sources(&self, memory: &MemoryRecord) -> CoreResult<()> {
+        let required = required_archive_sources(self, memory)?;
+        if required.is_empty() {
+            return Ok(());
+        }
+        let mut covered = std::collections::HashSet::new();
+        for ((tenant, key), body) in &self.lifecycle_state {
+            if tenant == &memory.tenant_id
+                && key.starts_with("archive/")
+                && body["tenant_id"].as_str() == Some(&memory.tenant_id)
+                && body["user_id"].as_str() == Some(&memory.user_id)
+                && body["messages"].is_array()
+            {
+                covered.extend(archived_transcript_sources(
+                    body,
+                    &memory.tenant_id,
+                    &memory.user_id,
+                )?);
+            }
+        }
+        require_source_coverage(&required, &covered)
     }
     fn lifecycle_forget(
         &mut self,
@@ -1366,6 +1501,44 @@ impl LifecycleStore for ProductionStore {
             &archive.object_key,
             Ok(()),
         ))
+    }
+    fn lifecycle_verify_archive_sources(&self, memory: &MemoryRecord) -> CoreResult<()> {
+        let required = required_archive_sources(self, memory)?;
+        if required.is_empty() {
+            return Ok(());
+        }
+        let mut covered = std::collections::HashSet::new();
+        for (_, manifest) in self.postgres.state_list(&memory.tenant_id, "archive/")? {
+            if manifest["user_id"].as_str() != Some(&memory.user_id)
+                || manifest["tombstoned"] == true
+                || manifest["upload_status"] != "stored"
+            {
+                continue;
+            }
+            let listed = archive_source_ids(&manifest)?;
+            if !listed
+                .iter()
+                .any(|source| required.binary_search(source).is_ok())
+            {
+                continue;
+            }
+            let archive: ArchiveReceipt = serde_json::from_value(manifest["receipt"].clone())?;
+            let bytes = self
+                .archive
+                .get_verified_object(&memory.tenant_id, &archive)?;
+            let body: Value = serde_json::from_slice(&bytes)?;
+            if body["session_id"] != manifest["session_id"] {
+                return Err(CoreError::Conflict("archive source scope mismatch".into()));
+            }
+            let actual = archived_transcript_sources(&body, &memory.tenant_id, &memory.user_id)?;
+            if actual != listed {
+                return Err(CoreError::Conflict(
+                    "archive source manifest mismatch".into(),
+                ));
+            }
+            covered.extend(actual);
+        }
+        require_source_coverage(&required, &covered)
     }
     fn lifecycle_forget(
         &mut self,
@@ -1597,6 +1770,7 @@ dispatch!(LifecycleStore {
  lifecycle_claim(&mut Self,t:&str,k:&str,o:&str,n:u64,l:u64)->CoreResult<bool>;
  lifecycle_release(&mut Self,t:&str,k:&str,o:&str)->CoreResult<()>;
  lifecycle_archive(&mut Self,t:&str,k:&str,v:&Value)->CoreResult<StoreReceipt>;
+ lifecycle_verify_archive_sources(&Self,m:&MemoryRecord)->CoreResult<()>;
  lifecycle_forget(&mut Self,t:&str,u:&str,id:&str,r:bool)->CoreResult<Vec<StoreReceipt>>;
  lifecycle_policies(&Self,t:&str,u:&str)->CoreResult<Vec<ProceduralPolicy>>;
  lifecycle_dispatch(&mut Self,r:&ReminderRecord)->CoreResult<StoreReceipt>;
