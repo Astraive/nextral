@@ -402,7 +402,7 @@ test('measured real-store evidence controls promotion and restores prior policy 
   }
 });
 
-test('0.2 consumer queries memories with filters, keyset pagination, and repair', async () => {
+test('consumer queries memories with filters, keyset pagination, and repair', async () => {
   const client = await nextral.Client.create(testConfig);
   const owner = scope();
 
@@ -427,7 +427,7 @@ test('0.2 consumer queries memories with filters, keyset pagination, and repair'
   await client.close();
 });
 
-test('0.2 consumer manages owned worker handle and tick', async () => {
+test('consumer manages owned worker handle and tick', async () => {
   const client = await nextral.Client.create(testConfig);
   const owner = scope();
 
