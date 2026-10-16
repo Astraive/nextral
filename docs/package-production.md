@@ -43,6 +43,24 @@ This dispatch repeats all verification and attestation before publishing the exa
 
 Verification-only runs still require GitHub artifact-attestation/OIDC permissions and a repository plan that supports attestations. Download workflow artifacts before their GitHub retention expires; verification-only runs do not create a permanent GitHub Release. Neither these instructions nor an attested bundle claim that a registry publication has occurred.
 
+### Verified v0.1.0 artifacts
+
+[Tag verification run 38847740013](https://github.com/Astraive/nextral/actions/runs/38847740013) built, clean-installed and attested source `06956f8977ff9f36ffc9c4d405828319c9ff40bf`. All 49 verification jobs passed; all four publication jobs were skipped. The retained local bundle is `D:/target/releases/v0.1.0/`, with source-bound verification evidence alongside it in `D:/target/releases/v0.1.0-verification.json`.
+
+Download into an empty directory, then validate the complete bundle and authenticate its checksum manifest against the exact source and workflow:
+
+```sh
+gh run download 38847740013 --repo Astraive/nextral --name attested-release --dir BUNDLE_DIR
+python scripts/verify-release.py artifacts BUNDLE_DIR --tag v0.1.0 --require-checksums --require-provenance
+gh attestation verify BUNDLE_DIR/SHA256SUMS --bundle BUNDLE_DIR/provenance.jsonl \
+  --repo Astraive/nextral --signer-workflow Astraive/nextral/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0 --source-digest 06956f8977ff9f36ffc9c4d405828319c9ff40bf \
+  --signer-digest 06956f8977ff9f36ffc9c4d405828319c9ff40bf --deny-self-hosted-runners
+```
+
+`BUNDLE_DIR` is the downloaded directory, not the source checkout. The signed manifest authenticates all 13 payload checksums; local verification additionally checked every payload's own signed subject and rejected a wrong source digest. Installed Windows wheel/npm consumer workflows also passed locally, with production-only cases exercised separately by the complete five-store release runner. These are artifact signatures, not a claim that the Git tag or research executables are signed. Registry publication remains outside this delivery.
+
+
 ## Configuration and stores
 
 Start with `examples/config.production.example.json`. Replace deployment placeholders and set referenced environment variables. Rust resolves `${NAME}` configuration references; credential fields ending in `_env` name environment variables rather than containing secrets. Container DNS names in the example are not valid host addresses automatically.

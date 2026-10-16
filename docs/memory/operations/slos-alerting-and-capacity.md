@@ -50,9 +50,9 @@ The integrated five-store runner builds both release examples and retains authen
 
 ### Recorded five-store calibration
 
-[CI run 38812797031](https://github.com/Astraive/nextral/actions/runs/38812797031) passed all 47 jobs at head `1631b2e6510bb0394eaa0af016937a7bb13bf015`. Its `integration-research` artifact retains `7f546536023c4dfdbbf2b8151ead6820/{manifest,baseline,candidate,evidence,python-control,node-control}.json`. The downloaded evidence is at `D:/target/ci-38812797031/research/7f546536023c4dfdbbf2b8151ead6820/`; the full production result is `D:/target/ci-38812797031/production-result.json`.
+[Release run 38847740013](https://github.com/Astraive/nextral/actions/runs/38847740013), for `v0.1.0` at source `06956f8977ff9f36ffc9c4d405828319c9ff40bf`, passed 49 jobs and intentionally skipped all four publication jobs. Its `integration-research` artifact retains `b83f009f37754216b145e94bc8966f61/{manifest,baseline,candidate,evidence,python-control,node-control}.json`. Downloaded evidence: `D:/target/ci-38847740013/research/b83f009f37754216b145e94bc8966f61/`; full production result: `D:/target/ci-38847740013/production-result.json`.
 
-The reports themselves identify implementation revision `fc907ddb0ac338bcf7f9c672e037c21a3e3df14d`; do not replace that recorded source identity with the workflow head. Both use suite `representative-memory`, revision `v3`, SHA-256 `6a79579f5c82eb0d58132bb857fd5b0fb1b3ce63bbd8e2d649c4c77d9dcfde07`, release profile, Linux `x86_64`, and host ID `integration-ec1597e1372b5f592c1c2377d9c13d5f28920503d97a952fc6fdb4f56bc82a6f`. Run IDs are `baseline-7f546536023c4dfdbbf2b8151ead6820` (`policy-v1`) and `candidate-7f546536023c4dfdbbf2b8151ead6820` (`integration-7f546536023c4dfdbbf2b8151ead6820`).
+Both reports record implementation revision `06956f8977ff9f36ffc9c4d405828319c9ff40bf`, suite `representative-memory`, revision `v3`, SHA-256 `6a79579f5c82eb0d58132bb857fd5b0fb1b3ce63bbd8e2d649c4c77d9dcfde07`, release profile, Linux `x86_64`, and host ID `integration-2a9c886e961c65d4a373dc0693814ed2c8bcc5f36f50dc1f04a162adfa3a0f4c`. Run IDs are `baseline-b83f009f37754216b145e94bc8966f61` (`policy-v1`) and `candidate-b83f009f37754216b145e94bc8966f61` (`integration-b83f009f37754216b145e94bc8966f61`).
 
 | Observed metric | Baseline | Candidate |
 | --- | ---: | ---: |
@@ -60,16 +60,16 @@ The reports themselves identify implementation revision `fc907ddb0ac338bcf7f9c67
 | Contradiction agreement | 1.0 | 1.0 |
 | Reminder-outcome agreement | 1.0 | 1.0 |
 | Process-roundtrip samples | 8 | 8 |
-| Mean, ns | 394,310,108.125 | 209,293,079.375 |
-| p95, ns | 1,257,858,019 | 352,754,550 |
-| Maximum, ns | 1,257,858,019 | 352,754,550 |
+| Mean, ns | 365,384,872.375 | 231,340,665.375 |
+| p95, ns | 1,098,159,124 | 352,827,976 |
+| Maximum, ns | 1,098,159,124 | 352,827,976 |
 | Configured replay budget, ns | 30,000,000,000 | 30,000,000,000 |
 | Report budget gate (`latency_slo_passed`) | true | true |
 | After-fixture destructive audit events | 0 | 0 |
 
 Each report contains only eight process-roundtrip samples, including host startup and fixture setup. Safety counts cover scoped audited events **after fixture setup and before cleanup**, not all fixture deletion or all possible privacy/misuse outcomes. The identical agreement scores and lower candidate timings are two independent executions of the **same implementation**, not an algorithmic-improvement result or a deployment SLO. The serialized `latency_slo_passed` name means only the configured replay-budget gate passed.
 
-Both installed native consumers recorded `promoted_and_rolled_back`, restoring the prior stable `policy-v1`; they also rejected unpromoted and reasonless rollback. This exercises measured control admission and restoration, not a changed policy algorithm. `manifest.json` records research-host SHA-256 `87929c73d188601441e78391819bc3a0ec9eb795c149756d9803cecfd0cc86f4` and evaluator SHA-256 `e32fddcac60f1631f6fe39f427abff8c15ca1b0c6deea20d24a63d417d592b3e`. These are runner-recorded identities, **not independent binary attestation**; signed release-artifact validation is separate and remains pending under [#77](https://github.com/Astraive/nextral/issues/77).
+Both installed native consumers recorded `promoted_and_rolled_back`, restoring the prior stable `policy-v1`; they also rejected unpromoted and reasonless rollback. This exercises measured control admission and restoration, not a changed policy algorithm. `manifest.json` records research-host SHA-256 `0ad644cef45ffef21d13dc16a3a558d669b398787eaba3dbbdadbef9321fffb5` and evaluator SHA-256 `222823b08281d14651c30132527c5f9739c52223e3064fb374046a890100ea8a`. These are runner-recorded identities, **not independent binary attestation**: release-package attestation is separate and does not sign these research executables.
 
 ## Alerts and capacity
 
