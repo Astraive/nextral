@@ -92,8 +92,9 @@ pub trait IdGenerator {
     fn job_id(&self, tenant_id: &str, job_type: &str, target_id: &str) -> CoreResult<String>;
 }
 
-pub trait Clock {
+pub trait Clock: Send + Sync {
     fn now_timestamp(&self) -> CoreResult<String>;
+    fn monotonic_now(&self) -> std::time::Instant;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -115,6 +116,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_timestamp(&self) -> CoreResult<String> {
         Ok(now_timestamp())
+    }
+
+    fn monotonic_now(&self) -> std::time::Instant {
+        std::time::Instant::now()
     }
 }
 

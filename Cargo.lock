@@ -1667,6 +1667,7 @@ dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
  "native-tls",
+ "parking_lot",
  "postgres",
  "postgres-native-tls",
  "prost",
@@ -1680,6 +1681,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-health",
  "tonic-prost",
@@ -1695,6 +1697,7 @@ version = "0.1.0"
 dependencies = [
  "nextral",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1717,6 +1720,7 @@ dependencies = [
  "jsonschema",
  "nextral",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1730,6 +1734,7 @@ dependencies = [
  "napi-derive",
  "nextral",
  "serde_json",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1738,6 +1743,9 @@ version = "0.1.0"
 dependencies = [
  "nextral",
  "pyo3",
+ "pyo3-async-runtimes",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2416,6 +2424,20 @@ dependencies = [
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-async-runtimes"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "once_cell",
+ "pin-project-lite",
+ "pyo3",
+ "tokio",
 ]
 
 [[package]]
@@ -3490,6 +3512,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

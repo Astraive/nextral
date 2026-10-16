@@ -1,7 +1,6 @@
 use nextral::{
     api::{run_service_hosts, startup_plan, startup_readiness_matrix, ServiceMode},
     config::validate_config_json,
-    package::mcp_call_json,
 };
 use std::{env, fs, process};
 
@@ -47,9 +46,31 @@ fn run() -> Result<(), String> {
         }
         "execute" => {
             let request = args.next().ok_or("missing execute request json")?;
+            let value: serde_json::Value =
+                serde_json::from_str(&request).map_err(|e| e.to_string())?;
+            let tool = value["tool"]
+                .as_str()
+                .ok_or_else(|| "missing tool field in execute request".to_string())?;
+            let payload = value
+                .get("payload_json")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let mut config = nextral::config::NextralConfig::default();
+            config.backend = nextral::config::RuntimeBackend::TestMemory;
+            let client = nextral::package::RuntimeClient::from_config(config)
+                .map_err(|e| e.message)?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
             println!(
                 "{}",
-                mcp_call_json(&request).map_err(|error| error.message)?
+                rt.block_on(client.call_json(
+                    tool,
+                    payload.to_string(),
+                    nextral::package::CallOptions::default(),
+                ))
+                .map_err(|error| error.message)?
             );
         }
         "serve" => {

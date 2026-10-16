@@ -713,6 +713,11 @@ fn dispatch_failure_receipt(
                 CoreError::InvalidInput(_) => "configuration_invalid",
                 CoreError::NotFound(_) => "dispatch_not_found",
                 CoreError::Conflict(_) => "dispatch_conflict",
+                CoreError::ResourceExhausted(_) => "resource_exhausted",
+                CoreError::DeadlineExceeded(_) => "deadline_exceeded",
+                CoreError::Cancelled(_) => "cancelled",
+                CoreError::LeaseLost(_) => "lease_lost",
+                CoreError::IndexNotReady(_) => "index_not_ready",
                 CoreError::Io(_) => "transport_failed",
                 CoreError::Serialization(_) => "protocol_failed",
             };

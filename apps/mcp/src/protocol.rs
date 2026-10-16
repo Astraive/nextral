@@ -1,5 +1,5 @@
 use crate::{catalog, validate_arguments};
-use nextral::package::mcp_call_json;
+use nextral::package::{CallOptions, RuntimeClient};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -16,6 +16,7 @@ enum State {
 #[derive(Default)]
 pub struct Server {
     state: State,
+    client: Option<RuntimeClient>,
 }
 
 fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -150,8 +151,21 @@ impl Server {
                     };
                     return Some(error(id, code, failure.message));
                 }
-                let request = json!({"tool":name,"payload_json":arguments.to_string()});
-                match mcp_call_json(&request.to_string()) {
+                let client = match &self.client {
+                    Some(c) => c.clone(),
+                    None => match crate::create_client(None) {
+                        Ok(c) => {
+                            self.client = Some(c.clone());
+                            c
+                        }
+                        Err(e) => return Some(error(id, -32603, e.message)),
+                    },
+                };
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => return Some(error(id, -32603, e.to_string())),
+                };
+                match rt.block_on(client.call_json(name, arguments.to_string(), CallOptions::default())) {
                     Ok(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(value) => {
                             let structured = if value.is_object() {

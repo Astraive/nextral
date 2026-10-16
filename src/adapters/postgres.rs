@@ -11,7 +11,7 @@ mod enabled {
     use postgres::{Client, Transaction};
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Condvar, Mutex};
 
     const MIGRATIONS: [(&str, &str); 2] = [
         (
@@ -26,9 +26,62 @@ mod enabled {
     const MIGRATION_HISTORY: &str =
         "SELECT version,checksum FROM nextral_schema_migrations ORDER BY version";
 
+    struct PoolInner {
+        idle: Vec<Client>,
+        active_foreground: usize,
+        active_renewal: usize,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum ConnectionKind {
+        Foreground,
+        Renewal,
+    }
+
+    pub struct PooledClient<'a> {
+        client: Option<Client>,
+        adapter: &'a PostgresAdapter,
+        kind: ConnectionKind,
+    }
+
+    impl<'a> std::ops::Deref for PooledClient<'a> {
+        type Target = Client;
+        fn deref(&self) -> &Client {
+            self.client.as_ref().unwrap()
+        }
+    }
+
+    impl<'a> std::ops::DerefMut for PooledClient<'a> {
+        fn deref_mut(&mut self) -> &mut Client {
+            self.client.as_mut().unwrap()
+        }
+    }
+
+    impl<'a> Drop for PooledClient<'a> {
+        fn drop(&mut self) {
+            if let Some(c) = self.client.take() {
+                let (lock, cvar) = &*self.adapter.pool;
+                if let Ok(mut inner) = lock.lock() {
+                    match self.kind {
+                        ConnectionKind::Foreground => {
+                            inner.active_foreground = inner.active_foreground.saturating_sub(1);
+                        }
+                        ConnectionKind::Renewal => {
+                            inner.active_renewal = inner.active_renewal.saturating_sub(1);
+                        }
+                    }
+                    if !c.is_closed() && inner.idle.len() < 9 {
+                        inner.idle.push(c);
+                    }
+                    cvar.notify_one();
+                }
+            }
+        }
+    }
+
     pub struct PostgresAdapter {
         pub url: String,
-        pool: Mutex<Vec<Client>>,
+        pool: Arc<(Mutex<PoolInner>, Condvar)>,
     }
     impl PartialEq for PostgresAdapter {
         fn eq(&self, other: &Self) -> bool {
@@ -80,6 +133,9 @@ mod enabled {
         Ok(crate::runtime::lifecycle::timestamp_nanos(value)? as f64 / 1_000_000_000.0)
     }
     impl PostgresAdapter {
+        pub fn from_config(config: &crate::config::StoreConfig) -> CoreResult<Self> {
+            Self::new(&config.postgres_url)
+        }
         pub fn new(url: impl Into<String>) -> CoreResult<Self> {
             let url = url.into();
             if url.trim().is_empty() {
@@ -87,25 +143,83 @@ mod enabled {
             }
             Ok(Self {
                 url,
-                pool: Mutex::new(Vec::new()),
+                pool: Arc::new((
+                    Mutex::new(PoolInner {
+                        idle: Vec::new(),
+                        active_foreground: 0,
+                        active_renewal: 0,
+                    }),
+                    Condvar::new(),
+                )),
             })
         }
-        fn client(&self) -> CoreResult<Client> {
-            if let Some(c) = self
-                .pool
-                .lock()
-                .map_err(|e| CoreError::Io(e.to_string()))?
-                .pop()
-            {
-                if !c.is_closed() {
-                    return Ok(c);
-                }
-            }
+        fn connect_new(&self) -> CoreResult<Client> {
             let tls = native_tls::TlsConnector::builder()
                 .build()
                 .map_err(|e| CoreError::Io(e.to_string()))?;
             let url = self.url.replace("sslmode=verify-full", "sslmode=require");
             Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(tls)).map_err(db)
+        }
+        pub fn checkout(&self, kind: ConnectionKind) -> CoreResult<PooledClient<'_>> {
+            let (lock, cvar) = &*self.pool;
+            let mut inner = lock.lock().map_err(|e| CoreError::Io(e.to_string()))?;
+            loop {
+                match kind {
+                    ConnectionKind::Foreground => {
+                        if inner.active_foreground < 8 {
+                            inner.active_foreground += 1;
+                            break;
+                        }
+                    }
+                    ConnectionKind::Renewal => {
+                        if inner.active_renewal < 1 {
+                            inner.active_renewal += 1;
+                            break;
+                        }
+                    }
+                }
+                inner = cvar.wait(inner).map_err(|e| CoreError::Io(e.to_string()))?;
+            }
+            let client = if let Some(c) = inner.idle.pop() {
+                if !c.is_closed() {
+                    Some(c)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            drop(inner);
+            let client = match client {
+                Some(c) => c,
+                None => match self.connect_new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let mut inner = lock.lock().map_err(|_| CoreError::Io("pool lock".into()))?;
+                        match kind {
+                            ConnectionKind::Foreground => {
+                                inner.active_foreground = inner.active_foreground.saturating_sub(1);
+                            }
+                            ConnectionKind::Renewal => {
+                                inner.active_renewal = inner.active_renewal.saturating_sub(1);
+                            }
+                        }
+                        cvar.notify_one();
+                        return Err(e);
+                    }
+                },
+            };
+            Ok(PooledClient {
+                client: Some(client),
+                adapter: self,
+                kind,
+            })
+        }
+        fn client(&self) -> CoreResult<PooledClient<'_>> {
+            self.checkout(ConnectionKind::Foreground)
+        }
+        pub fn renewal_client(&self) -> CoreResult<PooledClient<'_>> {
+            self.checkout(ConnectionKind::Renewal)
         }
         fn scoped<T>(
             &self,
@@ -122,11 +236,6 @@ mod enabled {
             tx.query_one("SELECT set_config('nextral.tenant_id',$1,true),set_config('nextral.user_id',$2,true)",&[&tenant,&user]).map_err(db)?;
             let value = f(&mut tx)?;
             tx.commit().map_err(db)?;
-            if let Ok(mut pool) = self.pool.lock() {
-                if pool.len() < 10 {
-                    pool.push(client);
-                }
-            }
             Ok(value)
         }
         pub fn migration_sql(&self) -> &'static str {

@@ -37,7 +37,12 @@ class InstalledConsumerTests(unittest.TestCase):
             raise AssertionError(f"source-shadowed import: {origin}")
         if Path.cwd().resolve().is_relative_to(CHECKOUT):
             raise AssertionError("run consumer tests from outside the checkout")
-        nextral.configure_runtime(CONFIG)
+        cls.client = nextral.Client(CONFIG)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "client"):
+            cls.client.close()
 
     def setUp(self) -> None:
         self.scope = {"tenant_id": "python-consumer", "user_id": uuid.uuid4().hex}
@@ -84,89 +89,89 @@ class InstalledConsumerTests(unittest.TestCase):
         self.assertIn("abi3", distribution.read_text("WHEEL") or "")
 
     def test_ingest_retrieve_scope_isolation_and_forget(self) -> None:
-        result = nextral.ingest(self.ingest_request())
+        result = self.client.ingest(self.ingest_request())
         self.assertEqual(result["status"], "accepted")
         memory_id = result["record_id"]
-        self.assertEqual(nextral.get_memory(self.scope | {"memory_id": memory_id})["id"], memory_id)
-        self.assertIsNone(nextral.get_memory(self.scope | {"memory_id": "absent"}))
-        retrieval = nextral.retrieve(self.retrieval_request())
+        self.assertEqual(self.client.get_memory(self.scope | {"memory_id": memory_id})["id"], memory_id)
+        self.assertIsNone(self.client.get_memory(self.scope | {"memory_id": "absent"}))
+        retrieval = self.client.retrieve(self.retrieval_request())
         self.assertIn(memory_id, [item["memory_id"] for item in retrieval["items"]])
         isolated = self.retrieval_request() | {"user_id": "another-user"}
-        self.assertEqual(nextral.retrieve(isolated)["items"], [])
-        self.assertIn(memory_id, [row["id"] for row in nextral.list_memories(self.scope)])
-        nextral.forget({**self.scope, "memory_id": memory_id, "actor": "consumer", "reason": "erase", "redact": True})
-        self.assertNotIn(memory_id, [item["memory_id"] for item in nextral.retrieve(self.retrieval_request())["items"]])
+        self.assertEqual(self.client.retrieve(isolated)["items"], [])
+        self.assertIn(memory_id, [row["id"] for row in self.client.list_memories(self.scope)])
+        self.client.forget({**self.scope, "memory_id": memory_id, "actor": "consumer", "reason": "erase", "redact": True})
+        self.assertNotIn(memory_id, [item["memory_id"] for item in self.client.retrieve(self.retrieval_request())["items"]])
 
     def test_eligible_sessions_use_native_appends(self) -> None:
         for session_id in ("aged-a", "aged-b"):
             for index in range(2):
-                nextral.append_session({
+                self.client.append_session({
                     **self.scope, "session_id": session_id, "role": "user",
                     "content": f"message {index}", "idempotency_key": f"{session_id}-{index}",
                 })
         request: nextral.EligibleSessionsRequest = {
             **self.scope, "inactive_at_or_before": "9999-12-31T23:59:59Z",
         }
-        rows: list[nextral.EligibleSession] = nextral.eligible_sessions(request)
+        rows: list[nextral.EligibleSession] = self.client.eligible_sessions(request)
         self.assertEqual({row["session_id"] for row in rows}, {"aged-a", "aged-b"})
         self.assertEqual([row["message_count"] for row in rows], [2, 2])
         self.assertTrue(all(row["last_message_at"].endswith(("Z", "+00:00")) for row in rows))
-        self.assertEqual(nextral.eligible_sessions({**request, "limit": 1}), rows[:1])
-        self.assertEqual(nextral.eligible_sessions({**request, "user_id": "other"}), [])
-        self.assertEqual(nextral.eligible_sessions({
+        self.assertEqual(self.client.eligible_sessions({**request, "limit": 1}), rows[:1])
+        self.assertEqual(self.client.eligible_sessions({**request, "user_id": "other"}), [])
+        self.assertEqual(self.client.eligible_sessions({
             **request, "inactive_at_or_before": "1970-01-01T00:00:00Z",
         }), [])
         for limit in (0, 1001):
             with self.assertRaises(nextral.InvalidInputError):
-                nextral.eligible_sessions({**request, "limit": limit})
+                self.client.eligible_sessions({**request, "limit": limit})
 
     def test_session_host_extraction_and_reminders(self) -> None:
         session_id = uuid.uuid4().hex
-        appended = nextral.append_session({
+        appended = self.client.append_session({
             **self.scope, "session_id": session_id, "role": "user",
             "content": "PostgreSQL powers Atlas", "privacy_level": "private",
         })
         self.assertTrue(appended["message_id"])
         candidate = self.ingest_request("PostgreSQL powers Atlas")
         candidate.update(session_id=session_id, source_message_ids=[appended["message_id"]])
-        consolidated = nextral.consolidate({
+        consolidated = self.client.consolidate({
             **self.scope, "session_id": session_id, "lane": "fast",
             "policy": CONFIG["ingestion_policy"], "version": "consumer-v1",
             "summary": "Atlas uses PostgreSQL", "candidates": [candidate],
         })
         self.assertEqual(consolidated["job"]["status"], "completed")
         memory_id = consolidated["accepted"][0]["record_id"]
-        context = nextral.session_context(self.retrieval_request() | {"session_id": session_id})
+        context = self.client.session_context(self.retrieval_request() | {"session_id": session_id})
         self.assertTrue(context["session_tail"])
-        scheduled = nextral.schedule_reminder({
+        scheduled = self.client.schedule_reminder({
             **self.scope, "source_memory_id": memory_id, "kind": "follow_up",
             "title": "Check Atlas", "due_at": "9999999999", "timezone": "UTC",
         })
         self.assertEqual(scheduled["reminder"]["status"], "scheduled")
         self.assertIn(
             scheduled["reminder"]["id"],
-            [reminder["id"] for reminder in nextral.list_reminders(self.scope)],
+            [reminder["id"] for reminder in self.client.list_reminders(self.scope)],
         )
-        due = nextral.due_reminders({
+        due = self.client.due_reminders({
             **self.scope, "due_at_or_before": "1", "actor": "consumer", "retry_delay_seconds": 60,
         })
         self.assertEqual(due["results"], [])
 
     def test_batch_and_graph_use_native_runtime(self) -> None:
-        batch = nextral.batch_ingest({"items": [self.ingest_request()], "idempotency_key": uuid.uuid4().hex})
+        batch = self.client.batch_ingest({"items": [self.ingest_request()], "idempotency_key": uuid.uuid4().hex})
         self.assertEqual(batch["succeeded"], 1)
-        retrieval = nextral.batch_retrieve({"queries": [self.retrieval_request()]})
+        retrieval = self.client.batch_retrieve({"queries": [self.retrieval_request()]})
         self.assertEqual(retrieval["succeeded"], 1)
-        graph = nextral.graph_query(self.retrieval_request())
+        graph = self.client.graph_query(self.retrieval_request())
         self.assertIsInstance(graph, dict)
         memory_id = batch["results"][0]["record_id"]
-        forgotten = nextral.batch_forget({"items": [{
+        forgotten = self.client.batch_forget({"items": [{
             **self.scope, "memory_id": memory_id, "actor": "consumer", "reason": "batch erase", "redact": True,
         }]})
         self.assertEqual(forgotten["succeeded"], 1)
 
     def test_host_vectors_reembed_and_durable_retention_jobs(self) -> None:
-        memory_id = nextral.ingest(self.ingest_request())["record_id"]
+        memory_id = self.client.ingest(self.ingest_request())["record_id"]
         suffix = uuid.uuid4().hex
         plan = nextral.reembed_plan({
             "tenant_id": self.scope["tenant_id"],
@@ -175,57 +180,57 @@ class InstalledConsumerTests(unittest.TestCase):
             "target_embedding_provider": "external_callback",
             "target_embedding_model": "consumer-host",
         })
-        report = nextral.execute_reembed({
+        report = self.client.execute_reembed({
             "plan": plan, "user_id": self.scope["user_id"],
             "vectors": [{"memory_id": memory_id, "vector": [0.0, 1.0]}],
             "target_dimension": 2, "cutover": True,
         })
         self.assertEqual(report["status"], "completed")
         self.assertEqual(report["validated_count"], 1)
-        job = nextral.enqueue_job({
+        job = self.client.enqueue_job({
             **self.scope, "session_id": suffix, "trigger": "retention",
             "run_at": "1", "memory_ids": [memory_id], "redact": True,
         })
         self.assertEqual(
-            nextral.get_job(self.scope | {"job_id": job["id"]})["id"], job["id"],
+            self.client.get_job(self.scope | {"job_id": job["id"]})["id"], job["id"],
         )
-        self.assertIn(job["id"], [row["id"] for row in nextral.list_jobs(self.scope)])
-        executed = nextral.run_jobs(self.scope | {"now": str(int(time.time()))})
+        self.assertIn(job["id"], [row["id"] for row in self.client.list_jobs(self.scope)])
+        executed = self.client.run_jobs(self.scope | {"now": str(int(time.time()))})
         self.assertTrue(any(row["id"] == job["id"] and row["status"] == "completed" for row in executed))
-        self.assertEqual(nextral.retrieve(self.retrieval_request())["items"], [])
+        self.assertEqual(self.client.retrieve(self.retrieval_request())["items"], [])
 
     def test_procedural_policy_crud_and_context(self) -> None:
-        response = nextral.upsert_policy({
+        response = self.client.upsert_policy({
             **self.scope, "name": "format", "body": "Use concise bullet points",
             "privacy_level": "private",
         })
         policy_id = response["policy"]["id"]
-        self.assertIn(policy_id, [row["id"] for row in nextral.list_policies(self.scope)])
+        self.assertIn(policy_id, [row["id"] for row in self.client.list_policies(self.scope)])
         self.assertEqual(
-            nextral.list_policies(self.scope | {"user_id": "another-user"}), [],
+            self.client.list_policies(self.scope | {"user_id": "another-user"}), [],
         )
-        context = nextral.session_context(self.retrieval_request())
+        context = self.client.session_context(self.retrieval_request())
         self.assertIn(policy_id, context["procedural_policy_ids"])
-        removed = nextral.remove_policy(self.scope | {"policy_id": policy_id})
+        removed = self.client.remove_policy(self.scope | {"policy_id": policy_id})
         self.assertEqual(removed["status"], "removed")
-        self.assertEqual(nextral.list_policies(self.scope), [])
+        self.assertEqual(self.client.list_policies(self.scope), [])
 
     def test_structured_core_errors_and_json_errors(self) -> None:
         with self.assertRaises(nextral.InvalidInputError) as raised:
-            nextral.mcp_call("nextral.not-a-tool", {})
+            self.client.call("nextral.not-a-tool", {})
         self.assertEqual(raised.exception.code, "invalid_input")
         self.assertTrue(raised.exception.message)
         with self.assertRaises(nextral.NotFoundError) as missing:
-            nextral.forget({**self.scope, "memory_id": "absent", "actor": "consumer", "reason": "erase", "redact": True})
+            self.client.forget({**self.scope, "memory_id": "absent", "actor": "consumer", "reason": "erase", "redact": True})
         self.assertEqual(missing.exception.code, "not_found")
         with self.assertRaises(nextral.SerializationError):
-            nextral.ingest(self.ingest_request() | {"embedding": [float("nan")]})
+            self.client.ingest(self.ingest_request() | {"embedding": [float("nan")]})
         invalid = copy.deepcopy(CONFIG)
         invalid["embedding"]["dimension"] = 0
         with self.assertRaises(nextral.InvalidInputError):
             nextral.validate_config(invalid)
         with self.assertRaises(nextral.InvalidInputError) as malformed:
-            nextral.configure_runtime({"backend": "unsupported"})
+            nextral.Client({"backend": "unsupported"})
         self.assertEqual(malformed.exception.code, "invalid_input")
 
     def test_cli_execution_schema_stdin_and_files(self) -> None:
@@ -319,6 +324,8 @@ class InstalledConsumerTests(unittest.TestCase):
     def test_installed_console_entrypoint(self) -> None:
         name = "nextral.exe" if os.name == "nt" else "nextral"
         entrypoint = Path(sys.executable).parent / name
+        if not entrypoint.exists():
+            entrypoint = Path(sys.executable).parent / "Scripts" / name
         with tempfile.TemporaryDirectory(prefix="nextral-console-") as cwd:
             result = subprocess.run([str(entrypoint), "--version"], cwd=cwd, text=True, capture_output=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -334,35 +341,35 @@ class ProductionControlTests(unittest.TestCase):
         config = json.loads(Path(os.environ["NEXTRAL_PYTHON_PRODUCTION_CONFIG"]).read_text(encoding="utf-8"))
         evidence = json.loads(Path(os.environ["NEXTRAL_RESEARCH_EVIDENCE"]).read_text(encoding="utf-8"))
         self.assertEqual(config["backend"], "production_stores")
-        nextral.configure_runtime(config)
+        client = nextral.Client(config)
 
         def snapshot(state):
             return {"lane": state["current_lane"], "policy_version": state["active_policy_version"],
                     "experiment_id": state["active_experiment_id"]}
 
-        before = snapshot(nextral.experiment_status({}))
-        candidate = nextral.create_experiment({
+        before = snapshot(client.experiment_status())
+        candidate = client.create_experiment({
             "lane": "sandbox" if before["lane"] == "canary" else "canary",
             "policy_version": evidence["candidate"]["metadata"]["run"]["policy_version"],
             "description": "Installed Python measured replay " + evidence["candidate"]["metadata"]["run"]["run_id"],
         })
         candidate_request = {"experiment_id": candidate["id"]}
-        self.assertEqual(nextral.experiment_status(candidate_request)["status"], "created")
-        self.assertEqual(snapshot(nextral.experiment_status({})), before)
-        created_state = nextral.experiment_status({})
+        self.assertEqual(client.experiment_status(candidate["id"])["status"], "created")
+        self.assertEqual(snapshot(client.experiment_status()), before)
+        created_state = client.experiment_status()
 
         def expect_reason_required():
             with self.assertRaises(nextral.InvalidInputError) as blank:
-                nextral.rollback_experiment(candidate_request | {"reason": "  "})
+                client.rollback_experiment(candidate_request | {"reason": "  "})
             self.assertEqual(blank.exception.code, "invalid_input")
             with self.assertRaises(nextral.InvalidInputError):
-                nextral.rollback_experiment(candidate_request)
+                client.rollback_experiment(candidate_request)
 
         with self.assertRaises(nextral.ConflictError) as unpromoted:
-            nextral.rollback_experiment(candidate_request | {"reason": "Not promoted"})
+            client.rollback_experiment(candidate_request | {"reason": "Not promoted"})
         self.assertEqual(unpromoted.exception.code, "conflict")
         expect_reason_required()
-        self.assertEqual(nextral.experiment_status({}), created_state)
+        self.assertEqual(client.experiment_status(), created_state)
 
         def record(result):
             result.update(experiment_id=candidate["id"],
@@ -374,10 +381,10 @@ class ProductionControlTests(unittest.TestCase):
                     json.dumps(result, indent=2), encoding="utf-8")
 
         try:
-            promoted = nextral.promote_experiment(candidate_request | {"evidence": evidence})
+            promoted = client.promote_experiment(candidate_request | {"evidence": evidence})
         except nextral.ConflictError as error:
             self.assertEqual(error.code, "conflict")
-            self.assertEqual(nextral.experiment_status({}), created_state)
+            self.assertEqual(client.experiment_status(), created_state)
             record({"status": "promotion_rejected", "error": error.as_dict(),
                     "control_unchanged": True, "promotion_rollback_verified": False})
             self.skipTest(f"Genuine evidence rejected: {error.message}; positive promotion/rollback not verified.")
@@ -388,22 +395,23 @@ class ProductionControlTests(unittest.TestCase):
             self.assertEqual(promoted["rollback_target"], before)
             active = {"lane": candidate["lane"], "policy_version": candidate["policy_version"],
                       "experiment_id": candidate["id"]}
-            self.assertEqual(snapshot(nextral.experiment_status({})), active)
-            self.assertEqual(nextral.experiment_status(candidate_request)["status"], "promoted")
+            self.assertEqual(snapshot(client.experiment_status()), active)
+            self.assertEqual(client.experiment_status(candidate["id"])["status"], "promoted")
             expect_reason_required()
-            self.assertEqual(snapshot(nextral.experiment_status({})), active)
+            self.assertEqual(snapshot(client.experiment_status()), active)
             reason = "Restore the prior policy after installed Python measured smoke"
-            rolled_back = nextral.rollback_experiment(candidate_request | {"reason": reason})
+            rolled_back = client.rollback_experiment(candidate_request | {"reason": reason})
             self.assertEqual(rolled_back["status"], "rolled_back")
             self.assertEqual(rolled_back["rollback_reason"], reason)
             self.assertTrue(rolled_back["rollback_id"])
-            self.assertEqual(snapshot(nextral.experiment_status({})), before)
-            self.assertEqual(nextral.experiment_status(candidate_request)["status"], "rolled_back")
+            self.assertEqual(snapshot(client.experiment_status()), before)
+            self.assertEqual(client.experiment_status(candidate["id"])["status"], "rolled_back")
             record({"status": "promoted_and_rolled_back", "before": before, "promoted": active,
-                    "restored": snapshot(nextral.experiment_status({})), "promotion_rollback_verified": True})
+                    "restored": snapshot(client.experiment_status()), "promotion_rollback_verified": True})
         finally:
-            if nextral.experiment_status({})["active_experiment_id"] == candidate["id"]:
-                nextral.rollback_experiment(candidate_request | {"reason": "Cleanup after failed Python control smoke"})
+            if client.experiment_status()["active_experiment_id"] == candidate["id"]:
+                client.rollback_experiment(candidate_request | {"reason": "Cleanup after failed Python control smoke"})
+            client.close()
 
 
 if __name__ == "__main__":

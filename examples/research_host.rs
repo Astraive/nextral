@@ -83,10 +83,23 @@ struct DeliveryTransport {
     protocol: String,
     response_status: u16,
 }
+static CLIENT: parking_lot::Mutex<Option<std::sync::Arc<package::RuntimeClient>>> =
+    parking_lot::Mutex::new(None);
 
 fn call(tool: &str, payload: Value) -> CoreResult<Value> {
-    let request = json!({"tool":tool,"payload_json":payload.to_string()});
-    let output = package::mcp_call_json(&request.to_string())
+    let client = CLIENT
+        .lock()
+        .clone()
+        .ok_or_else(|| CoreError::Conflict("client not initialized".into()))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let output = rt
+        .block_on(client.call_json(
+            tool,
+            payload.to_string(),
+            package::CallOptions::default(),
+        ))
         .map_err(|error| CoreError::Conflict(format!("{}: {}", error.code, error.message)))?;
     Ok(serde_json::from_str(&output)?)
 }
@@ -252,8 +265,11 @@ fn run() -> CoreResult<HostResponse> {
             "reference research host requires production_stores".into(),
         ));
     }
-    package::configure_runtime_json(&config_json)
-        .map_err(|error| CoreError::Conflict(error.message))?;
+    let client = std::sync::Arc::new(
+        package::RuntimeClient::from_config(config.clone())
+            .map_err(|error| CoreError::Conflict(error.message))?,
+    );
+    *CLIENT.lock() = Some(client);
     let mut input = String::new();
     io::stdin()
         .take(10 * 1024 * 1024 + 1)

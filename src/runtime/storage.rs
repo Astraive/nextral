@@ -21,6 +21,9 @@ use crate::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use parking_lot::Mutex;
+use std::sync::Arc;
+
 
 pub struct ProductionStore {
     pub config: NextralConfig,
@@ -31,9 +34,50 @@ pub struct ProductionStore {
     pub archive: S3Adapter,
     pub collection: String,
 }
+#[derive(Clone)]
 pub enum RuntimeStore {
-    Test(Box<TestMemoryStore>),
-    Production(Box<ProductionStore>),
+    Test(Arc<Mutex<TestMemoryStore>>),
+    Production(Arc<ProductionStore>),
+}
+
+pub struct ProductionStoreView<'a> {
+    pub store: &'a ProductionStore,
+    pub policy: Option<crate::runtime::intelligence::RuntimeSnapshot>,
+}
+
+impl<'a> ProductionStoreView<'a> {
+    pub fn new(store: &'a ProductionStore) -> Self {
+        Self {
+            store,
+            policy: None,
+        }
+    }
+    pub fn with_policy(
+        store: &'a ProductionStore,
+        policy: Option<crate::runtime::intelligence::RuntimeSnapshot>,
+    ) -> Self {
+        Self { store, policy }
+    }
+}
+
+pub struct TestStoreView<'a> {
+    pub store: &'a Mutex<TestMemoryStore>,
+    pub policy: Option<crate::runtime::intelligence::RuntimeSnapshot>,
+}
+
+impl<'a> TestStoreView<'a> {
+    pub fn new(store: &'a Mutex<TestMemoryStore>) -> Self {
+        Self {
+            store,
+            policy: None,
+        }
+    }
+    pub fn with_policy(
+        store: &'a Mutex<TestMemoryStore>,
+        policy: Option<crate::runtime::intelligence::RuntimeSnapshot>,
+    ) -> Self {
+        Self { store, policy }
+    }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EmbeddingRoute {
@@ -345,9 +389,9 @@ impl RuntimeStore {
     pub fn configured(config: NextralConfig) -> CoreResult<Self> {
         config.validate()?;
         match config.backend {
-            RuntimeBackend::TestMemory => Ok(Self::Test(Box::default())),
+            RuntimeBackend::TestMemory => Ok(Self::Test(Arc::new(Mutex::new(TestMemoryStore::new())))),
             RuntimeBackend::ProductionStores => {
-                Ok(Self::Production(Box::new(ProductionStore::new(config)?)))
+                Ok(Self::Production(Arc::new(ProductionStore::new(config)?)))
             }
         }
     }
@@ -386,6 +430,7 @@ impl RuntimeStore {
     pub fn reminders(&self, tenant: &str, user: &str) -> CoreResult<Vec<ReminderRecord>> {
         match self {
             Self::Test(s) => Ok(s
+                .lock()
                 .reminders
                 .iter()
                 .filter(|r| r.tenant_id == tenant && r.user_id == user)
@@ -397,6 +442,7 @@ impl RuntimeStore {
     pub fn state_list(&self, tenant: &str, prefix: &str) -> CoreResult<Vec<(String, Value)>> {
         match self {
             Self::Test(s) => Ok(s
+                .lock()
                 .lifecycle_state
                 .iter()
                 .filter(|((t, k), _)| t == tenant && k.starts_with(prefix))
@@ -448,18 +494,19 @@ impl RuntimeStore {
         audit.user_id = Some(policy.user_id.clone());
         let backend = match self {
             Self::Test(s) => {
-                if let Some(previous) = s
+                let mut guard = s.lock();
+                if let Some(previous) = guard
                     .lifecycle_state
                     .get(&(policy.tenant_id.clone(), key.clone()))
                 {
                     policy.created_at =
                         serde_json::from_value::<ProceduralPolicy>(previous.clone())?.created_at;
                 }
-                s.lifecycle_state.insert(
+                guard.lifecycle_state.insert(
                     (policy.tenant_id.clone(), key),
                     serde_json::to_value(&policy)?,
                 );
-                s.emit_audit(audit)?;
+                guard.emit_audit(audit)?;
                 "test_memory"
             }
             Self::Production(s) => {
@@ -499,10 +546,11 @@ impl RuntimeStore {
         audit.user_id = Some(u.into());
         let backend = match self {
             Self::Test(s) => {
-                s.lifecycle_state
+                let mut guard = s.lock();
+                guard.lifecycle_state
                     .remove(&(t.into(), key))
                     .ok_or_else(|| CoreError::NotFound("procedural policy not found".into()))?;
-                s.emit_audit(audit)?;
+                guard.emit_audit(audit)?;
                 "test_memory"
             }
             Self::Production(s) => {
@@ -542,7 +590,7 @@ impl ProductionStore {
             archive.hardening.require_tls = true;
         }
         Ok(Self {
-            postgres: PostgresAdapter::new(&stores.postgres_url)?,
+            postgres: PostgresAdapter::from_config(stores)?,
             redis,
             qdrant,
             neo4j,
@@ -796,7 +844,7 @@ impl ProductionStore {
         ])
     }
 }
-impl MemoryIndexStore for ProductionStore {
+impl<'a> MemoryIndexStore for &'a ProductionStore {
     fn prepare_retrieval(&self, r: &mut crate::retrieval::RetrievalRequest) -> CoreResult<()> {
         let route = self.route(&r.tenant_id, &r.user_id)?;
         validate_vector(
@@ -993,7 +1041,7 @@ impl MemoryIndexStore for ProductionStore {
         Ok(v)
     }
 }
-impl GraphStore for ProductionStore {
+impl<'a> GraphStore for &'a ProductionStore {
     fn merge_node(&mut self, n: GraphNode) -> CoreResult<()> {
         self.neo4j.merge_node(&n)
     }
@@ -1014,12 +1062,12 @@ impl GraphStore for ProductionStore {
         self.postgres.current_graph_memory_ids(&scope, &ids, p)
     }
 }
-impl AuditSink for ProductionStore {
+impl<'a> AuditSink for &'a ProductionStore {
     fn emit_audit(&mut self, e: AuditEvent) -> CoreResult<()> {
         self.postgres.write_audit(&audit_write(&e)?)
     }
 }
-impl SessionStore for ProductionStore {
+impl<'a> SessionStore for &'a ProductionStore {
     fn eligible_sessions(
         &self,
         t: &str,
@@ -1131,7 +1179,7 @@ impl SessionStore for ProductionStore {
         Ok((self.postgres.session_tail(&s, id, limit)?, degraded_reasons))
     }
 }
-impl ReminderStore for ProductionStore {
+impl<'a> ReminderStore for &'a ProductionStore {
     fn upsert_reminder(&mut self, r: ReminderRecord) -> CoreResult<()> {
         self.postgres.upsert_reminder(&r)
     }
@@ -1159,7 +1207,38 @@ impl ReminderStore for ProductionStore {
     }
 }
 
-macro_rules! dispatch {($trait:ident {$($name:ident($receiver:ty $(,$arg:ident:$ty:ty)*)->$ret:ty;)*})=>{impl $trait for RuntimeStore{$(fn $name(self:$receiver $(,$arg:$ty)*)->$ret{match self{RuntimeStore::Test(s)=>s.$name($($arg),*),RuntimeStore::Production(s)=>s.$name($($arg),*)}})*}}}
+macro_rules! dispatch {
+    ($trait:ident {
+        $($name:ident($receiver:ty $(,$arg:ident:$ty:ty)*)->$ret:ty;)*
+    }) => {
+        impl $trait for RuntimeStore {
+            $(
+                fn $name(self: $receiver $(,$arg:$ty)*) -> $ret {
+                    match self {
+                        RuntimeStore::Test(s) => s.lock().$name($($arg),*),
+                        RuntimeStore::Production(s) => (&**s).$name($($arg),*),
+                    }
+                }
+            )*
+        }
+        impl<'a> $trait for ProductionStoreView<'a> {
+            $(
+                fn $name(self: $receiver $(,$arg:$ty)*) -> $ret {
+                    #[allow(unused_mut)]
+                    let mut store_ref = self.store;
+                    store_ref.$name($($arg),*)
+                }
+            )*
+        }
+        impl<'a> $trait for TestStoreView<'a> {
+            $(
+                fn $name(self: $receiver $(,$arg:$ty)*) -> $ret {
+                    self.store.lock().$name($($arg),*)
+                }
+            )*
+        }
+    };
+}
 dispatch!(MemoryIndexStore {
  prepare_retrieval(&Self,r:&mut crate::retrieval::RetrievalRequest)->CoreResult<()>;
  prepare_embedding(&Self,r:&mut MemoryRecord,v:Option<&[f32]>)->CoreResult<()>;
@@ -1429,7 +1508,7 @@ impl LifecycleStore for TestMemoryStore {
         self.lifecycle_save(t, &format!("alias/{s}/{u}"), &json!(shadow))
     }
 }
-impl LifecycleStore for ProductionStore {
+impl<'a> LifecycleStore for &'a ProductionStore {
     fn lifecycle_list(&self, t: &str, p: &str) -> CoreResult<Vec<Value>> {
         Ok(self
             .postgres

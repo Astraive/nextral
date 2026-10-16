@@ -21,12 +21,7 @@ fn test_config() -> NextralConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_protocols_share_runtime_and_execute_every_declared_operation() {
     let config = test_config();
-    let state = tokio::task::spawn_blocking(move || {
-        crate::package::configure_runtime_json(&serde_json::to_string(&config).unwrap()).unwrap();
-        ServiceState::new(config).unwrap()
-    })
-    .await
-    .unwrap();
+    let state = ServiceState::new(config).unwrap();
     let http_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let grpc_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let graphql_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

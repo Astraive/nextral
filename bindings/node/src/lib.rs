@@ -1,11 +1,18 @@
 //! Private JSON transport for the typed JavaScript package.
 
-use napi::{bindgen_prelude::AsyncTask, Env, Error, Result, Task};
+use napi::{Error, Result};
 use napi_derive::napi;
+use std::sync::Arc;
+use nextral::package::{CallOptions, RuntimeClient};
 
 fn package_error(error: nextral::package::PackageError) -> Error {
     Error::from_reason(
-        serde_json::json!({ "code": error.code, "message": error.message }).to_string(),
+        serde_json::json!({
+            "code": error.code,
+            "message": error.message,
+            "execution_status": error.execution_status,
+        })
+        .to_string(),
     )
 }
 
@@ -22,43 +29,93 @@ pub fn validate_config(config_json: String) -> Result<String> {
 }
 
 #[napi]
-pub fn configure_runtime(config_json: String) -> Result<String> {
-    nextral::package::configure_runtime_json(&config_json).map_err(package_error)
+pub struct Client {
+    client: Arc<RuntimeClient>,
 }
 
 #[napi]
-pub fn mcp_call(request_json: String) -> Result<String> {
-    nextral::package::mcp_call_json(&request_json).map_err(package_error)
+pub struct CallTicket {
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
-pub struct ServiceHostsTask {
-    config_json: String,
-    modes_json: String,
+#[napi]
+impl CallTicket {
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancellation_token.cancel();
+    }
 }
 
-impl Task for ServiceHostsTask {
-    type Output = String;
-    type JsValue = String;
+#[napi]
+pub struct ServiceHandle {
+    handle: Arc<nextral::package::ServiceHandle>,
+}
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        nextral::package::run_service_hosts_json(&self.config_json, &self.modes_json)
+#[napi]
+impl ServiceHandle {
+    #[napi]
+    pub async fn shutdown(&self, timeout_ms: Option<u32>) -> Result<()> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30000) as u64);
+        self.handle.shutdown(timeout).await.map_err(package_error)
+    }
+
+    #[napi]
+    pub fn binds(&self) -> Vec<String> {
+        self.handle.binds().to_vec()
+    }
+}
+
+#[napi]
+impl Client {
+    #[napi(factory)]
+    pub fn create(config_json: String) -> Result<Self> {
+        let config = nextral::config::load_config(&config_json).map_err(|e| package_error(e.into()))?;
+        let client = RuntimeClient::from_config(config).map_err(package_error)?;
+        Ok(Self {
+            client: Arc::new(client),
+        })
+    }
+
+    #[napi]
+    pub fn create_ticket(&self) -> CallTicket {
+        CallTicket {
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    #[napi]
+    pub async fn call_json_with_ticket(
+        &self,
+        tool: String,
+        payload_json: String,
+        timeout_ms: Option<u32>,
+        ticket: &CallTicket,
+    ) -> Result<String> {
+        self.client
+            .call_json(
+                &tool,
+                payload_json,
+                CallOptions {
+                    timeout_ms: timeout_ms.map(|t| t as u64),
+                    cancellation_token: Some(ticket.cancellation_token.clone()),
+                },
+            )
+            .await
             .map_err(package_error)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
+    #[napi]
+    pub async fn close(&self, timeout_ms: Option<u32>) -> Result<String> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30000) as u64);
+        let report = self.client.close(timeout).await.map_err(package_error)?;
+        serde_json::to_string(&report).map_err(|e| Error::from_reason(e.to_string()))
     }
-}
 
-#[napi]
-pub fn run_service_hosts(config_json: String, modes_json: String) -> AsyncTask<ServiceHostsTask> {
-    AsyncTask::new(ServiceHostsTask {
-        config_json,
-        modes_json,
-    })
-}
-
-#[napi]
-pub fn stop_serving() {
-    nextral::api::request_service_shutdown();
+    #[napi]
+    pub async fn serve(&self) -> Result<ServiceHandle> {
+        let handle = self.client.serve().await.map_err(package_error)?;
+        Ok(ServiceHandle {
+            handle: Arc::new(handle),
+        })
+    }
 }

@@ -20,14 +20,14 @@ use std::{
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
-static SERVICE: Mutex<Option<Service>> = Mutex::new(None);
+static ACTIVE: Mutex<Option<ActiveService>> = Mutex::new(None);
 static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACE_QUEUE: LazyLock<Mutex<VecDeque<SpanData>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(2048)));
 static TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static TRACES_DROPPED: AtomicU64 = AtomicU64::new(0);
 const BOUNDS_MS: [u64; 7] = [1, 5, 10, 40, 100, 500, 1000];
-const COUNTERS: [(&str, &str); 16] = [
+const COUNTERS: [(&str, &str); 22] = [
     ("nextral_ingest_accepted_total", "Accepted memory writes"),
     ("nextral_ingest_rejected_total", "Rejected memory writes"),
     ("nextral_retrieval_total", "Completed retrieval attempts"),
@@ -80,6 +80,12 @@ const COUNTERS: [(&str, &str); 16] = [
         "nextral_jobs_age_seconds_total",
         "Age in seconds of observed durable jobs",
     ),
+    ("nextral_admission_admitted_total", "Calls admitted to execution"),
+    ("nextral_admission_rejected_total", "Calls rejected by admission bounds"),
+    ("nextral_queue_timeout_total", "Calls timed out in admission queue"),
+    ("nextral_execution_timeout_total", "Calls timed out during execution"),
+    ("nextral_worker_ticks_total", "Worker loop ticks executed"),
+    ("nextral_worker_errors_total", "Worker loop execution errors"),
 ];
 const STAGES: [&str; 3] = ["vector", "graph", "merge"];
 const BACKENDS: [&str; 5] = ["postgres", "redis", "qdrant", "neo4j", "s3"];
@@ -129,7 +135,7 @@ impl Histogram {
 
 struct Metrics {
     started_ns: u128,
-    counters: [AtomicU64; 16],
+    counters: [AtomicU64; 22],
     store_errors: [AtomicU64; 5],
     stages: [Histogram; 3],
 }
@@ -138,7 +144,7 @@ impl Metrics {
     fn new() -> Self {
         Self {
             started_ns: unix_ns(),
-            counters: [const { AtomicU64::new(0) }; 16],
+            counters: [const { AtomicU64::new(0) }; 22],
             store_errors: [const { AtomicU64::new(0) }; 5],
             stages: [const { Histogram::new() }; 3],
         }
@@ -276,6 +282,34 @@ pub fn record_job(outcome: JobOutcome, age_seconds: u64) {
     }
 }
 
+/// Record admission result.
+pub fn record_admission(admitted: bool) {
+    if let Some(metrics) = active() {
+        metrics.add(if admitted { 16 } else { 17 }, 1);
+    }
+}
+
+/// Record queue timeout.
+pub fn record_queue_timeout() {
+    if let Some(metrics) = active() {
+        metrics.add(18, 1);
+    }
+}
+
+/// Record execution timeout.
+pub fn record_execution_timeout() {
+    if let Some(metrics) = active() {
+        metrics.add(19, 1);
+    }
+}
+
+/// Record worker loop tick.
+pub fn record_worker_tick(success: bool) {
+    if let Some(metrics) = active() {
+        metrics.add(if success { 20 } else { 21 }, 1);
+    }
+}
+
 /// Record a backend error without storing its potentially sensitive message.
 pub fn record_store_error(backend: StoreBackend) {
     if let Some(metrics) = active() {
@@ -327,7 +361,76 @@ pub fn render_prometheus() -> String {
 struct Service {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    #[allow(dead_code)]
     config: ObservabilityConfig,
+}
+struct ActiveService {
+    service: Service,
+    config: ObservabilityConfig,
+    ref_count: usize,
+}
+
+#[derive(Debug)]
+pub struct ObservabilityLease {
+    active: bool,
+}
+
+impl Drop for ObservabilityLease {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = release_lease();
+        }
+    }
+}
+
+pub fn acquire_lease(config: &ObservabilityConfig) -> CoreResult<ObservabilityLease> {
+    if !config.enabled && config.prometheus_bind.is_none() && config.otlp_endpoint.is_none() {
+        return Ok(ObservabilityLease { active: false });
+    }
+    let mut guard = ACTIVE
+        .lock()
+        .map_err(|_| CoreError::Io("telemetry configuration lock poisoned".to_string()))?;
+    if let Some(active) = guard.as_mut() {
+        if active.config != *config {
+            return Err(CoreError::Conflict(
+                "conflicting enabled observability configuration is already active".to_string(),
+            ));
+        }
+        active.ref_count += 1;
+        Ok(ObservabilityLease { active: true })
+    } else {
+        let service = start_service(config)?;
+        ENABLED.store(true, Ordering::Relaxed);
+        TRACE_ENABLED.store(config.otlp_endpoint.is_some(), Ordering::Relaxed);
+        *guard = Some(ActiveService {
+            service,
+            config: config.clone(),
+            ref_count: 1,
+        });
+        Ok(ObservabilityLease { active: true })
+    }
+}
+
+pub fn release_lease() -> CoreResult<()> {
+    let mut guard = ACTIVE
+        .lock()
+        .map_err(|_| CoreError::Io("telemetry configuration lock poisoned".to_string()))?;
+    if let Some(active) = guard.as_mut() {
+        active.ref_count = active.ref_count.saturating_sub(1);
+        if active.ref_count == 0 {
+            if let Some(active) = guard.take() {
+                ENABLED.store(false, Ordering::Relaxed);
+                TRACE_ENABLED.store(false, Ordering::Relaxed);
+                drop(active.service);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn configure(config: &ObservabilityConfig) -> CoreResult<()> {
+    let _ = acquire_lease(config)?;
+    Ok(())
 }
 
 impl Drop for Service {
@@ -344,18 +447,9 @@ impl Drop for Service {
     }
 }
 
-/// Configure optional endpoints. Invalid or occupied endpoints fail explicitly.
-/// OTLP uses HTTP/JSON `/v1/metrics` and `/v1/traces` under a collector base URL.
-pub fn configure(config: &ObservabilityConfig) -> CoreResult<()> {
-    let mut current = SERVICE
-        .lock()
-        .map_err(|_| CoreError::Io("telemetry configuration lock poisoned".to_string()))?;
-    if current
-        .as_ref()
-        .is_some_and(|service| service.config == *config)
-    {
-        return Ok(());
-    }
+fn start_service(config: &ObservabilityConfig) -> CoreResult<Service> {
+    // Configure optional endpoints. Invalid or occupied endpoints fail explicitly.
+    // OTLP uses HTTP/JSON `/v1/metrics` and `/v1/traces` under a collector base URL.
     let otlp_url = config.otlp_endpoint.as_deref().map(|endpoint| {
         endpoint
             .trim_end_matches('/')
@@ -384,12 +478,6 @@ pub fn configure(config: &ObservabilityConfig) -> CoreResult<()> {
     } else {
         None
     };
-    ENABLED.store(false, Ordering::Relaxed);
-    TRACE_ENABLED.store(false, Ordering::Relaxed);
-    drop(current.take());
-    if !config.enabled {
-        return Ok(());
-    }
     LazyLock::force(&METRICS);
     let stop = Arc::new(AtomicBool::new(false));
     let mut service = Service {
@@ -469,10 +557,7 @@ pub fn configure(config: &ObservabilityConfig) -> CoreResult<()> {
                 .map_err(|error| CoreError::Io(error.to_string()))?,
         );
     }
-    *current = Some(service);
-    ENABLED.store(true, Ordering::Relaxed);
-    TRACE_ENABLED.store(config.otlp_endpoint.is_some(), Ordering::Relaxed);
-    Ok(())
+    Ok(service)
 }
 
 async fn wait_for_stop(stop: Arc<AtomicBool>) {
@@ -524,7 +609,7 @@ fn otlp_spans(spans: &[SpanData]) -> serde_json::Value {
 pub fn shutdown() -> CoreResult<()> {
     ENABLED.store(false, Ordering::Relaxed);
     TRACE_ENABLED.store(false, Ordering::Relaxed);
-    let mut current = SERVICE
+    let mut current = ACTIVE
         .lock()
         .map_err(|_| CoreError::Io("telemetry configuration lock poisoned".into()))?;
     drop(current.take());

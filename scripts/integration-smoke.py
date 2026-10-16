@@ -549,8 +549,8 @@ def main():
             consumer.mkdir()
             (consumer / "package.json").write_text('{"private":true}')
             run(["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", package_path], cwd=consumer, env=env)
-            python_code = "import json,sys,nextral; nextral.configure_runtime(json.load(open(sys.argv[1]))); print(json.dumps(nextral.mcp_call(sys.argv[2],json.loads(sys.argv[3]))))"
-            node_code = "const fs=require('node:fs'),n=require('nextral');n.configureRuntime(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log(JSON.stringify(n[process.argv[2]](JSON.parse(process.argv[3]))));"
+            python_code = "import json,sys,nextral; client=nextral.Client(json.load(open(sys.argv[1]))); print(json.dumps(client.call(sys.argv[2],json.loads(sys.argv[3])))); client.close()"
+            node_code = "const fs=require('node:fs'),n=require('nextral');(async()=>{const c=await n.Client.create(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log(JSON.stringify(await c[process.argv[2]](JSON.parse(process.argv[3]))));await c.close();})().catch(e=>{console.error(e);process.exit(1);});"
             def py_call(tool, payload):
                 return json_run([python, "-I", "-c", python_code, config_path, tool, json.dumps(payload)], cwd=work, env=env)
             def node_call(method, payload):
