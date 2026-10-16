@@ -1134,7 +1134,11 @@ fn dispatch_tool_impl(
             decode!(crate::runtime::prospective::RunLifecycleJobsRequest)
         )?),
         "nextral.jobs.list" => {
-            let mut jobs = store.lifecycle_list(tenant, &format!("scheduled-job/{user}/"))?;
+            let mut jobs: Vec<serde_json::Value> = store
+                .lifecycle_job_list(tenant, user)?
+                .into_iter()
+                .map(|j| serde_json::to_value(j).unwrap())
+                .collect();
             for checkpoint in store.lifecycle_list(tenant, &format!("reembed/{user}/"))? {
                 let report = checkpoint["report"].clone();
                 jobs.push(serde_json::json!({"id":report["plan_id"],"job_type":"reembed","status":report["status"],"report":report}));
@@ -1144,10 +1148,8 @@ fn dispatch_tool_impl(
         "nextral.jobs.get" => {
             let id = string_field("job_id")?;
             crate::store::validate_scope_component(id, "job_id")?;
-            if let Some(job) =
-                store.lifecycle_load(tenant, &format!("scheduled-job/{user}/{id}"))?
-            {
-                job
+            if let Some(job) = store.lifecycle_job_get(tenant, user, id)? {
+                value!(job)
             } else if let Some(checkpoint) =
                 store.lifecycle_load(tenant, &format!("reembed/{user}/{id}"))?
             {

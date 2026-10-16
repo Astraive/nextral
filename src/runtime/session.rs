@@ -77,7 +77,7 @@ where
 {
     let tenant = request.tenant_id.clone();
     let user = request.user_id.clone();
-    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store| {
+    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store, _claim| {
         append_claimed(store, request, hot_tail_limit)
     })
 }
@@ -159,11 +159,7 @@ pub fn assemble_working_context<T>(
 where
     T: SessionStore + MemoryIndexStore + GraphStore + LifecycleStore,
 {
-    let tenant = request.tenant_id.clone();
-    let user = request.user_id.clone();
-    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store| {
-        assemble_claimed(store, request, hot_tail_limit)
-    })
+    assemble_claimed(store, request, hot_tail_limit)
 }
 
 fn assemble_claimed<T>(

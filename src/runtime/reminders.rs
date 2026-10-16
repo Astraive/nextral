@@ -7,7 +7,7 @@ use crate::{
     memory::{deterministic_id, now_timestamp, MemoryStatus, PrivacyLevel},
     runtime::{
         intelligence::Severity,
-        lifecycle::{acknowledged, durable_save, timestamp_epoch, worker_owner, LifecycleStore},
+        lifecycle::{acknowledged, LifecycleStore},
     },
     store::{AuditSink, MemoryIndexStore, ReminderStore},
 };
@@ -98,13 +98,14 @@ where
 {
     let tenant = request.tenant_id.clone();
     let user = request.user_id.clone();
-    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store| {
-        schedule_claimed(store, request)
+    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store, claim| {
+        schedule_claimed(store, claim, request)
     })
 }
 
 fn schedule_claimed<T>(
     store: &mut T,
+    claim: &crate::runtime::lifecycle::LeaseClaim,
     request: ScheduleReminderRequest,
 ) -> CoreResult<ScheduleReminderResponse>
 where
@@ -187,14 +188,7 @@ where
         transitions: Vec::new(),
         receipt: None,
     };
-    let receipt = durable_save(
-        store,
-        &reminder.tenant_id,
-        &key,
-        &serde_json::to_value(&state)?,
-    )?;
-    store.upsert_reminder(reminder.clone())?;
-    store.emit_audit(AuditEvent::new(
+    let audit = AuditEvent::new(
         deterministic_id(&[&reminder.id, "scheduled"]),
         &reminder.tenant_id,
         &reminder.user_id,
@@ -202,7 +196,15 @@ where
         "reminder",
         Some(reminder.id.clone()),
         "reminder scheduled",
-    ))?;
+    );
+    let state_val = serde_json::to_value(&state)?;
+    store.commit_reminder_delivery(claim, &key, &state_val, &reminder, &[audit])?;
+    let receipt = StoreReceipt {
+        backend: "test_memory".into(),
+        operation: "schedule".into(),
+        target_id: Some(reminder.id.clone()),
+        status: "ok".into(),
+    };
     Ok(ScheduleReminderResponse {
         trace_id,
         reminder,
@@ -223,13 +225,14 @@ where
     let tenant = reminder.tenant_id.clone();
     let user = reminder.user_id.clone();
     crate::store::validate_scope_component(&reminder.id, "reminder_id")?;
-    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store| {
-        transition_claimed(store, reminder, to, actor, reason)
+    crate::runtime::lifecycle::with_user_lease(store, &tenant, &user, |store, claim| {
+        transition_claimed(store, claim, reminder, to, actor, reason)
     })
 }
 
 fn transition_claimed<T>(
     store: &mut T,
+    claim: &crate::runtime::lifecycle::LeaseClaim,
     reminder: ReminderRecord,
     to: ReminderStatus,
     actor: &str,
@@ -250,7 +253,7 @@ where
         };
     let transition = state.reminder.transition(to, actor, reason)?;
     state.transitions.push(transition.clone());
-    persist_delivery(store, &state)?;
+    persist_delivery(store, claim, &state)?;
     Ok(transition)
 }
 
@@ -272,40 +275,17 @@ where
             "actor, positive lease and retry delay are required".into(),
         ));
     }
-    let owner = worker_owner();
-    let lock = format!("privacy/{}", request.user_id);
-    if !store.lifecycle_claim(
-        &request.tenant_id,
-        &lock,
-        &owner,
-        timestamp_epoch(&now_timestamp())?,
-        request.lease_seconds,
-    )? {
-        return Err(CoreError::InvalidInput(
-            "user lifecycle is leased by another worker".into(),
-        ));
-    }
-    let result = execute_claimed(store, &request, now, now_nanos, &owner, &lock);
-    let release = store.lifecycle_release(&request.tenant_id, &lock, &owner);
-    match result {
-        Ok(value) => {
-            release?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = release;
-            Err(error)
-        }
-    }
+    crate::runtime::lifecycle::with_user_lease(store, &request.tenant_id, &request.user_id, |store, claim| {
+        execute_claimed(store, claim, &request, now, now_nanos)
+    })
 }
 
 fn execute_claimed<T>(
     store: &mut T,
+    claim: &crate::runtime::lifecycle::LeaseClaim,
     request: &ExecuteDueRemindersRequest,
     now: u64,
     now_nanos: u128,
-    owner: &str,
-    lock: &str,
 ) -> CoreResult<ExecuteDueRemindersResponse>
 where
     T: ReminderStore + MemoryIndexStore + LifecycleStore + AuditSink,
@@ -333,15 +313,9 @@ where
                 "reminder store returned an out-of-scope reminder".into(),
             ));
         }
-        if !store.lifecycle_claim(
-            &request.tenant_id,
-            lock,
-            owner,
-            timestamp_epoch(&now_timestamp())?,
-            request.lease_seconds,
-        )? {
-            return Err(CoreError::InvalidInput(
-                "worker lost lifecycle lease".into(),
+        if !store.lifecycle_renew_fenced(claim, request.lease_seconds)? {
+            return Err(CoreError::LeaseLost(
+                "user lifecycle lease lost during delivery".into(),
             ));
         }
         let mut state: DeliveryState = if let Some(value) =
@@ -383,7 +357,7 @@ where
             }
             state.reminder.terminal_reason = Some(ReminderTerminalReason::Delivered);
             state.reminder.next_attempt_at = None;
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response
                 .results
                 .push(dispatch_result(&state, request, true, "delivered"));
@@ -403,7 +377,7 @@ where
                     ReminderTerminalReason::SourceUnavailable,
                     "source_unavailable",
                 )?;
-                persist_delivery(store, &state)?;
+                persist_delivery(store, claim, &state)?;
                 response.results.push(dispatch_result(
                     &state,
                     request,
@@ -429,7 +403,7 @@ where
                 ReminderTerminalReason::SourceUnavailable,
                 "source_unavailable",
             )?;
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response.results.push(dispatch_result(
                 &state,
                 request,
@@ -449,7 +423,7 @@ where
                 ReminderTerminalReason::PrivacyDenied,
                 "privacy_denied",
             )?;
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response
                 .results
                 .push(dispatch_result(&state, request, false, "privacy_denied"));
@@ -467,7 +441,7 @@ where
                 ReminderTerminalReason::ChannelDenied,
                 "channel_denied",
             )?;
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response
                 .results
                 .push(dispatch_result(&state, request, false, "channel_denied"));
@@ -487,7 +461,7 @@ where
                 ReminderTerminalReason::Expired,
                 "expired",
             )?;
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response
                 .results
                 .push(dispatch_result(&state, request, false, "expired"));
@@ -507,7 +481,7 @@ where
                     &request.due_at_or_before,
                     next.saturating_sub(now),
                 )?);
-            persist_delivery(store, &state)?;
+            persist_delivery(store, claim, &state)?;
             response
                 .results
                 .push(dispatch_result(&state, request, false, "quiet_hours"));
@@ -540,22 +514,18 @@ where
                 "dispatch_started",
             )?;
         }
-        persist_delivery(store, &state)?;
+        persist_delivery(store, claim, &state)?;
         let outcome = store.lifecycle_dispatch(&state.reminder);
-        crate::runtime::lifecycle::renew_lease(
-            store,
-            &request.tenant_id,
-            lock,
-            owner,
-            request.lease_seconds,
-        )?;
+        if !store.lifecycle_renew_fenced(claim, request.lease_seconds)? {
+            return Err(CoreError::LeaseLost("user lease lost during reminder dispatch".into()));
+        }
         match outcome {
             Ok(receipt) if acknowledged(&receipt) => {
                 record_delivery_attempt(&mut state.reminder, receipt.clone(), "delivered", None);
                 response.receipts.push(receipt.clone());
                 state.receipt = Some(receipt);
                 // Persist acknowledgement before completion; replay will not call the host again.
-                persist_delivery(store, &state)?;
+                persist_delivery(store, claim, &state)?;
                 apply_transition(
                     &mut state,
                     ReminderStatus::Completed,
@@ -581,7 +551,7 @@ where
                             &request.due_at_or_before,
                             request.retry_delay_seconds,
                         )?);
-                    persist_delivery(store, &state)?;
+                    persist_delivery(store, claim, &state)?;
                     response.results.push(dispatch_result(
                         &state,
                         request,
@@ -598,7 +568,7 @@ where
                 )?;
                 state.reminder.terminal_reason = Some(ReminderTerminalReason::RetryExhausted);
                 state.reminder.next_attempt_at = None;
-                persist_delivery(store, &state)?;
+                persist_delivery(store, claim, &state)?;
                 response
                     .results
                     .push(dispatch_result(&state, request, false, "retry_exhausted"));
@@ -607,7 +577,7 @@ where
         }
         state.reminder.terminal_reason = Some(ReminderTerminalReason::Delivered);
         state.reminder.next_attempt_at = None;
-        persist_delivery(store, &state)?;
+        persist_delivery(store, claim, &state)?;
         response
             .results
             .push(dispatch_result(&state, request, true, "delivered"));
@@ -732,29 +702,38 @@ fn dispatch_failure_receipt(
     };
     (receipt, code, http_status)
 }
-fn persist_delivery<T>(store: &mut T, state: &DeliveryState) -> CoreResult<()>
+fn persist_delivery<T>(
+    store: &mut T,
+    claim: &crate::runtime::lifecycle::LeaseClaim,
+    state: &DeliveryState,
+) -> CoreResult<()>
 where
-    T: LifecycleStore + ReminderStore + AuditSink,
+    T: ReminderStore,
 {
-    durable_save(
-        store,
-        &state.reminder.tenant_id,
+    let audits: Vec<AuditEvent> = state
+        .transitions
+        .iter()
+        .enumerate()
+        .map(|(index, transition)| {
+            AuditEvent::new(
+                deterministic_id(&[&state.reminder.id, &index.to_string(), "transition"]),
+                &state.reminder.tenant_id,
+                &transition.actor,
+                AuditAction::ReminderTransition,
+                "reminder",
+                Some(state.reminder.id.clone()),
+                &transition.reason,
+            )
+        })
+        .collect();
+    let state_val = serde_json::to_value(state)?;
+    store.commit_reminder_delivery(
+        claim,
         &delivery_key(&state.reminder),
-        &serde_json::to_value(state)?,
-    )?;
-    store.upsert_reminder(state.reminder.clone())?;
-    for (index, transition) in state.transitions.iter().enumerate() {
-        store.emit_audit(AuditEvent::new(
-            deterministic_id(&[&state.reminder.id, &index.to_string(), "transition"]),
-            &state.reminder.tenant_id,
-            &transition.actor,
-            AuditAction::ReminderTransition,
-            "reminder",
-            Some(state.reminder.id.clone()),
-            &transition.reason,
-        ))?;
-    }
-    Ok(())
+        &state_val,
+        &state.reminder,
+        &audits,
+    )
 }
 fn dispatch_result(
     state: &DeliveryState,

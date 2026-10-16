@@ -13,7 +13,7 @@ mod enabled {
     use sha2::{Digest, Sha256};
     use std::sync::{Arc, Condvar, Mutex};
 
-    const MIGRATIONS: [(&str, &str); 2] = [
+    const MIGRATIONS: [(&str, &str); 3] = [
         (
             "0001",
             include_str!("../../migrations/postgres/0001_core_schema.sql"),
@@ -21,6 +21,10 @@ mod enabled {
         (
             "0002",
             include_str!("../../migrations/postgres/0002_runtime_durability.sql"),
+        ),
+        (
+            "0003",
+            include_str!("../../migrations/postgres/0003_lifecycle_execution.sql"),
         ),
     ];
     const MIGRATION_HISTORY: &str =
@@ -730,6 +734,298 @@ mod enabled {
                 age,
             );
             Ok(())
+        }
+        pub fn claim_fenced(
+            &self,
+            tenant: &str,
+            user: Option<&str>,
+            resource: crate::runtime::lifecycle::LeaseResource,
+            key: &str,
+            owner: &str,
+            lease_seconds: u64,
+        ) -> CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>> {
+            self.scoped(tenant, user.unwrap_or(""), |tx| {
+                let rows = tx.query(
+                    "INSERT INTO nextral_runtime_state (tenant_id, key, value, locked_by, locked_until, lease_fence, updated_at) VALUES ($1, $2, '{}'::jsonb, $3, clock_timestamp() + ($4 || ' seconds')::interval, 1, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET locked_by = $3, locked_until = clock_timestamp() + ($4 || ' seconds')::interval, lease_fence = nextral_runtime_state.lease_fence + 1, updated_at = clock_timestamp() WHERE nextral_runtime_state.locked_until IS NULL OR nextral_runtime_state.locked_until < clock_timestamp() OR nextral_runtime_state.locked_by = $3 RETURNING lease_fence",
+                    &[&tenant, &key, &owner, &(lease_seconds as i64)],
+                ).map_err(db)?;
+                if let Some(row) = rows.first() {
+                    let fence: i64 = row.get(0);
+                    Ok(Some(crate::runtime::lifecycle::LeaseClaim {
+                        tenant_id: tenant.to_string(),
+                        user_id: user.map(str::to_string),
+                        resource,
+                        key: key.to_string(),
+                        owner: owner.to_string(),
+                        fence: fence as u64,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+
+        pub fn renew_fenced(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            lease_seconds: u64,
+        ) -> CoreResult<bool> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let rows = tx.execute(
+                    "UPDATE nextral_runtime_state SET locked_until = clock_timestamp() + ($4 || ' seconds')::interval, updated_at = clock_timestamp() WHERE tenant_id = $1 AND key = $2 AND locked_by = $3 AND lease_fence = $5 AND locked_until > clock_timestamp()",
+                    &[&claim.tenant_id, &claim.key, &claim.owner, &(lease_seconds as i64), &(claim.fence as i64)],
+                ).map_err(db)?;
+                Ok(rows > 0)
+            })
+        }
+
+        pub fn release_fenced(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+        ) -> CoreResult<()> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                tx.execute(
+                    "UPDATE nextral_runtime_state SET locked_by = NULL, locked_until = NULL, updated_at = clock_timestamp() WHERE tenant_id = $1 AND key = $2 AND locked_by = $3 AND lease_fence = $4",
+                    &[&claim.tenant_id, &claim.key, &claim.owner, &(claim.fence as i64)],
+                ).map_err(db)?;
+                Ok(())
+            })
+        }
+
+        pub fn save_guarded(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            target_key: &str,
+            value: &Value,
+        ) -> CoreResult<crate::runtime::lifecycle::GuardedWriteResult> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let lease_row = tx.query_opt(
+                    "SELECT locked_by, lease_fence, (locked_until IS NOT NULL AND locked_until > clock_timestamp()) FROM nextral_runtime_state WHERE tenant_id = $1 AND key = $2 FOR UPDATE",
+                    &[&claim.tenant_id, &claim.key],
+                ).map_err(db)?.ok_or_else(|| CoreError::LeaseLost("lease row not found".into()))?;
+
+                let locked_by: Option<String> = lease_row.get(0);
+                let fence: i64 = lease_row.get(1);
+                let valid: bool = lease_row.get(2);
+
+                if locked_by.as_deref() != Some(&claim.owner) || fence as u64 != claim.fence {
+                    return Err(CoreError::LeaseLost("lease fence or owner mismatch".into()));
+                }
+                if !valid {
+                    return Err(CoreError::LeaseLost("lease expired".into()));
+                }
+
+                let target_row = tx.query_opt(
+                    "SELECT value FROM nextral_runtime_state WHERE tenant_id = $1 AND key = $2 FOR UPDATE",
+                    &[&claim.tenant_id, &target_key],
+                ).map_err(db)?;
+
+                if let Some(row) = target_row {
+                    let existing: Value = row.get(0);
+                    if matches!(existing["status"].as_str(), Some("cancelled" | "completed" | "terminal_failed")) {
+                        return Ok(crate::runtime::lifecycle::GuardedWriteResult::Superseded(existing));
+                    }
+                }
+
+                tx.execute(
+                    "INSERT INTO nextral_runtime_state (tenant_id, key, value, updated_at) VALUES ($1, $2, $3, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET value = $3, updated_at = clock_timestamp()",
+                    &[&claim.tenant_id, &target_key, value],
+                ).map_err(db)?;
+
+                Ok(crate::runtime::lifecycle::GuardedWriteResult::Applied)
+            })
+        }
+
+        pub fn commit_reminder_delivery(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            state_key: &str,
+            state: &Value,
+            reminder: &ReminderRecord,
+            audits: &[AuditEvent],
+        ) -> CoreResult<()> {
+            self.scoped(&reminder.tenant_id, &reminder.user_id, |tx| {
+                let lease_row = tx.query_opt(
+                    "SELECT locked_by, lease_fence, (locked_until IS NOT NULL AND locked_until > clock_timestamp()) FROM nextral_runtime_state WHERE tenant_id=$1 AND key=$2 FOR UPDATE",
+                    &[&claim.tenant_id, &claim.key],
+                ).map_err(db)?.ok_or_else(|| CoreError::LeaseLost("lease row not found".into()))?;
+
+                let locked_by: Option<String> = lease_row.get(0);
+                let lease_fence: i64 = lease_row.get(1);
+                let valid: bool = lease_row.get(2);
+
+                if locked_by.as_deref() != Some(&claim.owner) || lease_fence as u64 != claim.fence {
+                    return Err(CoreError::LeaseLost("lease fence or owner mismatch".into()));
+                }
+                if !valid {
+                    return Err(CoreError::LeaseLost("lease expired".into()));
+                }
+
+                tx.execute(
+                    "INSERT INTO nextral_runtime_state(tenant_id, key, value, updated_at) VALUES($1, $2, $3, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET value=$3, updated_at=clock_timestamp()",
+                    &[&reminder.tenant_id, &state_key, state],
+                ).map_err(db)?;
+
+                let reminder_json = serde_json::to_value(reminder)?;
+                let due = timestamp_seconds(&reminder.due_at)?;
+                let last = reminder.last_attempt_at.as_deref().map(timestamp_seconds).transpose()?;
+                let next = reminder.next_attempt_at.as_deref().map(timestamp_seconds).transpose()?;
+                let terminal = reminder.terminal_reason.as_ref().map(text).transpose()?;
+                tx.execute(
+                    "INSERT INTO nextral_reminders(id, tenant_id, user_id, source_memory_id, kind, title, details, due_at, timezone, priority, status, attempt_count, last_attempt_at, next_attempt_at, dedupe_key, created_at, updated_at, channel, allowed_channels, quiet_hours, expires_at, privacy_level, terminal_reason, last_error, record_json) VALUES ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8),$9,$10,$11,$12,to_timestamp($13),to_timestamp($14),$15,clock_timestamp(),clock_timestamp(),$16,$17,$18,to_timestamp($19),$20,$21,$22,$23) ON CONFLICT(tenant_id, id) DO UPDATE SET details=$7, due_at=to_timestamp($8), status=$11, attempt_count=$12, last_attempt_at=to_timestamp($13), next_attempt_at=to_timestamp($14), updated_at=clock_timestamp(), terminal_reason=$21, last_error=$22, record_json=$23",
+                    &[
+                        &reminder.id, &reminder.tenant_id, &reminder.user_id, &reminder.source_memory_id,
+                        &text(&reminder.kind)?, &reminder.title, &reminder.details, &due,
+                        &reminder.timezone, &text(&reminder.priority)?, &text(&reminder.status)?,
+                        &(reminder.attempt_count as i32), &last, &next, &reminder.dedupe_key,
+                        &reminder.channel, &reminder.allowed_channels, &reminder.quiet_hours.as_ref().map(serde_json::to_value).transpose()?,
+                        &reminder.expires_at.as_deref().map(timestamp_seconds).transpose()?,
+                        &text(&reminder.privacy_level)?, &terminal, &reminder.last_error, &reminder_json,
+                    ],
+                ).map_err(db)?;
+
+                for audit in audits {
+                    Self::audit_write(tx, &audit_write(audit)?)?;
+                }
+                Ok(())
+            })
+        }
+
+        pub fn job_enqueue(&self, job: &crate::runtime::prospective::LifecycleScheduledJob) -> CoreResult<()> {
+            self.scoped(&job.request.tenant_id, &job.request.user_id, |tx| {
+                let req_json = serde_json::to_value(&job.request)?;
+                let next_due = timestamp_seconds(&job.next_attempt_at)?;
+                tx.execute(
+                    "INSERT INTO nextral_lifecycle_jobs (tenant_id, user_id, id, request, progress, status, next_attempt_at, attempts, updated_at, lease_fence) VALUES ($1, $2, $3, $4, '{}'::jsonb, $5, to_timestamp($6), $7, clock_timestamp(), 0) ON CONFLICT (tenant_id, user_id, id) DO NOTHING",
+                    &[&job.request.tenant_id, &job.request.user_id, &job.id, &req_json, &job.status, &next_due, &(job.attempts as i32)],
+                ).map_err(db)?;
+                Ok(())
+            })
+        }
+
+        pub fn job_get(&self, tenant: &str, user: &str, id: &str) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
+            self.scoped(tenant, user, |tx| {
+                let row = tx.query_opt(
+                    "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+                    &[&tenant, &user, &id],
+                ).map_err(db)?;
+                if let Some(r) = row {
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    Ok(Some(crate::runtime::prospective::LifecycleScheduledJob {
+                        id: r.get(0),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+
+        pub fn job_list(&self, tenant: &str, user: &str) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
+            self.scoped(tenant, user, |tx| {
+                let rows = tx.query(
+                    "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 ORDER BY next_attempt_at ASC, id ASC",
+                    &[&tenant, &user],
+                ).map_err(db)?;
+                let mut jobs = Vec::new();
+                for r in rows {
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    jobs.push(crate::runtime::prospective::LifecycleScheduledJob {
+                        id: r.get(0),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    });
+                }
+                Ok(jobs)
+            })
+        }
+
+        pub fn job_claim_due(
+            &self,
+            tenant: &str,
+            user: &str,
+            owner: &str,
+            limit: usize,
+            lease_seconds: u64,
+        ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+            self.scoped(tenant, user, |tx| {
+                let rows = tx.query(
+                    "UPDATE nextral_lifecycle_jobs SET status='running', locked_by=$3, locked_until=clock_timestamp() + ($4 || ' seconds')::interval, lease_fence=nextral_lifecycle_jobs.lease_fence + 1, updated_at=clock_timestamp() WHERE (tenant_id, user_id, id) IN (SELECT tenant_id, user_id, id FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND status IN ('queued', 'running', 'retry_pending') AND (locked_until IS NULL OR locked_until < clock_timestamp()) AND next_attempt_at <= clock_timestamp() ORDER BY next_attempt_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT $5) RETURNING id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error, lease_fence",
+                    &[&tenant, &user, &owner, &(lease_seconds as i64), &(limit as i64)],
+                ).map_err(db)?;
+
+                let mut results = Vec::new();
+                for r in rows {
+                    let id: String = r.get(0);
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    let fence: i64 = r.get(9);
+                    let job = crate::runtime::prospective::LifecycleScheduledJob {
+                        id: id.clone(),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    };
+                    let claim = crate::runtime::lifecycle::LeaseClaim {
+                        tenant_id: tenant.to_string(),
+                        user_id: Some(user.to_string()),
+                        resource: crate::runtime::lifecycle::LeaseResource::LifecycleJob,
+                        key: id,
+                        owner: owner.to_string(),
+                        fence: fence as u64,
+                    };
+                    results.push((job, claim));
+                }
+                Ok(results)
+            })
+        }
+
+        pub fn job_save_guarded(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            job: &crate::runtime::prospective::LifecycleScheduledJob,
+        ) -> CoreResult<()> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let due = timestamp_seconds(&job.next_attempt_at)?;
+                let rows = tx.execute(
+                    "UPDATE nextral_lifecycle_jobs SET status=$4, next_attempt_at=to_timestamp($5), attempts=$6, updated_at=clock_timestamp(), completed_memory_ids=$7, last_error=$8, locked_by=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled') THEN NULL ELSE locked_by END, locked_until=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled') THEN NULL ELSE locked_until END WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND locked_by=$9 AND lease_fence=$10 AND locked_until > clock_timestamp()",
+                    &[
+                        &claim.tenant_id, &claim.user_id.as_deref().unwrap_or(""), &claim.key,
+                        &job.status, &due, &(job.attempts as i32), &job.completed_memory_ids,
+                        &job.last_error, &claim.owner, &(claim.fence as i64),
+                    ],
+                ).map_err(db)?;
+                if rows == 0 {
+                    return Err(CoreError::LeaseLost("lifecycle job lease expired or lost".into()));
+                }
+                Ok(())
+            })
         }
         pub fn cutover(
             &self,

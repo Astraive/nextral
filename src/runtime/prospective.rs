@@ -131,9 +131,8 @@ where
         }
     }
     let id = crate::memory::deterministic_id(&[&serde_json::to_string(&request)?]);
-    let key = job_key(&request.user_id, &id);
-    if let Some(value) = store.lifecycle_load(&request.tenant_id, &key)? {
-        return Ok(serde_json::from_value(value)?);
+    if let Some(existing) = store.lifecycle_job_get(&request.tenant_id, &request.user_id, &id)? {
+        return Ok(existing);
     }
     let now = crate::memory::now_timestamp();
     if request.trigger == LifecycleTrigger::Close {
@@ -158,12 +157,7 @@ where
         completed_memory_ids: Vec::new(),
         last_error: None,
     };
-    durable_save(
-        store,
-        &job.request.tenant_id,
-        &key,
-        &serde_json::to_value(&job)?,
-    )?;
+    store.lifecycle_job_enqueue(&job)?;
     Ok(job)
 }
 
@@ -182,88 +176,51 @@ where
             "job limit must be 1..=1000 and lease positive".into(),
         ));
     }
-    let values = store.lifecycle_list(
-        &request.tenant_id,
-        &format!("scheduled-job/{}/", request.user_id),
-    )?;
-    let mut jobs = values
-        .into_iter()
-        .map(|value| {
-            let job: LifecycleScheduledJob = serde_json::from_value(value)?;
-            Ok((
-                crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at)?,
-                job,
-            ))
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
-    jobs.sort_by(|(a_due, a), (b_due, b)| a_due.cmp(b_due).then(a.id.cmp(&b.id)));
     let owner = worker_owner();
+    let claimed_jobs = store.lifecycle_job_claim_due(
+        &request.tenant_id,
+        &request.user_id,
+        &owner,
+        request.limit,
+        request.lease_seconds,
+    )?;
+
     let mut results = Vec::new();
-    for (_, mut job) in jobs {
-        if results.len() >= request.limit {
-            break;
-        }
-        if job.request.tenant_id != request.tenant_id || job.request.user_id != request.user_id {
-            return Err(CoreError::InvalidInput(
-                "job store returned an out-of-scope job".into(),
-            ));
-        }
-        if matches!(
-            job.status.as_str(),
-            "completed" | "terminal_failed" | "cancelled"
-        ) || crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at)? > now_nanos
-        {
-            continue;
-        }
-        let key = job_key(&request.user_id, &job.id);
-        if !store.lifecycle_claim(
-            &request.tenant_id,
-            &key,
-            &owner,
-            timestamp_epoch(&crate::memory::now_timestamp())?,
-            request.lease_seconds,
-        )? {
-            continue;
-        }
+    for (mut job, claim) in claimed_jobs {
         let attempts_before = job.attempts;
-        let work: CoreResult<()> = (|| {
-            // Reload after atomic claim; another worker may have completed between list and claim.
-            if let Some(value) = store.lifecycle_load(&request.tenant_id, &key)? {
-                job = serde_json::from_value(value)?;
-            }
-            if matches!(
-                job.status.as_str(),
-                "completed" | "terminal_failed" | "cancelled"
-            ) {
-                return Ok(());
-            }
-            if job.request.trigger == LifecycleTrigger::Idle {
-                if let Some(activity) = store.lifecycle_load(
-                    &request.tenant_id,
-                    &format!(
-                        "session-activity/{}/{}",
-                        request.user_id, job.request.session_id
-                    ),
-                )? {
-                    if let Some(last) = activity["last_activity_at"].as_str() {
-                        let idle_due = crate::runtime::lifecycle::timestamp_add_seconds(
-                            last,
-                            job.request.idle_seconds.unwrap_or(0),
-                        )?;
-                        if crate::runtime::lifecycle::timestamp_nanos(&idle_due)? > now_nanos {
-                            job.next_attempt_at = idle_due;
-                            return Ok(());
-                        }
+        let mut postponed = false;
+        if job.request.trigger == LifecycleTrigger::Idle {
+            let activity_key = format!(
+                "session-activity/{}/{}",
+                request.user_id, job.request.session_id
+            );
+            if let Some(activity) = store.lifecycle_load(&request.tenant_id, &activity_key)? {
+                if let Some(last) = activity["last_activity_at"].as_str() {
+                    let idle_due = crate::runtime::lifecycle::timestamp_add_seconds(
+                        last,
+                        job.request.idle_seconds.unwrap_or(0),
+                    )?;
+                    if crate::runtime::lifecycle::timestamp_nanos(&idle_due)? > now_nanos {
+                        job.next_attempt_at = idle_due;
+                        job.status = "queued".into();
+                        job.updated_at = crate::memory::now_timestamp();
+                        store.lifecycle_job_save_guarded(&claim, &job)?;
+                        postponed = true;
                     }
                 }
             }
-            job.attempts = job.attempts.saturating_add(1);
-            job.status = "running".into();
-            job.updated_at = crate::memory::now_timestamp();
-            save_claimed_job(store, &key, &owner, &mut job)?;
-            if job.status != "running" {
-                return Ok(());
-            }
+        }
+        if postponed {
+            results.push(job);
+            continue;
+        }
+
+        job.attempts = job.attempts.saturating_add(1);
+        job.status = "running".into();
+        job.updated_at = crate::memory::now_timestamp();
+        store.lifecycle_job_save_guarded(&claim, &job)?;
+
+        let work: CoreResult<()> = (|| {
             if job.request.trigger == LifecycleTrigger::Retention {
                 for id in job.request.memory_ids.clone() {
                     if job.completed_memory_ids.contains(&id) {
@@ -280,13 +237,10 @@ where
                             redact: job.request.redact,
                         },
                         |store| {
-                            crate::runtime::lifecycle::renew_lease(
-                                store,
-                                &request.tenant_id,
-                                &key,
-                                &owner,
-                                request.lease_seconds,
-                            )
+                            if !store.lifecycle_renew_fenced(&claim, request.lease_seconds)? {
+                                return Err(CoreError::LeaseLost("job lease lost during retention".into()));
+                            }
+                            Ok(())
                         },
                     )?;
                     if response.status != "completed" {
@@ -295,10 +249,8 @@ where
                         ));
                     }
                     job.completed_memory_ids.push(id);
-                    save_claimed_job(store, &key, &owner, &mut job)?;
-                    if job.status != "running" {
-                        return Ok(());
-                    }
+                    job.updated_at = crate::memory::now_timestamp();
+                    store.lifecycle_job_save_guarded(&claim, &job)?;
                 }
             } else {
                 let consolidation = job.request.consolidation.clone().ok_or_else(|| {
@@ -308,8 +260,11 @@ where
             }
             job.status = "completed".into();
             job.last_error = None;
+            job.updated_at = crate::memory::now_timestamp();
+            store.lifecycle_job_save_guarded(&claim, &job)?;
             Ok(())
         })();
+
         if let Err(error) = work {
             if job.attempts == attempts_before {
                 job.attempts = job.attempts.saturating_add(1);
@@ -322,22 +277,9 @@ where
                 job.next_attempt_at =
                     crate::runtime::lifecycle::timestamp_add_seconds(&request.now, 60)?;
             }
+            let _ = store.lifecycle_job_save_guarded(&claim, &job);
         }
-        job.updated_at = crate::memory::now_timestamp();
-        if let Err(error) = crate::runtime::lifecycle::renew_lease(
-            store,
-            &request.tenant_id,
-            &key,
-            &owner,
-            request.lease_seconds,
-        ) {
-            let _ = store.lifecycle_release(&request.tenant_id, &key, &owner);
-            return Err(error);
-        }
-        let saved = save_claimed_job(store, &key, &owner, &mut job);
-        let release = store.lifecycle_release(&request.tenant_id, &key, &owner);
-        saved?;
-        release?;
+
         let outcome = match job.status.as_str() {
             "completed" => Some(JobOutcome::Completed),
             "retry_pending" => Some(JobOutcome::Retried),
@@ -353,26 +295,6 @@ where
         results.push(job);
     }
     Ok(results)
-}
-fn job_key(user: &str, id: &str) -> String {
-    format!("scheduled-job/{user}/{id}")
-}
-
-fn save_claimed_job(
-    store: &mut impl LifecycleStore,
-    key: &str,
-    owner: &str,
-    job: &mut LifecycleScheduledJob,
-) -> CoreResult<()> {
-    if let Some(value) = store.lifecycle_save_claimed(
-        &job.request.tenant_id,
-        key,
-        owner,
-        &serde_json::to_value(&*job)?,
-    )? {
-        *job = serde_json::from_value(value)?;
-    }
-    Ok(())
 }
 
 pub struct ProspectiveScheduler<S>

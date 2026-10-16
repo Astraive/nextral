@@ -1205,6 +1205,16 @@ impl<'a> ReminderStore for &'a ProductionStore {
             })
             .collect()
     }
+    fn commit_reminder_delivery(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        state_key: &str,
+        state: &serde_json::Value,
+        reminder: &ReminderRecord,
+        audits: &[AuditEvent],
+    ) -> CoreResult<()> {
+        self.postgres.commit_reminder_delivery(claim, state_key, state, reminder, audits)
+    }
 }
 
 macro_rules! dispatch {
@@ -1259,9 +1269,209 @@ dispatch!(MemoryIndexStore {
 dispatch!(GraphStore {merge_node(&mut Self,n:GraphNode)->CoreResult<()>;merge_edge(&mut Self,e:GraphEdge)->CoreResult<()>;graph_memory_ids(&Self,t:&str,u:&str,q:&str,h:u8,p:&[PrivacyLevel])->CoreResult<Vec<String>>;});
 dispatch!(AuditSink {emit_audit(&mut Self,e:AuditEvent)->CoreResult<()>;});
 dispatch!(SessionStore {eligible_sessions(&Self,t:&str,u:&str,c:&str,l:usize)->CoreResult<Vec<crate::domain::EligibleSession>>;hot_tail_status(&Self,t:&str,u:&str,s:&str)->CoreResult<(usize,Vec<String>)>;append_session_message(&mut Self,m:SessionMessage)->CoreResult<()>;session_tail(&Self,t:&str,u:&str,s:&str,l:usize)->CoreResult<Vec<SessionMessage>>;session_tail_with_status(&Self,t:&str,u:&str,s:&str,l:usize)->CoreResult<(Vec<SessionMessage>,Vec<String>)>;});
-dispatch!(ReminderStore {upsert_reminder(&mut Self,r:ReminderRecord)->CoreResult<()>;list_due_reminders(&Self,t:&str,u:&str,c:&str)->CoreResult<Vec<ReminderRecord>>;});
+dispatch!(ReminderStore {
+ upsert_reminder(&mut Self,r:ReminderRecord)->CoreResult<()>;
+ list_due_reminders(&Self,t:&str,u:&str,c:&str)->CoreResult<Vec<ReminderRecord>>;
+ commit_reminder_delivery(&mut Self,claim:&crate::runtime::lifecycle::LeaseClaim,state_key:&str,state:&serde_json::Value,reminder:&ReminderRecord,audits:&[AuditEvent])->CoreResult<()>;
+});
 
 impl LifecycleStore for TestMemoryStore {
+    fn lifecycle_claim_fenced(
+        &mut self,
+        tenant: &str,
+        user_id: Option<&str>,
+        resource: crate::runtime::lifecycle::LeaseResource,
+        key: &str,
+        owner: &str,
+        lease_seconds: u64,
+    ) -> CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let entry_key = (tenant.to_string(), key.to_string());
+        let (current_owner, current_expiry, current_fence) = self
+            .lifecycle_fences
+            .get(&entry_key)
+            .cloned()
+            .unwrap_or((String::new(), 0, 0));
+        if current_expiry > now && current_owner != owner {
+            return Ok(None);
+        }
+        let new_fence = current_fence + 1;
+        self.lifecycle_fences.insert(entry_key, (owner.to_string(), now + lease_seconds, new_fence));
+        self.lifecycle_leases.insert((tenant.to_string(), key.to_string()), (owner.to_string(), now + lease_seconds));
+        Ok(Some(crate::runtime::lifecycle::LeaseClaim {
+            tenant_id: tenant.to_string(),
+            user_id: user_id.map(str::to_string),
+            resource,
+            key: key.to_string(),
+            owner: owner.to_string(),
+            fence: new_fence,
+        }))
+    }
+
+    fn lifecycle_renew_fenced(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        lease_seconds: u64,
+    ) -> CoreResult<bool> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let entry_key = (claim.tenant_id.clone(), claim.key.clone());
+        let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&entry_key).cloned() else {
+            return Ok(false);
+        };
+        if owner != claim.owner || fence != claim.fence || expiry <= now {
+            return Ok(false);
+        }
+        self.lifecycle_fences.insert(entry_key, (claim.owner.clone(), now + lease_seconds, claim.fence));
+        self.lifecycle_leases.insert((claim.tenant_id.clone(), claim.key.clone()), (claim.owner.clone(), now + lease_seconds));
+        Ok(true)
+    }
+
+    fn lifecycle_release_fenced(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+    ) -> CoreResult<()> {
+        let entry_key = (claim.tenant_id.clone(), claim.key.clone());
+        if let Some((owner, expiry, fence)) = self.lifecycle_fences.get_mut(&entry_key) {
+            if owner == &claim.owner && *fence == claim.fence {
+                owner.clear();
+                *expiry = 0;
+            }
+        }
+        self.lifecycle_leases.remove(&entry_key);
+        Ok(())
+    }
+
+    fn lifecycle_save_guarded(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        target_key: &str,
+        value: &Value,
+    ) -> CoreResult<crate::runtime::lifecycle::GuardedWriteResult> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let lease_key = (claim.tenant_id.clone(), claim.key.clone());
+        let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&lease_key).cloned() else {
+            return Err(CoreError::LeaseLost("lease missing".into()));
+        };
+        if owner != claim.owner || fence != claim.fence || expiry <= now {
+            return Err(CoreError::LeaseLost("lease expired or superseded".into()));
+        }
+
+        let target_entry = (claim.tenant_id.clone(), target_key.to_string());
+        if let Some(existing) = self.lifecycle_state.get(&target_entry) {
+            if matches!(existing["status"].as_str(), Some("cancelled" | "completed" | "terminal_failed")) {
+                return Ok(crate::runtime::lifecycle::GuardedWriteResult::Superseded(existing.clone()));
+            }
+        }
+
+        self.lifecycle_state.insert(target_entry, value.clone());
+        Ok(crate::runtime::lifecycle::GuardedWriteResult::Applied)
+    }
+
+    fn lifecycle_job_enqueue(
+        &mut self,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()> {
+        let key = (job.request.tenant_id.clone(), job.request.user_id.clone(), job.id.clone());
+        self.lifecycle_jobs.insert(key, (job.clone(), None, None, 0));
+        Ok(())
+    }
+
+    fn lifecycle_job_get(
+        &self,
+        tenant: &str,
+        user: &str,
+        id: &str,
+    ) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
+        let key = (tenant.to_string(), user.to_string(), id.to_string());
+        Ok(self.lifecycle_jobs.get(&key).map(|(j, _, _, _)| j.clone()))
+    }
+
+    fn lifecycle_job_list(
+        &self,
+        tenant: &str,
+        user: &str,
+    ) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
+        let mut jobs = self
+            .lifecycle_jobs
+            .iter()
+            .filter(|((t, u, _), _)| t == tenant && u == user)
+            .map(|(_, (j, _, _, _))| j.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by(|a, b| a.next_attempt_at.cmp(&b.next_attempt_at).then(a.id.cmp(&b.id)));
+        Ok(jobs)
+    }
+
+    fn lifecycle_job_claim_due(
+        &mut self,
+        tenant: &str,
+        user: &str,
+        owner: &str,
+        limit: usize,
+        lease_seconds: u64,
+    ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let now_nanos = crate::runtime::lifecycle::timestamp_nanos(&crate::memory::now_timestamp())?;
+
+        let mut candidate_keys: Vec<(String, String, String)> = self
+            .lifecycle_jobs
+            .iter()
+            .filter(|((t, u, _), (job, _, locked_until, _))| {
+                t == tenant
+                    && u == user
+                    && matches!(job.status.as_str(), "queued" | "running" | "retry_pending")
+                    && locked_until.map_or(true, |until| until <= now)
+                    && crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at).map_or(false, |due| due <= now_nanos)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        candidate_keys.sort_by(|a, b| {
+            let due_a = self.lifecycle_jobs.get(a).map(|(j, _, _, _)| &j.next_attempt_at);
+            let due_b = self.lifecycle_jobs.get(b).map(|(j, _, _, _)| &j.next_attempt_at);
+            due_a.cmp(&due_b).then(a.2.cmp(&b.2))
+        });
+
+        let mut results = Vec::new();
+        for key in candidate_keys.into_iter().take(limit) {
+            if let Some((job, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&key) {
+                *fence += 1;
+                *locked_by = Some(owner.to_string());
+                *locked_until = Some(now + lease_seconds);
+                job.status = "running".to_string();
+                let claim = crate::runtime::lifecycle::LeaseClaim {
+                    tenant_id: tenant.to_string(),
+                    user_id: Some(user.to_string()),
+                    resource: crate::runtime::lifecycle::LeaseResource::LifecycleJob,
+                    key: job.id.clone(),
+                    owner: owner.to_string(),
+                    fence: *fence,
+                };
+                results.push((job.clone(), claim));
+            }
+        }
+        Ok(results)
+    }
+
+    fn lifecycle_job_save_guarded(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let key = (claim.tenant_id.clone(), claim.user_id.clone().unwrap_or_default(), claim.key.clone());
+        let Some((existing, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&key) else {
+            return Err(CoreError::NotFound("lifecycle job not found".into()));
+        };
+        if locked_by.as_deref() != Some(&claim.owner) || *fence != claim.fence || locked_until.map_or(true, |until| until <= now) {
+            return Err(CoreError::LeaseLost("job lease expired or lost".into()));
+        }
+        *existing = job.clone();
+        if matches!(job.status.as_str(), "completed" | "terminal_failed" | "cancelled") {
+            *locked_by = None;
+            *locked_until = None;
+        }
+        Ok(())
+    }
     fn lifecycle_load(&self, t: &str, k: &str) -> CoreResult<Option<Value>> {
         Ok(self.lifecycle_state.get(&(t.into(), k.into())).cloned())
     }
@@ -1840,6 +2050,84 @@ impl<'a> LifecycleStore for &'a ProductionStore {
         self.postgres.cutover(t, u, s, shadow)?;
         Ok(receipt("postgres", "scoped_read_cutover", s, Ok(())))
     }
+    fn lifecycle_claim_fenced(
+        &mut self,
+        tenant: &str,
+        user_id: Option<&str>,
+        resource: crate::runtime::lifecycle::LeaseResource,
+        key: &str,
+        owner: &str,
+        lease_seconds: u64,
+    ) -> CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>> {
+        self.postgres.claim_fenced(tenant, user_id, resource, key, owner, lease_seconds)
+    }
+
+    fn lifecycle_renew_fenced(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        lease_seconds: u64,
+    ) -> CoreResult<bool> {
+        self.postgres.renew_fenced(claim, lease_seconds)
+    }
+
+    fn lifecycle_release_fenced(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+    ) -> CoreResult<()> {
+        self.postgres.release_fenced(claim)
+    }
+
+    fn lifecycle_save_guarded(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        target_key: &str,
+        value: &Value,
+    ) -> CoreResult<crate::runtime::lifecycle::GuardedWriteResult> {
+        self.postgres.save_guarded(claim, target_key, value)
+    }
+
+    fn lifecycle_job_enqueue(
+        &mut self,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()> {
+        self.postgres.job_enqueue(job)
+    }
+
+    fn lifecycle_job_get(
+        &self,
+        tenant: &str,
+        user: &str,
+        id: &str,
+    ) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
+        self.postgres.job_get(tenant, user, id)
+    }
+
+    fn lifecycle_job_list(
+        &self,
+        tenant: &str,
+        user: &str,
+    ) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
+        self.postgres.job_list(tenant, user)
+    }
+
+    fn lifecycle_job_claim_due(
+        &mut self,
+        tenant: &str,
+        user: &str,
+        owner: &str,
+        limit: usize,
+        lease_seconds: u64,
+    ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+        self.postgres.job_claim_due(tenant, user, owner, limit, lease_seconds)
+    }
+
+    fn lifecycle_job_save_guarded(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()> {
+        self.postgres.job_save_guarded(claim, job)
+    }
 }
 dispatch!(LifecycleStore {
  lifecycle_load(&Self,t:&str,k:&str)->CoreResult<Option<Value>>;
@@ -1857,6 +2145,15 @@ dispatch!(LifecycleStore {
  lifecycle_reembed_count(&Self,t:&str,u:&str,c:&str)->CoreResult<usize>;
  lifecycle_reembed_read(&Self,t:&str,u:&str,c:&str,id:&str)->CoreResult<Option<Vec<f32>>>;
  lifecycle_reembed_cutover(&mut Self,t:&str,u:&str,s:&str,c:&str)->CoreResult<StoreReceipt>;
+ lifecycle_claim_fenced(&mut Self,t:&str,u:Option<&str>,r:crate::runtime::lifecycle::LeaseResource,k:&str,o:&str,l:u64)->CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>>;
+ lifecycle_renew_fenced(&mut Self,c:&crate::runtime::lifecycle::LeaseClaim,l:u64)->CoreResult<bool>;
+ lifecycle_release_fenced(&mut Self,c:&crate::runtime::lifecycle::LeaseClaim)->CoreResult<()>;
+ lifecycle_save_guarded(&mut Self,c:&crate::runtime::lifecycle::LeaseClaim,t:&str,v:&Value)->CoreResult<crate::runtime::lifecycle::GuardedWriteResult>;
+ lifecycle_job_enqueue(&mut Self,j:&crate::runtime::prospective::LifecycleScheduledJob)->CoreResult<()>;
+ lifecycle_job_get(&Self,t:&str,u:&str,id:&str)->CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>>;
+ lifecycle_job_list(&Self,t:&str,u:&str)->CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>>;
+ lifecycle_job_claim_due(&mut Self,t:&str,u:&str,o:&str,limit:usize,l:u64)->CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob,crate::runtime::lifecycle::LeaseClaim)>>;
+ lifecycle_job_save_guarded(&mut Self,c:&crate::runtime::lifecycle::LeaseClaim,j:&crate::runtime::prospective::LifecycleScheduledJob)->CoreResult<()>;
 });
 
 #[cfg(test)]

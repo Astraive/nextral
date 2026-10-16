@@ -111,6 +111,14 @@ pub trait ReminderStore {
         user_id: &str,
         due_at_or_before: &str,
     ) -> CoreResult<Vec<ReminderRecord>>;
+    fn commit_reminder_delivery(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        state_key: &str,
+        state: &serde_json::Value,
+        reminder: &ReminderRecord,
+        audits: &[AuditEvent],
+    ) -> CoreResult<()>;
 }
 
 pub trait SessionStore {

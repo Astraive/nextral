@@ -21,6 +21,18 @@ pub struct TestMemoryStore {
     pub lifecycle_leases: std::collections::HashMap<(String, String), (String, u64)>,
     #[serde(skip)]
     pub lifecycle_vectors: std::collections::HashMap<(String, String, String, String), Vec<f32>>,
+    #[serde(skip)]
+    pub lifecycle_fences: std::collections::HashMap<(String, String), (String, u64, u64)>,
+    #[serde(skip)]
+    pub lifecycle_jobs: std::collections::HashMap<
+        (String, String, String),
+        (
+            crate::runtime::prospective::LifecycleScheduledJob,
+            Option<String>,
+            Option<u64>,
+            u64,
+        ),
+    >,
 }
 
 impl TestMemoryStore {
@@ -656,5 +668,41 @@ impl ReminderStore for TestMemoryStore {
             }
         }
         Ok(due)
+    }
+    fn commit_reminder_delivery(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        state_key: &str,
+        state: &serde_json::Value,
+        reminder: &ReminderRecord,
+        audits: &[AuditEvent],
+    ) -> CoreResult<()> {
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        let lease_key = (claim.tenant_id.clone(), claim.key.clone());
+        let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&lease_key).cloned() else {
+            return Err(CoreError::LeaseLost("user lease missing".into()));
+        };
+        if owner != claim.owner || fence != claim.fence || expiry <= now {
+            return Err(CoreError::LeaseLost("user lease expired or lost".into()));
+        }
+        if claim.tenant_id != reminder.tenant_id || claim.user_id.as_deref() != Some(&reminder.user_id) {
+            return Err(CoreError::InvalidInput("scope mismatch for reminder delivery".into()));
+        }
+
+        self.lifecycle_state
+            .insert((reminder.tenant_id.clone(), state_key.to_string()), state.clone());
+        if let Some(pos) = self
+            .reminders
+            .iter()
+            .position(|r| r.tenant_id == reminder.tenant_id && r.id == reminder.id)
+        {
+            self.reminders[pos] = reminder.clone();
+        } else {
+            self.reminders.push(reminder.clone());
+        }
+        for audit in audits {
+            self.audit_events.push(audit.clone());
+        }
+        Ok(())
     }
 }
