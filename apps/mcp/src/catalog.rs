@@ -239,13 +239,40 @@ fn enqueue_job() -> Value {
     )
 }
 
+fn memory_filters() -> Value {
+    object(json!({
+        "content_types": nullable(strings()),
+        "memory_types": nullable(strings()),
+        "statuses": nullable(strings()),
+        "session_id": nullable(json!({"type":"string"})),
+        "tags_any": nullable(strings()),
+        "tags_all": nullable(strings()),
+        "entities_any": nullable(strings()),
+        "entities_all": nullable(strings()),
+        "created_after": nullable(json!({"type":"string"})),
+        "created_before": nullable(json!({"type":"string"}))
+    }), &[])
+}
+
+fn memory_query() -> Value {
+    scoped(json!({
+        "filters": nullable(memory_filters()),
+        "limit": nullable(json!({"type":"integer","minimum":1,"maximum":1000})),
+        "cursor": nullable(json!({"type":"string"})),
+        "include_inactive": nullable(json!({"type":"boolean"})),
+        "privacy_scope": nullable(json!({"type":"array","items":privacy()}))
+    }), &[])
+}
+
 fn build_tools() -> Vec<Value> {
     let mut tools = vec![
         definition("nextral.memory.ingest", "Validate and persist a memory with host-provided embedding in production. Returns record_id and write receipts.", ingest(), false, false, false, true),
         definition("nextral.memory.retrieve", "Retrieve ranked memories within tenant, user, privacy scope and token budget; updates access metadata.", retrieval(), false, false, false, true),
         definition("nextral.memory.forget", "Forget a memory, optionally redact content, and propagate removal to configured stores.", forget(), false, true, true, true),
         definition("nextral.memory.get", "Read one scoped memory by ID; returns null when absent.", scoped(json!({"memory_id":{"type":"string","minLength":1}}), &["memory_id"]), true, false, true, true),
-        definition("nextral.memory.list", "List scoped memory records, optionally including inactive records.", scoped(json!({"include_inactive":{"type":"boolean"},"privacy_scope":{"type":"array","items":privacy()}}), &[]), true, false, true, true),
+        definition("nextral.memory.list", "Query and page scoped memory records with canonical filters, status selection, and keyset cursors.", memory_query(), true, false, true, true),
+        definition("nextral.memory.query", "Query and page scoped memory records with canonical filters, status selection, and keyset cursors.", memory_query(), true, false, true, true),
+        definition("nextral.index.repair", "Repair legacy vector points and update filter metadata without re-embedding.", scoped(json!({"limit": nullable(json!({"type":"integer","minimum":1,"maximum":1000}))}), &[]), false, true, false, true),
         definition("nextral.memory.stats", "Count scoped memories, tags and entities and summarize importance.", scoped(json!({}), &[]), true, false, true, true),
         definition("nextral.memory.update", "Patch memory content, scores, privacy, tags or entities in configured stores.", scoped(json!({
             "memory_id":{"type":"string","minLength":1},"content":{"type":"string"},"content_type":content_type(),

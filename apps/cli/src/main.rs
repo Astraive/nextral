@@ -12,6 +12,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("memory", "forget", "nextral.memory.forget"),
     ("memory", "get", "nextral.memory.get"),
     ("memory", "list", "nextral.memory.list"),
+    ("memory", "query", "nextral.memory.list"),
     ("memory", "update", "nextral.memory.update"),
     ("memory", "stats", "nextral.memory.stats"),
     ("memory", "search-by-tag", "nextral.memory.search_by_tag"),
@@ -50,6 +51,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("experiments", "status", "experiments.status"),
     ("safety", "get", "safety.policy.get"),
     ("safety", "set", "safety.policy.set"),
+    ("index", "repair", "nextral.index.repair"),
 ];
 
 fn main() -> ExitCode {

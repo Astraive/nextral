@@ -85,6 +85,8 @@ pub struct RetrievalTelemetry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalResponse {
     pub retrieval_id: String,
+    pub tenant_id: String,
+    pub user_id: String,
     pub trace_id: String,
     pub status: RetrievalStatus,
     pub lane: RuntimeLane,
@@ -268,6 +270,8 @@ where
                 &request.query_text,
                 &crate::memory::now_timestamp(),
             ]),
+            tenant_id: request.tenant_id,
+            user_id: request.user_id,
             trace_id,
             status: RetrievalStatus::Error,
             lane,
@@ -424,6 +428,8 @@ where
             &request.query_text,
             &crate::memory::now_timestamp(),
         ]),
+        tenant_id: request.tenant_id,
+        user_id: request.user_id,
         trace_id,
         status,
         lane,

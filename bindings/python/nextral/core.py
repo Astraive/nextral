@@ -136,9 +136,14 @@ class Client:
         payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
         return self.call("nextral.memory.get", payload, timeout_ms)
 
-    def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+    def list_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return self.call("nextral.memory.list", request, timeout_ms)
 
+    def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.list", request, timeout_ms)
+
+    def repair_index(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.index.repair", request, timeout_ms)
     def update_memory(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return self.call("nextral.memory.update", request, timeout_ms)
 
@@ -353,9 +358,14 @@ class AsyncClient:
         payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
         return await self.call("nextral.memory.get", payload, timeout_ms)
 
-    async def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+    async def list_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return await self.call("nextral.memory.list", request, timeout_ms)
 
+    async def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.list", request, timeout_ms)
+
+    async def repair_index(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.index.repair", request, timeout_ms)
     async def update_memory(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return await self.call("nextral.memory.update", request, timeout_ms)
 

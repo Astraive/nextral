@@ -6,6 +6,8 @@ service MemoryService {
   rpc Ingest(IngestMemoryRequest) returns (IngestMemoryResponse);
   rpc Retrieve(RetrieveMemoryRequest) returns (RetrieveMemoryResponse);
   rpc Forget(ForgetMemoryRequest) returns (ForgetMemoryResponse);
+  rpc Query(MemoryQueryRequest) returns (MemoryPage);
+  rpc RepairIndex(RepairIndexRequest) returns (RepairIndexResponse);
 }
 
 service ReminderService {
@@ -75,6 +77,7 @@ message RetrievedMemory {
   string source_path = 3;
   float retrieval_score = 4;
   ScoreBreakdown score_breakdown = 5;
+  uint32 token_estimate = 6;
 }
 
 message RetrieveMemoryRequest {
@@ -104,6 +107,7 @@ message RetrieveMemoryResponse {
   optional string rollback_id = 10;
   RetrievalTelemetry telemetry = 11;
   repeated RetrievedMemory items = 12;
+  string retrieval_id = 13;
 }
 
 message ForgetMemoryRequest {
@@ -142,4 +146,58 @@ message ListDueRemindersRequest {
 
 message ListDueRemindersResponse {
   repeated string reminder_ids = 1;
+}
+
+message MemorySummary {
+  string id = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  optional string session_id = 4;
+  string content_type = 5;
+  string memory_type = 6;
+  string privacy_level = 7;
+  string status = 8;
+  float importance_score = 9;
+  optional float confidence_score = 10;
+  string preview = 11;
+  string created_at = 12;
+  string updated_at = 13;
+}
+
+message MemoryPage {
+  repeated MemorySummary items = 1;
+  optional string next_cursor = 2;
+  optional uint64 total_count = 3;
+}
+
+message MemoryFilters {
+  repeated string content_types = 1;
+  repeated string memory_types = 2;
+  repeated string statuses = 3;
+  optional string session_id = 4;
+  repeated string tags_any = 5;
+  repeated string tags_all = 6;
+  repeated string entities_any = 7;
+  repeated string entities_all = 8;
+  optional string created_after = 9;
+  optional string created_before = 10;
+}
+
+message MemoryQueryRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  optional MemoryFilters filters = 3;
+  optional uint32 limit = 4;
+  optional string cursor = 5;
+}
+
+message RepairIndexRequest {
+  string tenant_id = 1;
+  optional uint32 limit = 2;
+}
+
+message RepairIndexResponse {
+  uint32 repaired = 1;
+  uint32 remaining = 2;
+  bool complete = 3;
 }

@@ -186,33 +186,44 @@ impl Principal {
             .get("user_id")
             .and_then(Value::as_str)
             .filter(|v| !v.trim().is_empty());
-        let (Some(tenant), Some(user)) = (tenant, user) else {
+        let Some(tenant) = tenant else {
             return Err(super::ApiError::invalid(
                 "tenant_id and user_id are required",
             ));
         };
-        if tenant.len() > 128 || user.len() > 128 {
+        if tenant.len() > 128 {
             return Err(super::ApiError::invalid(
-                "tenant_id and user_id must not exceed 128 bytes",
+                "tenant_id must not exceed 128 bytes",
             ));
         }
-        if let Self::User { tenant_id, user_id } = self {
-            if tenant != tenant_id || user != user_id {
-                return Err(super::ApiError::forbidden(
-                    "request scope does not match authenticated identity",
+        if let Some(user) = user {
+            if user.len() > 128 {
+                return Err(super::ApiError::invalid(
+                    "tenant_id and user_id must not exceed 128 bytes",
                 ));
             }
-            for field in ["actor_id", "actor"] {
-                if payload
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .is_some_and(|actor| actor != user_id)
-                {
+            if let Self::User { tenant_id, user_id } = self {
+                if tenant != tenant_id || user != user_id {
                     return Err(super::ApiError::forbidden(
-                        "actor does not match authenticated identity",
+                        "request scope does not match authenticated identity",
                     ));
                 }
+                for field in ["actor_id", "actor"] {
+                    if payload
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|actor| actor != user_id)
+                    {
+                        return Err(super::ApiError::forbidden(
+                            "actor does not match authenticated identity",
+                        ));
+                    }
+                }
             }
+        } else if let Self::User { .. } = self {
+            return Err(super::ApiError::invalid(
+                "tenant_id and user_id are required",
+            ));
         }
         Ok(())
     }

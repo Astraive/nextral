@@ -451,9 +451,9 @@ pub struct MemoryFilters {
     pub entities_any: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entities_all: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "created_after")]
     pub created_at_gte: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "created_before")]
     pub created_at_lt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statuses: Option<Vec<MemoryStatus>>,
@@ -581,17 +581,26 @@ impl MemoryFilters {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemorySummary {
     pub id: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub user_id: String,
     pub session_id: Option<String>,
     pub memory_type: MemoryType,
     pub content_type: ContentType,
     pub source_type: SourceType,
     pub privacy_level: PrivacyLevel,
     pub status: MemoryStatus,
+    #[serde(default)]
+    pub importance_score: f32,
+    #[serde(default)]
+    pub confidence_score: Option<f32>,
     pub created_at: String,
     pub updated_at: String,
+    pub preview: String,
     pub content_preview: String,
 }
 
@@ -604,14 +613,19 @@ impl MemorySummary {
         };
         Self {
             id: record.id.clone(),
+            tenant_id: record.tenant_id.clone(),
+            user_id: record.user_id.clone(),
             session_id: record.session_id.clone(),
             memory_type: record.memory_type.clone(),
             content_type: record.content_type.clone(),
             source_type: record.source_type.clone(),
             privacy_level: record.privacy_level.clone(),
             status: record.status.clone(),
+            importance_score: record.importance_score,
+            confidence_score: record.confidence_score,
             created_at: record.created_at.clone(),
             updated_at: record.updated_at.clone(),
+            preview: preview.clone(),
             content_preview: preview,
         }
     }
@@ -621,15 +635,32 @@ fn default_query_limit() -> usize {
     50
 }
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    let opt = Option::<T>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
+fn deserialize_limit_null_default<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<usize>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(50))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryQuery {
     pub tenant_id: String,
     pub user_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub privacy_scope: Vec<PrivacyLevel>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub filters: MemoryFilters,
-    #[serde(default = "default_query_limit")]
+    #[serde(default = "default_query_limit", deserialize_with = "deserialize_limit_null_default")]
     pub limit: usize,
     #[serde(default)]
     pub cursor: Option<String>,
@@ -659,7 +690,7 @@ impl MemoryQuery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryPage {
     pub items: Vec<MemorySummary>,
     pub next_cursor: Option<String>,

@@ -27,6 +27,7 @@ type RetrievedMemory {
   sourcePath: String!
   retrievalScore: Float!
   scoreBreakdown: ScoreBreakdown!
+  tokenEstimate: Int!
 }
 
 type RetrievalTelemetry {
@@ -44,6 +45,7 @@ type RetrievalTelemetry {
 }
 
 type RetrievalResponse {
+  retrievalId: String!
   tenantId: String!
   userId: String!
   traceId: String!
@@ -82,12 +84,14 @@ type Query {
   memory(tenantId: String!, userId: String!, id: ID!): Memory
   retrieve(tenantId: String!, userId: String!, queryText: String!, privacyScope: [String!]!, tokenBudget: Int!, topKVector: Int, maxGraphHops: Int, queryVector: [Float!], sessionId: String, entities: [String!], intentTopic: String): RetrievalResponse!
   reminders(tenantId: String!, userId: String!, dueAtOrBefore: String): [Reminder!]!
+  memories(query: MemoryQueryInput!): MemoryPage!
 }
 
 type Mutation {
   ingestMemory(tenantId: String!, userId: String!, sessionId: String, content: String!, contentType: String!, memoryType: String!, privacyLevel: String!, importanceScore: Float, confidenceScore: Float, entities: [String!], tags: [String!], sourceType: String, sourceMessageIds: [String!], embedding: [Float!], graphHints: [GraphHintInput!]): IngestMemoryResponse!
   forgetMemory(tenantId: String!, userId: String!, memoryId: ID!, actorId: String!, reason: String!, redact: Boolean!): ForgetMemoryResponse!
   scheduleReminder(tenantId: String!, userId: String!, sourceMemoryId: ID!, kind: String!, title: String!, dueAt: String!, timezone: String!, priority: String): ID!
+  repairIndex(tenantId: String!, limit: Int): IndexRepairResponse!
 }
 
 type IngestMemoryResponse {
@@ -108,4 +112,53 @@ input GraphHintInput {
   toLabel: String!
   toName: String!
   confidence: Float!
+}
+
+type MemorySummary {
+  id: ID!
+  tenantId: String!
+  userId: String!
+  sessionId: String
+  contentType: String!
+  memoryType: String!
+  privacyLevel: String!
+  status: String!
+  importanceScore: Float!
+  confidenceScore: Float
+  preview: String!
+  createdAt: String!
+  updatedAt: String!
+}
+
+type MemoryPage {
+  items: [MemorySummary!]!
+  nextCursor: String
+  totalCount: Int
+}
+
+type IndexRepairResponse {
+  repaired: Int!
+  remaining: Int!
+  complete: Boolean!
+}
+
+input MemoryFiltersInput {
+  contentTypes: [String!]
+  memoryTypes: [String!]
+  statuses: [String!]
+  sessionId: String
+  tagsAny: [String!]
+  tagsAll: [String!]
+  entitiesAny: [String!]
+  entitiesAll: [String!]
+  createdAfter: String
+  createdBefore: String
+}
+
+input MemoryQueryInput {
+  tenantId: String!
+  userId: String!
+  filters: MemoryFiltersInput
+  limit: Int
+  cursor: String
 }

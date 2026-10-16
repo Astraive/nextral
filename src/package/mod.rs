@@ -971,6 +971,7 @@ fn dispatch_tool_impl(
                 | "nextral.batch.retrieve"
                 | "nextral.batch.forget"
                 | "nextral.test.delay"
+                | "nextral.index.repair"
         )
     {
         validate_tenant_user(&payload)?;
@@ -1023,7 +1024,7 @@ fn dispatch_tool_impl(
             value!(store.get_memory(tenant, user, string_field("memory_id")?)?)
         }
         "nextral.memory.forget" => value!(forget_memory(store, decode!(ForgetMemoryRequest))?),
-        "nextral.memory.list" => {
+        "nextral.memory.list" | "nextral.memory.query" => {
             let mut query = decode!(crate::memory::MemoryQuery);
             query.tenant_id = tenant.to_string();
             query.user_id = user.to_string();
@@ -1037,13 +1038,23 @@ fn dispatch_tool_impl(
             }
             let res = match store {
                 RuntimeStore::Test(_) => serde_json::json!({
+                    "repaired": 0,
                     "checked": 0,
                     "updated": 0,
                     "removed": 0,
                     "remaining": 0,
                     "complete": true,
                 }),
-                RuntimeStore::Production(p) => p.index_repair(tenant, user, limit)?,
+                RuntimeStore::Production(p) => {
+                    let mut r = p.index_repair(tenant, user, limit)?;
+                    let repaired = r.get("repaired").and_then(|v| v.as_u64()).or_else(|| {
+                        let u = r.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let rm = r.get("removed").and_then(|v| v.as_u64()).unwrap_or(0);
+                        Some(u + rm)
+                    }).unwrap_or(0);
+                    r["repaired"] = serde_json::json!(repaired);
+                    r
+                }
             };
             value!(res)
         }

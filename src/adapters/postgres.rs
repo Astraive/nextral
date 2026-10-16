@@ -713,14 +713,19 @@ mod enabled {
 
                     let mem_summary = crate::memory::MemorySummary {
                         id,
+                        tenant_id: req.tenant_id.clone(),
+                        user_id: req.user_id.clone(),
                         session_id,
                         memory_type: serde_json::from_value(serde_json::Value::String(memory_type)).unwrap_or(crate::memory::MemoryType::Semantic),
                         content_type: serde_json::from_value(serde_json::Value::String(content_type)).unwrap_or(crate::memory::ContentType::Fact),
                         source_type: serde_json::from_value(serde_json::Value::String(source_type)).unwrap_or(crate::memory::SourceType::Manual),
                         privacy_level,
                         status,
+                        importance_score: 0.0,
+                        confidence_score: None,
                         created_at,
                         updated_at,
+                        preview: content_preview.clone(),
                         content_preview,
                     };
                     candidates.push(mem_summary);

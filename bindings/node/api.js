@@ -193,6 +193,14 @@ class Client {
     return this.call('nextral.memory.list', request, options);
   }
 
+  async queryMemories(request, options) {
+    return this.call('nextral.memory.list', request, options);
+  }
+
+  async repairIndex(request, options) {
+    return this.call('nextral.index.repair', request, options);
+  }
+
   async updateMemory(request, options) {
     return this.call('nextral.memory.update', request, options);
   }

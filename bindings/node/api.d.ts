@@ -301,6 +301,8 @@ export class Client {
   forget(request: ForgetMemoryRequest, options?: CallOptions): Promise<ForgetMemoryResponse>;
   getMemory(request: Scope & { memory_id: string }, options?: CallOptions): Promise<MemoryRecord | null>;
   listMemories(request: ListMemoriesRequest, options?: CallOptions): Promise<MemoryRecord[]>;
+  queryMemories(request: unknown, options?: CallOptions): Promise<unknown>;
+  repairIndex(request: { tenant_id: string; limit?: number }, options?: CallOptions): Promise<{ repaired: number; remaining: number; complete: boolean }>;
   updateMemory(request: UpdateMemoryRequest, options?: CallOptions): Promise<MemoryRecord>;
   memoryStats(request: Scope, options?: CallOptions): Promise<MemoryStats>;
   searchByTag(request: Scope & { tag: string }, options?: CallOptions): Promise<MemoryRecord[]>;
