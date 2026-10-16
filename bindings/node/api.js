@@ -190,7 +190,22 @@ class Client {
   }
 
   async listMemories(request, options) {
-    return this.call('nextral.memory.list', request, options);
+    const payload = { ...request };
+    if (payload.include_inactive && (!payload.filters || !payload.filters.statuses)) {
+      payload.filters = { ...(payload.filters || {}), statuses: ['active', 'soft_deleted', 'redacted', 'archived'] };
+    }
+    const res = await this.call('nextral.memory.list', payload, options);
+    const items = Array.isArray(res) ? res : (res && res.items ? res.items : []);
+    return items.map(item => {
+      const { preview, content_preview, ...rest } = item;
+      return {
+        embedding_provider: null,
+        extraction_provider: null,
+        extraction_model: null,
+        schema_version: '1.0.0',
+        ...rest,
+      };
+    });
   }
 
   async queryMemories(request, options) {

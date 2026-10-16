@@ -87,6 +87,24 @@ class ServiceHandle:
         return self._native.binds()
 
 
+class WorkerHandle:
+    def __init__(self, native_handle: Any) -> None:
+        self._native = native_handle
+
+    def tick(self) -> JsonObject:
+        raw = _invoke(self._native.tick)
+        return json.loads(raw)
+
+    async def tick_async(self) -> JsonObject:
+        raw = await _invoke_async(self._native.tick_async())
+        return json.loads(raw)
+
+    def shutdown(self, timeout_ms: int | None = None) -> None:
+        _invoke(self._native.shutdown, timeout_ms)
+
+    async def shutdown_async(self, timeout_ms: int | None = None) -> None:
+        await _invoke_async(self._native.shutdown_async(timeout_ms))
+
 class Client:
     """Synchronous owned client for the Nextral memory runtime."""
 
@@ -112,6 +130,11 @@ class Client:
         native_handle = _invoke(self._native.serve)
         return ServiceHandle(native_handle)
 
+    def start_worker(self, config: Request | str) -> WorkerHandle:
+        config_json = config if isinstance(config, str) else _encode(config)
+        native_handle = _invoke(self._native.start_worker, config_json)
+        return WorkerHandle(native_handle)
+
     def health(self, timeout_ms: int | None = None) -> JsonObject:
         return self.call("nextral.health", {}, timeout_ms)
 
@@ -136,8 +159,9 @@ class Client:
         payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
         return self.call("nextral.memory.get", payload, timeout_ms)
 
-    def list_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
-        return self.call("nextral.memory.list", request, timeout_ms)
+    def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        res = self.call("nextral.memory.list", request, timeout_ms)
+        return res if isinstance(res, list) else (res.get("items", []) if isinstance(res, dict) else [])
 
     def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return self.call("nextral.memory.list", request, timeout_ms)
@@ -334,6 +358,11 @@ class AsyncClient:
         native_handle = await _invoke_async(self._native.serve_async())
         return ServiceHandle(native_handle)
 
+    async def start_worker(self, config: Request | str) -> WorkerHandle:
+        config_json = config if isinstance(config, str) else _encode(config)
+        native_handle = await _invoke_async(self._native.start_worker_async(config_json))
+        return WorkerHandle(native_handle)
+
     async def health(self, timeout_ms: int | None = None) -> JsonObject:
         return await self.call("nextral.health", {}, timeout_ms)
 
@@ -358,8 +387,9 @@ class AsyncClient:
         payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
         return await self.call("nextral.memory.get", payload, timeout_ms)
 
-    async def list_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
-        return await self.call("nextral.memory.list", request, timeout_ms)
+    async def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        res = await self.call("nextral.memory.list", request, timeout_ms)
+        return res if isinstance(res, list) else (res.get("items", []) if isinstance(res, dict) else [])
 
     async def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
         return await self.call("nextral.memory.list", request, timeout_ms)

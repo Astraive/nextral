@@ -331,6 +331,39 @@ class InstalledConsumerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(nextral.__version__, result.stdout)
 
+    def test_query_memories_and_repair_index(self) -> None:
+        mem1 = self.ingest_request("First python memory with specific tag")
+        mem1["tags"] = ["pytech"]
+        self.client.ingest(mem1)
+
+        query_payload = {
+            **self.scope,
+            "filters": {"tags_any": ["pytech"]},
+            "limit": 10,
+        }
+        res = self.client.query_memories(query_payload)
+        self.assertIn("items", res)
+        self.assertGreaterEqual(len(res["items"]), 1)
+
+        repair_res = self.client.repair_index({"tenant_id": self.scope["tenant_id"], "limit": 10})
+        self.assertIn("repaired", repair_res)
+        self.assertEqual(repair_res["repaired"], 0)
+        self.assertTrue(repair_res["complete"])
+
+    def test_worker_lifecycle_start_and_shutdown(self) -> None:
+        worker = self.client.start_worker({
+            "scopes": [self.scope],
+            "job_limit": 5,
+            "lease_seconds": 300,
+            "tick_interval_ms": 1000,
+        })
+        report = worker.tick()
+        self.assertIn("jobs", report)
+        self.assertIn("reminders", report)
+        self.assertIn("processed", report["jobs"])
+        self.assertIn("processed", report["reminders"])
+        worker.shutdown(2000)
+
 
 @unittest.skipUnless(
     os.environ.get("NEXTRAL_PYTHON_PRODUCTION_CONFIG") and os.environ.get("NEXTRAL_RESEARCH_EVIDENCE"),

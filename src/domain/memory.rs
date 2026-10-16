@@ -603,6 +603,24 @@ pub struct MemorySummary {
     pub updated_at: String,
     pub preview: String,
     pub content_preview: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    pub embedding_dim: Option<u32>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub access_count: u64,
+    #[serde(default)]
+    pub last_accessed_at: Option<String>,
 }
 
 impl MemorySummary {
@@ -617,9 +635,18 @@ impl MemorySummary {
             tenant_id: record.tenant_id.clone(),
             user_id: record.user_id.clone(),
             session_id: record.session_id.clone(),
+            content: record.content.clone(),
             memory_type: record.memory_type.clone(),
             content_type: record.content_type.clone(),
             source_type: record.source_type.clone(),
+            source_message_ids: record.source_message_ids.clone(),
+            entities: record.entities.clone(),
+            tags: record.tags.clone(),
+            embedding: record.embedding.clone(),
+            embedding_dim: record.embedding_dim,
+            embedding_model: record.embedding_model.clone(),
+            access_count: record.access_count,
+            last_accessed_at: record.last_accessed_at.clone(),
             privacy_level: record.privacy_level.clone(),
             status: record.status.clone(),
             importance_score: record.importance_score,

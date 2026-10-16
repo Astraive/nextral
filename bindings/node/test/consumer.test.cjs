@@ -401,3 +401,47 @@ test('measured real-store evidence controls promotion and restores prior policy 
     await client.close();
   }
 });
+
+test('0.2 consumer queries memories with filters, keyset pagination, and repair', async () => {
+  const client = await nextral.Client.create(testConfig);
+  const owner = scope();
+
+  const mem1 = memory(owner, 'First memory about quantum physics', { tags: ['physics', 'science'] });
+  const mem2 = memory(owner, 'Second memory about classical mechanics', { tags: ['mechanics', 'science'] });
+  await client.ingest(mem1);
+  await client.ingest(mem2);
+
+  const queryRes = await client.queryMemories({
+    ...owner,
+    filters: { tags_any: ['physics'] },
+    limit: 10,
+  });
+  assert.ok(queryRes.items.length >= 1);
+  assert.ok(queryRes.items.some(i => i.id === mem1.id));
+  assert.ok(!queryRes.items.some(i => i.id === mem2.id));
+
+  const repairRes = await client.repairIndex({ tenant_id: owner.tenant_id, limit: 10 });
+  assert.equal(typeof repairRes.repaired, 'number');
+  assert.equal(repairRes.complete, true);
+
+  await client.close();
+});
+
+test('0.2 consumer manages owned worker handle and tick', async () => {
+  const client = await nextral.Client.create(testConfig);
+  const owner = scope();
+
+  const worker = await client.startWorker({
+    scopes: [owner],
+    job_limit: 5,
+    lease_seconds: 300,
+    tick_interval_ms: 1000,
+  });
+
+  const report = await worker.tick();
+  assert.equal(typeof report.jobs.processed, 'number');
+  assert.equal(typeof report.reminders.processed, 'number');
+
+  await worker.shutdown(2000);
+  await client.close();
+});

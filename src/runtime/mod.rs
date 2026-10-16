@@ -12,6 +12,7 @@ pub mod reminders;
 pub mod retrieval;
 pub mod session;
 pub mod storage;
+pub mod load_runner;
 
 use crate::{
     contracts::CoreResult,

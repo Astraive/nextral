@@ -1045,6 +1045,38 @@ fn dispatch_tool_impl(
             let page = store.query_memories(&query)?;
             value!(page)
         }
+        "nextral.memory.search_by_tag" => {
+            let tag = string_field("tag")?;
+            let mut query = crate::memory::MemoryQuery {
+                tenant_id: tenant.to_string(),
+                user_id: user.to_string(),
+                privacy_scope: Vec::new(),
+                filters: crate::memory::MemoryFilters {
+                    tags_any: Some(vec![tag.to_string()]),
+                    ..Default::default()
+                },
+                limit: 100,
+                cursor: None,
+            };
+            let page = store.query_memories(&query)?;
+            value!(page.items)
+        }
+        "nextral.memory.search_by_entity" => {
+            let entity = string_field("entity")?;
+            let mut query = crate::memory::MemoryQuery {
+                tenant_id: tenant.to_string(),
+                user_id: user.to_string(),
+                privacy_scope: Vec::new(),
+                filters: crate::memory::MemoryFilters {
+                    entities_any: Some(vec![entity.to_string()]),
+                    ..Default::default()
+                },
+                limit: 100,
+                cursor: None,
+            };
+            let page = store.query_memories(&query)?;
+            value!(page.items)
+        }
         "nextral.index.repair" => {
             let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
             if limit == 0 || limit > 1000 {

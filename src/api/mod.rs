@@ -160,7 +160,7 @@ impl ScopedRateLimiter {
 #[derive(Clone)]
 pub struct ServiceState {
     pub config: Arc<NextralConfig>,
-    pub auth: Authenticator,
+    pub(crate) auth: Authenticator,
     pub client: Arc<crate::package::RuntimeClient>,
     permits: Arc<Semaphore>,
     request_permits: Arc<Semaphore>,

@@ -303,6 +303,7 @@ pub struct WorkerScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerConfig {
     pub scopes: Vec<WorkerScope>,
+    #[serde(default = "default_worker_actor")]
     pub actor: String,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -324,6 +325,9 @@ fn default_worker_limit() -> usize {
 }
 fn default_worker_lease_seconds() -> u64 {
     30
+}
+fn default_worker_actor() -> String {
+    "nextral-worker".to_string()
 }
 
 impl WorkerConfig {

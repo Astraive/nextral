@@ -38,6 +38,7 @@ pub mod testkit;
 pub mod topology;
 
 pub use contracts::{CoreError, CoreResult};
+pub use runtime::load_runner;
 
 #[cfg(test)]
 mod tests {

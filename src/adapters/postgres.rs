@@ -744,7 +744,16 @@ mod enabled {
                         created_at,
                         updated_at,
                         preview: content_preview.clone(),
-                        content_preview,
+                        content_preview: content_preview.clone(),
+                        content: content_preview,
+                        source_message_ids: Vec::new(),
+                        entities,
+                        tags,
+                        embedding: None,
+                        embedding_dim: None,
+                        embedding_model: None,
+                        access_count: 0,
+                        last_accessed_at: None,
                     };
                     candidates.push(mem_summary);
                 }
