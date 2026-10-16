@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0
+
 - Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
 - Pinned the five-store fixture and loopback ports; build official MinIO/mc releases from checksum-verified source.
 - Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
@@ -14,8 +16,10 @@
 - Preserve checked trace sequence allocation across supported Rust versions.
 - Isolate crate verification from native Cargo caches and normalize CI artifact paths.
 - Removed incidental error-wording pins from authenticated denial and migration-exposure verification.
-
-## 0.1.0
+- Added scoped aged-session metadata selection and explicit PostgreSQL warm recovery when Redis is unavailable.
+- Guard scheduled retention with verified transcript payload coverage before source erasure.
+- Reject unknown or gapped migration histories and verify concurrent populated upgrades.
+- Default release tags to artifact verification; publication requires explicit manual opt-in.
 
 - Added production package runtime contracts for all seven memory systems.
 - Structured the Rust core into domain, config, providers, ports, adapters, runtime, API, package, and testkit modules.

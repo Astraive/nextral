@@ -48,6 +48,29 @@ Promotion requires distinct baseline/candidate run IDs with matching suite ID/re
 
 The integrated five-store runner builds both release examples and retains authentic baseline/candidate reports, source/executable identity, and installed Python/Node control results under Cargo's `integration-research/<run-id>` directory. `--skip-build` requires `--wheel-dir` and `--npm-package`; it skips package/debug builds, not these research builds. `--research-latency-budget-ns` sets the replay budget, not a production SLO. Independent same-implementation timing can fail the zero-regression gate: the runner records rejection and exits nonzero if promotion/rollback is not verified. It never retries measurements to manufacture passing evidence.
 
+### Recorded five-store calibration
+
+[CI run 38812797031](https://github.com/Astraive/nextral/actions/runs/38812797031) passed all 47 jobs at head `1631b2e6510bb0394eaa0af016937a7bb13bf015`. Its `integration-research` artifact retains `7f546536023c4dfdbbf2b8151ead6820/{manifest,baseline,candidate,evidence,python-control,node-control}.json`. The downloaded evidence is at `D:/target/ci-38812797031/research/7f546536023c4dfdbbf2b8151ead6820/`; the full production result is `D:/target/ci-38812797031/production-result.json`.
+
+The reports themselves identify implementation revision `fc907ddb0ac338bcf7f9c672e037c21a3e3df14d`; do not replace that recorded source identity with the workflow head. Both use suite `representative-memory`, revision `v3`, SHA-256 `6a79579f5c82eb0d58132bb857fd5b0fb1b3ce63bbd8e2d649c4c77d9dcfde07`, release profile, Linux `x86_64`, and host ID `integration-ec1597e1372b5f592c1c2377d9c13d5f28920503d97a952fc6fdb4f56bc82a6f`. Run IDs are `baseline-7f546536023c4dfdbbf2b8151ead6820` (`policy-v1`) and `candidate-7f546536023c4dfdbbf2b8151ead6820` (`integration-7f546536023c4dfdbbf2b8151ead6820`).
+
+| Observed metric | Baseline | Candidate |
+| --- | ---: | ---: |
+| Golden recall agreement | 1.0 | 1.0 |
+| Contradiction agreement | 1.0 | 1.0 |
+| Reminder-outcome agreement | 1.0 | 1.0 |
+| Process-roundtrip samples | 8 | 8 |
+| Mean, ns | 394,310,108.125 | 209,293,079.375 |
+| p95, ns | 1,257,858,019 | 352,754,550 |
+| Maximum, ns | 1,257,858,019 | 352,754,550 |
+| Configured replay budget, ns | 30,000,000,000 | 30,000,000,000 |
+| Report budget gate (`latency_slo_passed`) | true | true |
+| After-fixture destructive audit events | 0 | 0 |
+
+Each report contains only eight process-roundtrip samples, including host startup and fixture setup. Safety counts cover scoped audited events **after fixture setup and before cleanup**, not all fixture deletion or all possible privacy/misuse outcomes. The identical agreement scores and lower candidate timings are two independent executions of the **same implementation**, not an algorithmic-improvement result or a deployment SLO. The serialized `latency_slo_passed` name means only the configured replay-budget gate passed.
+
+Both installed native consumers recorded `promoted_and_rolled_back`, restoring the prior stable `policy-v1`; they also rejected unpromoted and reasonless rollback. This exercises measured control admission and restoration, not a changed policy algorithm. `manifest.json` records research-host SHA-256 `87929c73d188601441e78391819bc3a0ec9eb795c149756d9803cecfd0cc86f4` and evaluator SHA-256 `e32fddcac60f1631f6fe39f427abff8c15ca1b0c6deea20d24a63d417d592b3e`. These are runner-recorded identities, **not independent binary attestation**; signed release-artifact validation is separate and remains pending under [#77](https://github.com/Astraive/nextral/issues/77).
+
 ## Alerts and capacity
 
 Choose operational thresholds from observed baselines: all-path retrieval failure, deletion still incomplete, durable job/outbox age, retry exhaustion, lease churn, drift in active canonical/index records and archive errors. Watch Redis memory/evictions, PostgreSQL growth/locks/indexes, Qdrant memory/disk/search latency, Neo4j traversal/index health, and private S3 object growth/error rate. Provisioning partitions, dashboards and alert delivery remains deployment work, not a package guarantee.
