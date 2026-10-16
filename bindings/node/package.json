@@ -1,6 +1,6 @@
 {
   "name": "nextral",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed Node.js API for the Nextral Rust memory runtime.",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/Astraive/nextral.git", "directory": "bindings/node" },
