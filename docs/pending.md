@@ -377,10 +377,13 @@ Evidence: (1) this canonical issue-linked ledger, [package requirements](package
 - [x] [#79](https://github.com/Astraive/nextral/issues/79): deterministic hybrid path failures and concurrent entry pass (L).
 - [ ] [#80](https://github.com/Astraive/nextral/issues/80): refresh five-store evidence for aged selection, unavailable-Redis recovery and archive-safe scheduled retention.
 - [ ] [#77](https://github.com/Astraive/nextral/issues/77): execute actual verification-only tag signing and validate the attested artifact bundle.
+- [ ] [#81](https://github.com/Astraive/nextral/issues/81): complete production integration after replacing the quota-limited Neo4j mirror with its identical verified upstream digest and freezing PostgreSQL/Redis identities.
 
 ## Current verification boundary
 
 The last complete successful [CI run 38812797031](https://github.com/Astraive/nextral/actions/runs/38812797031), at head `1631b2e6510bb0394eaa0af016937a7bb13bf015`, passed **all 47 jobs**, including complete production integration. It predates the acceptance repairs described by L and is not final verification of those changes.
+
+Repair-source [CI run 38842556019](https://github.com/Astraive/nextral/actions/runs/38842556019), at `ea091c21a85acdecf745d4bc85101324197194d7`, passed all **46 non-production jobs** but stopped before production tests when the ECR Neo4j pull returned `toomanyrequests: Data limit exceeded`. This was not a runtime test failure. The registry repair retains exactly the same Neo4j OCI index digest on Docker Hub; upstream manifest/platform/config digests were fetched and verified, PostgreSQL 16.15 and Redis 7.4.11 images were frozen by digest, and daemon-free Compose configuration validation passed. Actual five-store completion remains pending; no failing gate was waived.
 
 | Current gate | Observed result | Scope |
 | --- | --- | --- |

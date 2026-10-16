@@ -6,6 +6,7 @@
 
 - Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
 - Pinned the five-store fixture and loopback ports; build official MinIO/mc releases from checksum-verified source.
+- Froze PostgreSQL 16.15/Redis 7.4.11 fixture identities and moved Neo4j to its identical upstream digest after the mirror quota failure.
 - Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
 - Exposed binding experiment/safety controls, restoring prior runtime state on reasoned active-experiment rollback.
 - Added explicit private-CA JWKS trust and provenance-aware archive cleanup with same-key tombstones, immutable uploads and scrubbed-job fencing.

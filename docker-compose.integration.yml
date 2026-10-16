@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: docker.io/library/postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
     environment:
       POSTGRES_DB: ${NEXTRAL_POSTGRES_DB:-nextral}
       POSTGRES_USER: ${NEXTRAL_POSTGRES_USER:-nextral}
@@ -15,7 +15,7 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:7
+    image: docker.io/library/redis:7@sha256:4fa24486b8bcca8eec45ee0eb166edc674795e53a2b53d1a9ef263eecebaac85
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -32,7 +32,7 @@ services:
       - "127.0.0.1:6334:6334"
 
   neo4j:
-    image: public.ecr.aws/docker/library/neo4j@sha256:f1e52d4dc6da122468c4a3c1050a4f5e117f6d3268625237c34d49166f0d6082
+    image: docker.io/library/neo4j@sha256:f1e52d4dc6da122468c4a3c1050a4f5e117f6d3268625237c34d49166f0d6082
     environment:
       NEO4J_AUTH: ${NEXTRAL_NEO4J_AUTH:-neo4j/nextraldev}
     ports:
