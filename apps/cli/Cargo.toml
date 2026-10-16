@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "nextral"
+path = "src/main.rs"
+
 [dependencies]
 nextral = { path = "../.." }
+nextral-mcp = { path = "../mcp" }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"

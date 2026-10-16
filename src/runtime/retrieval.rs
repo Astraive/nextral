@@ -2,10 +2,7 @@ use crate::{
     config::ScoringWeights,
     contracts::{CoreError, CoreResult},
     memory::{estimate_tokens, MemoryRecord, PrivacyLevel},
-    runtime::intelligence::{
-        classify_severity, decision_for, DecisionAction, MemoryQualityController, RuntimeLane,
-        SafetyPolicy, Severity,
-    },
+    runtime::intelligence::{decision_for, DecisionAction, RuntimeLane, SafetyPolicy, Severity},
     scoring::{lexical_score, retrieval_score},
     store::{GraphStore, MemoryIndexStore},
 };
@@ -19,6 +16,8 @@ pub struct RetrievalRequest {
     pub user_id: String,
     pub session_id: Option<String>,
     pub query_text: String,
+    #[serde(default)]
+    pub query_vector: Option<Vec<f32>>,
     pub entities: Vec<String>,
     pub intent_topic: Option<String>,
     pub token_budget: u32,
@@ -107,6 +106,7 @@ impl RetrievalRequest {
             user_id: user_id.into(),
             session_id: None,
             query_text: query_text.into(),
+            query_vector: None,
             entities: Vec::new(),
             intent_topic: None,
             token_budget: 1800,
@@ -147,9 +147,32 @@ pub fn retrieve<T>(store: &mut T, request: RetrievalRequest) -> CoreResult<Retri
 where
     T: MemoryIndexStore + GraphStore,
 {
+    let mut span = crate::runtime::observability::start_span("nextral.retrieve");
+    let result = retrieve_impl(store, request);
+    match &result {
+        Ok(response) => {
+            crate::runtime::observability::record_retrieval(&response.telemetry);
+            if response.status == RetrievalStatus::Error {
+                span.fail();
+            }
+        }
+        Err(_) => span.fail(),
+    }
+    result
+}
+
+fn retrieve_impl<T>(store: &mut T, mut request: RetrievalRequest) -> CoreResult<RetrievalResponse>
+where
+    T: MemoryIndexStore + GraphStore,
+{
     if request.query_text.trim().is_empty() {
         return Err(CoreError::InvalidInput("query cannot be empty".to_string()));
     }
+    if request.privacy_scope.is_empty() {
+        request.privacy_scope = vec![PrivacyLevel::Private];
+    }
+    store.prepare_retrieval(&mut request)?;
+    request.top_k_vector = request.top_k_vector.min(1000);
     const MAX_GRAPH_HOPS: u8 = 10;
     let max_graph_hops = request.max_graph_hops.min(MAX_GRAPH_HOPS);
     let scoring_weights = request.scoring_weights.clone().unwrap_or(ScoringWeights {
@@ -158,6 +181,7 @@ where
         importance: 0.2,
         access: 0.1,
     });
+    crate::config::validate_retrieval_weights(&scoring_weights)?;
     let trace_id = request.trace_id.clone().unwrap_or_else(|| {
         crate::memory::deterministic_id(&[
             &request.tenant_id,
@@ -171,71 +195,69 @@ where
         .policy_version
         .clone()
         .unwrap_or_else(|| "policy-v1".to_string());
-    let privacy_scope = if request.privacy_scope.is_empty() {
-        vec![PrivacyLevel::Private]
-    } else {
-        request.privacy_scope.clone()
-    };
-    let records =
-        store.list_memories(&request.tenant_id, &request.user_id, &privacy_scope, false)?;
-    let entity_boost = if request.entities.is_empty() {
-        0.0
-    } else {
-        0.3
-    };
-    let vector_start = Instant::now();
-    let vector_result: CoreResult<Vec<(MemoryRecord, f32)>> = {
-        let mut vector_items: Vec<(MemoryRecord, f32)> = records
-            .iter()
-            .map(|record| {
-                let mut score = lexical_score(&record.content, &request.query_text);
-                if entity_boost > 0.0 && !request.entities.is_empty() {
-                    let entity_matches = request
-                        .entities
-                        .iter()
-                        .filter(|e| record.entities.iter().any(|re| re.eq_ignore_ascii_case(e)))
-                        .count();
-                    if entity_matches > 0 {
-                        let entity_score = entity_matches as f32 / request.entities.len() as f32;
-                        score = (score + entity_score * entity_boost).min(1.0);
-                    }
-                }
-                (record.clone(), score)
-            })
-            .filter(|(_, score)| *score > 0.0)
-            .collect();
-        vector_items.sort_by(|left, right| right.1.total_cmp(&left.1));
-        vector_items.truncate(request.top_k_vector);
-        Ok(vector_items)
-    };
-    let vector_ms = vector_start.elapsed().as_millis() as u64;
+    let privacy_scope = request.privacy_scope.clone();
+    let shared = &*store;
+    let (vector_result, graph_result, vector_ms, graph_ms) = std::thread::scope(|threads| {
+        let vector_path = threads.spawn(|| {
+            let start = Instant::now();
+            let result = shared.vector_candidates(
+                &request.tenant_id,
+                &request.user_id,
+                &request.query_text,
+                request.query_vector.as_deref(),
+                request.top_k_vector,
+                &privacy_scope,
+            );
+            (result, start.elapsed().as_millis() as u64)
+        });
+        let graph_path = threads.spawn(|| {
+            let start = Instant::now();
+            let graph_query = if request.entities.is_empty() {
+                request.query_text.clone()
+            } else {
+                request.entities.join(" ")
+            };
+            let result = shared.graph_memory_ids(
+                &request.tenant_id,
+                &request.user_id,
+                &graph_query,
+                max_graph_hops,
+                &privacy_scope,
+            );
+            (result, start.elapsed().as_millis() as u64)
+        });
+        let (vectors, vector_ms) = vector_path
+            .join()
+            .unwrap_or_else(|_| (Err(CoreError::Io("vector worker panicked".into())), 0));
+        let (graph, graph_ms) = graph_path
+            .join()
+            .unwrap_or_else(|_| (Err(CoreError::Io("graph worker panicked".into())), 0));
+        (vectors, graph, vector_ms, graph_ms)
+    });
 
-    let graph_start = Instant::now();
-    let graph_result = store.graph_memory_ids(
-        &request.tenant_id,
-        &request.user_id,
-        &request.query_text,
-        max_graph_hops,
-        &privacy_scope,
-    );
-    let graph_ms = graph_start.elapsed().as_millis() as u64;
-
+    let all_paths_failed = vector_result.is_err() && (max_graph_hops == 0 || graph_result.is_err());
     let mut degraded_reasons = Vec::new();
-    let vector_items = match vector_result {
-        Ok(items) => items,
+    let vector_hits = match vector_result {
+        Ok(mut items) => {
+            items.truncate(request.top_k_vector);
+            items
+        }
         Err(error) => {
             degraded_reasons.push(format!("vector_path_failed:{error}"));
             Vec::new()
         }
     };
     let graph_ids = match graph_result {
-        Ok(ids) => ids,
+        Ok(mut ids) => {
+            ids.truncate(1000);
+            ids
+        }
         Err(error) => {
             degraded_reasons.push(format!("graph_path_failed:{error}"));
             Vec::new()
         }
     };
-    if vector_items.is_empty() && graph_ids.is_empty() && !degraded_reasons.is_empty() {
+    if all_paths_failed {
         return Ok(RetrievalResponse {
             retrieval_id: crate::memory::deterministic_id(&[
                 &request.user_id,
@@ -249,11 +271,7 @@ where
             quality_score: 0.0,
             severity: Severity::Destructive,
             decision_action: DecisionAction::AutoRollbackAndQuarantine,
-            rollback_id: Some(crate::memory::deterministic_id(&[
-                &request.user_id,
-                &request.query_text,
-                "retrieval_rollback",
-            ])),
+            rollback_id: None,
             telemetry: RetrievalTelemetry {
                 vector_candidates: 0,
                 graph_candidates: 0,
@@ -272,37 +290,66 @@ where
     }
 
     let merge_start = Instant::now();
-    let mut merged: HashMap<String, RetrievedItem> = HashMap::new();
-
-    for (record, semantic_similarity) in &vector_items {
-        merged.insert(
-            record.id.clone(),
-            item_from_record(
-                record,
-                SourcePath::Vector,
-                *semantic_similarity,
-                &scoring_weights,
-            ),
-        );
-    }
-    for memory_id in &graph_ids {
-        if let Some(record) = records.iter().find(|record| &record.id == memory_id) {
-            merged
-                .entry(memory_id.clone())
-                .and_modify(|item| item.source_path = SourcePath::Both)
-                .or_insert_with(|| {
-                    item_from_record(
-                        record,
-                        SourcePath::Graph,
-                        lexical_score(&record.content, &request.query_text),
-                        &scoring_weights,
-                    )
-                });
+    let now_nanos = crate::runtime::lifecycle::timestamp_nanos(&crate::memory::now_timestamp())?;
+    let graph_candidates = graph_ids.len();
+    let mut hits: HashMap<String, (Option<f32>, SourcePath)> = vector_hits
+        .into_iter()
+        .map(|(id, score)| {
+            (
+                id,
+                (
+                    Some(crate::scoring::normalize_score(score)),
+                    SourcePath::Vector,
+                ),
+            )
+        })
+        .collect();
+    for id in graph_ids {
+        match hits.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().0.is_some() {
+                    entry.get_mut().1 = SourcePath::Both;
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((None, SourcePath::Graph));
+            }
         }
     }
-
-    let mut items: Vec<RetrievedItem> = merged.into_values().collect();
-    items.sort_by(|left, right| right.retrieval_score.total_cmp(&left.retrieval_score));
+    let records = {
+        let ids: Vec<_> = hits.keys().map(String::as_str).collect();
+        store.get_active_memories(&request.tenant_id, &request.user_id, &ids)?
+    };
+    let mut vector_candidates = 0;
+    let mut items = Vec::with_capacity(records.len());
+    for record in records {
+        if record.tenant_id != request.tenant_id
+            || record.user_id != request.user_id
+            || record.status != crate::memory::MemoryStatus::Active
+            || !privacy_scope.contains(&record.privacy_level)
+        {
+            continue;
+        }
+        let Some((score, source_path)) = hits.remove(record.id.as_str()) else {
+            continue;
+        };
+        vector_candidates += usize::from(score.is_some());
+        let similarity =
+            score.unwrap_or_else(|| lexical_score(&record.content, &request.query_text));
+        items.push(item_from_record(
+            record,
+            source_path,
+            similarity,
+            &scoring_weights,
+            now_nanos,
+        )?);
+    }
+    items.sort_by(|left, right| {
+        right
+            .retrieval_score
+            .total_cmp(&left.retrieval_score)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
 
     let merged_candidates = items.len();
     let mut token_total = 0;
@@ -314,21 +361,18 @@ where
         }
     }
 
-    for item in &selected {
-        if let Some(mut record) =
-            store.get_memory(&request.tenant_id, &request.user_id, &item.memory_id)?
-        {
-            record.mark_accessed();
-            store.update_memory(record)?;
-        }
-    }
+    let access_ids: Vec<_> = selected
+        .iter()
+        .map(|item| item.memory_id.as_str())
+        .collect();
+    store.record_accesses(&request.tenant_id, &request.user_id, &access_ids)?;
     let merge_ms = merge_start.elapsed().as_millis() as u64;
     let utilization = if request.token_budget == 0 {
         0.0
     } else {
         (token_total as f32 / request.token_budget as f32).clamp(0.0, 1.0)
     };
-    let union_candidates = vector_items.len() + graph_ids.len();
+    let union_candidates = vector_candidates + graph_candidates;
     let dedupe_ratio = if union_candidates == 0 {
         0.0
     } else {
@@ -336,8 +380,8 @@ where
     };
 
     let telemetry = RetrievalTelemetry {
-        vector_candidates: vector_items.len(),
-        graph_candidates: graph_ids.len(),
+        vector_candidates,
+        graph_candidates,
         merged_candidates,
         selected_candidates: selected.len(),
         token_estimate: token_total,
@@ -348,37 +392,22 @@ where
         dedupe_ratio,
         degraded_reasons: degraded_reasons.clone(),
     };
-    let contradiction_rate = if selected.is_empty() { 1.0 } else { 0.0 };
-    let quality = MemoryQualityController::score(
-        if vector_items.is_empty() { 0.4 } else { 0.9 },
-        if merged_candidates == 0 {
-            0.0
-        } else {
-            selected.len() as f32 / merged_candidates as f32
-        },
-        contradiction_rate,
-        if degraded_reasons.is_empty() {
-            0.9
-        } else {
-            0.5
-        },
-    );
-    let severity = classify_severity(
-        quality.overall,
-        quality.contradiction_rate,
-        !degraded_reasons.is_empty(),
-    );
-    let decision_action = decision_for(&SafetyPolicy::default(), &severity);
-    let rollback_id = if severity == Severity::Destructive {
-        Some(crate::memory::deterministic_id(&[
-            &request.tenant_id,
-            &request.user_id,
-            &request.query_text,
-            "rollback",
-        ]))
+    let quality_score = if selected.is_empty() {
+        0.0
     } else {
-        None
+        selected
+            .iter()
+            .map(|item| item.retrieval_score)
+            .sum::<f32>()
+            / selected.len() as f32
     };
+    let severity = if degraded_reasons.is_empty() {
+        Severity::Success
+    } else {
+        Severity::Warning
+    };
+    let decision_action = decision_for(&SafetyPolicy::default(), &severity);
+    let rollback_id = None;
     let status = if degraded_reasons.is_empty() {
         RetrievalStatus::Ok
     } else {
@@ -394,7 +423,7 @@ where
         status,
         lane,
         policy_version,
-        quality_score: quality.overall,
+        quality_score,
         severity,
         decision_action,
         rollback_id,
@@ -404,25 +433,17 @@ where
 }
 
 fn item_from_record(
-    record: &MemoryRecord,
+    record: MemoryRecord,
     source_path: SourcePath,
     semantic_similarity: f32,
     weights: &ScoringWeights,
-) -> RetrievedItem {
+    now_nanos: u128,
+) -> CoreResult<RetrievedItem> {
     let access = (record.access_count as f32 / 10.0).min(1.0);
-    // Calculate recency based on how recently the record was created
-    // Decay factor: 1.0 for recent, decreasing over time (half-life ~30 days)
-    let now = crate::memory::now_timestamp()
-        .parse::<u64>()
-        .unwrap_or(u64::MAX);
-    let created = record.created_at.parse::<u64>().unwrap_or(u64::MAX);
-    let age_seconds = now.saturating_sub(created);
-    let half_life_seconds = 30 * 24 * 60 * 60; // 30 days
-    let recency = if age_seconds == 0 {
-        1.0
-    } else {
-        (0.5_f32).powf(age_seconds as f32 / half_life_seconds as f32)
-    };
+    let created = crate::runtime::lifecycle::timestamp_nanos(&record.created_at)?;
+    let recency = crate::scoring::recency_score(
+        now_nanos.saturating_sub(created) as f32 / 86_400_000_000_000.0,
+    );
     let score = retrieval_score(
         semantic_similarity,
         recency,
@@ -430,9 +451,10 @@ fn item_from_record(
         access,
         weights,
     );
-    RetrievedItem {
-        memory_id: record.id.clone(),
-        content: record.content.clone(),
+    let token_estimate = estimate_tokens(&record.content);
+    Ok(RetrievedItem {
+        memory_id: record.id,
+        content: record.content,
         source_path,
         retrieval_score: score,
         score_breakdown: ScoreBreakdown {
@@ -441,6 +463,6 @@ fn item_from_record(
             importance: record.importance_score,
             access,
         },
-        token_estimate: estimate_tokens(&record.content),
-    }
+        token_estimate,
+    })
 }

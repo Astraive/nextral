@@ -27,6 +27,7 @@ pub enum AuditAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditEvent {
+    /// Event identity within a tenant; correlation traces do not deduplicate mutations.
     pub id: String,
     pub tenant_id: String,
     pub user_id: Option<String>,
@@ -65,6 +66,23 @@ impl AuditEvent {
             metadata_json: "{}".to_string(),
             created_at: now_timestamp(),
         }
+    }
+
+    /// Compare replay payloads without the store-assigned insertion timestamp.
+    pub(crate) fn same_payload(&self, other: &Self) -> crate::contracts::CoreResult<bool> {
+        let metadata: serde_json::Value = serde_json::from_str(&self.metadata_json)?;
+        let other_metadata: serde_json::Value = serde_json::from_str(&other.metadata_json)?;
+        Ok(self.id == other.id
+            && self.tenant_id == other.tenant_id
+            && self.user_id == other.user_id
+            && self.actor == other.actor
+            && self.action == other.action
+            && self.target_type == other.target_type
+            && self.target_id == other.target_id
+            && self.reason == other.reason
+            && self.request_id == other.request_id
+            && self.trace_id == other.trace_id
+            && metadata == other_metadata)
     }
 }
 

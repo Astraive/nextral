@@ -1,78 +1,33 @@
 {
   "openapi": "3.1.0",
-  "info": {
-    "title": "Nextral Package Runtime API",
-    "version": "0.1.0"
-  },
+  "info": {"title": "Nextral Package Runtime API", "version": "0.1.0", "description": "All transports share the configured Rust runtime. JWT tenant_id and sub must match tenant_id and user_id; actor_id must match sub. The configured service bearer token is a privileged automation credential authorized across scopes. Anonymous network operation is allowed only for explicitly selected test_memory. Timestamps accept RFC3339 or epoch-seconds strings. Hosts supply embedding/query_vector when the external callback provider is configured; no models are bundled."},
+  "security": [{"bearerAuth": []}],
   "paths": {
-    "/healthz": {
-      "get": {
-        "operationId": "healthz",
-        "responses": {
-          "200": {
-            "description": "Runtime process is alive"
-          }
-        }
-      }
-    },
-    "/readyz": {
-      "get": {
-        "operationId": "readyz",
-        "responses": {
-          "200": {
-            "description": "Configured providers and stores are reachable"
-          }
-        }
-      }
-    },
-    "/v1/memories": {
-      "post": {
-        "operationId": "ingestMemory",
-        "summary": "Ingest a memory candidate through configured providers and stores",
-        "responses": {
-          "202": { "description": "Memory accepted for durable write path" },
-          "400": { "description": "Invalid request or policy violation" },
-          "503": { "description": "Required provider or store unavailable" }
-        }
-      }
-    },
-    "/v1/retrieval/query": {
-      "post": {
-        "operationId": "retrieveMemory",
-        "summary": "Run dual vector and graph retrieval",
-        "responses": {
-          "200": { "description": "Retrieval response with candidates and telemetry" },
-          "400": { "description": "Invalid request" },
-          "503": { "description": "Retrieval unavailable or degraded beyond policy" }
-        }
-      }
-    },
-    "/v1/memories/{memory_id}/forget": {
-      "post": {
-        "operationId": "forgetMemory",
-        "summary": "Forget or redact a memory across configured stores",
-        "parameters": [
-          {
-            "name": "memory_id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
-        ],
-        "responses": {
-          "202": { "description": "Forget workflow accepted" },
-          "404": { "description": "Memory not found" }
-        }
-      }
-    },
-    "/v1/reminders": {
-      "post": {
-        "operationId": "scheduleReminder",
-        "summary": "Schedule prospective memory through configured queue/dispatch policy",
-        "responses": {
-          "202": { "description": "Reminder scheduled" }
-        }
-      }
+    "/healthz": {"get": {"operationId": "healthz", "security": [], "responses": {"200": {"description": "Process is alive", "content": {"application/json": {"schema": {"type": "object", "required": ["status"], "properties": {"status": {"const": "alive"}}}}}}}}},
+    "/readyz": {"get": {"operationId": "readyz", "security": [], "responses": {"200": {"description": "Required stores passed active probes", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Readiness"}}}}, "503": {"description": "Required store failed its active probe", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Readiness"}}}}, "429": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/memories": {"post": {"operationId": "ingestMemory", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IngestMemoryRequest"}}}}, "responses": {"202": {"description": "Memory durably accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IngestMemoryResponse"}}}}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"}, "413": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}, "429": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}, "504": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/retrieval/query": {"post": {"operationId": "retrieveMemory", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RetrieveMemoryRequest"}}}}, "responses": {"200": {"description": "Ranked memories and measured telemetry", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RetrievalResponse"}}}}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "413": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}, "429": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}, "504": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/memories/{memory_id}/forget": {"post": {"operationId": "forgetMemory", "parameters": [{"name": "memory_id", "in": "path", "required": true, "schema": {"type": "string", "minLength": 1}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ForgetMemoryRequest"}}}}, "responses": {"202": {"description": "Durable forget workflow accepted; status and receipts identify completed versus pending propagation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ForgetMemoryResponse"}}}}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}, "429": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}, "504": {"$ref": "#/components/responses/Error"}}}},
+    "/v1/reminders": {"post": {"operationId": "scheduleReminder", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ScheduleReminderRequest"}}}}, "responses": {"202": {"description": "Reminder durably scheduled", "content": {"application/json": {"schema": {"type": "object", "required": ["reminder"], "properties": {"reminder": {"$ref": "#/components/schemas/Reminder"}}}}}}, "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}, "429": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}, "504": {"$ref": "#/components/responses/Error"}}}}
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "description": "Verified RS256/ES256 JWT with configured issuer/audience/JWKS, or the configured privileged service token."}},
+    "responses": {"Error": {"description": "Request rejected; code and message identify the failure", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}},
+    "schemas": {
+      "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}},
+      "Scope": {"type": "object", "required": ["tenant_id", "user_id"], "properties": {"tenant_id": {"type": "string", "minLength": 1, "maxLength": 128}, "user_id": {"type": "string", "minLength": 1, "maxLength": 128}}},
+      "Privacy": {"type": "string", "enum": ["private", "sensitive", "shared", "restricted"]},
+      "Vector": {"type": "array", "minItems": 1, "items": {"type": "number"}, "description": "Finite host-generated vector with exactly the configured embedding dimension."},
+      "IngestMemoryRequest": {"allOf": [{"$ref": "#/components/schemas/Scope"}, {"type": "object", "required": ["content", "content_type", "memory_type", "privacy_level"], "properties": {"id": {"type": ["string", "null"]}, "session_id": {"type": ["string", "null"]}, "content": {"type": "string", "minLength": 1}, "content_type": {"enum": ["decision", "preference", "goal", "fact", "task", "event", "note", "commitment", "pattern"]}, "memory_type": {"enum": ["working", "session", "episodic", "semantic", "relational", "procedural", "prospective"]}, "privacy_level": {"$ref": "#/components/schemas/Privacy"}, "source_type": {"enum": ["realtime", "fast_lane", "deep_lane", "import", "manual"], "default": "realtime"}, "importance_score": {"type": "number", "minimum": 0, "maximum": 1, "default": 0}, "confidence_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "entities": {"type": "array", "items": {"type": "string"}}, "tags": {"type": "array", "items": {"type": "string"}}, "source_message_ids": {"type": "array", "items": {"type": "string"}}, "embedding": {"$ref": "#/components/schemas/Vector"}, "graph_hints": {"type": "array", "items": {"$ref": "#/components/schemas/GraphHint"}}}}]},
+      "GraphHint": {"type": "object", "required": ["from_label", "from_name", "relationship_type", "to_label", "to_name", "confidence"], "properties": {"from_label": {"type": "string"}, "from_name": {"type": "string"}, "relationship_type": {"type": "string"}, "to_label": {"type": "string"}, "to_name": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}},
+      "IngestMemoryResponse": {"type": "object", "required": ["memory_id", "status", "validation_errors", "dedupe_key"], "properties": {"memory_id": {"type": "string"}, "status": {"const": "accepted"}, "validation_errors": {"type": "array", "items": {"type": "string"}}, "dedupe_key": {"type": "string", "description": "Canonical deterministic memory identifier used for ingestion deduplication."}}},
+      "RetrieveMemoryRequest": {"allOf": [{"$ref": "#/components/schemas/Scope"}, {"type": "object", "required": ["query_text"], "properties": {"query_text": {"type": "string", "minLength": 1}, "session_id": {"type": ["string", "null"]}, "intent_topic": {"type": ["string", "null"]}, "entities": {"type": "array", "items": {"type": "string"}}, "token_budget": {"type": "integer", "minimum": 1, "description": "Cannot exceed configured token budget."}, "privacy_scope": {"type": "array", "items": {"$ref": "#/components/schemas/Privacy"}, "description": "Must be a subset of configured privacy policy."}, "top_k_vector": {"type": "integer", "minimum": 1, "maximum": 1000}, "max_graph_hops": {"type": "integer", "minimum": 1, "maximum": 10}, "query_vector": {"$ref": "#/components/schemas/Vector"}}}]},
+      "RetrievalResponse": {"type": "object", "required": ["tenant_id", "user_id", "trace_id", "status", "items", "telemetry"], "properties": {"tenant_id": {"type": "string"}, "user_id": {"type": "string"}, "trace_id": {"type": "string"}, "status": {"enum": ["ok", "degraded"]}, "items": {"type": "array", "items": {"type": "object", "required": ["memory_id", "content", "source_path", "retrieval_score", "score_breakdown"], "properties": {"memory_id": {"type": "string"}, "content": {"type": "string"}, "source_path": {"enum": ["vector", "graph", "both"]}, "retrieval_score": {"type": "number"}, "score_breakdown": {"type": "object"}}}}, "telemetry": {"type": "object", "required": ["vector_candidates", "graph_candidates", "selected_candidates", "token_estimate", "degraded_reasons"], "properties": {"degraded_reasons": {"type": "array", "items": {"type": "string"}}}}}},
+      "ForgetMemoryRequest": {"allOf": [{"$ref": "#/components/schemas/Scope"}, {"type": "object", "required": ["actor_id", "reason", "redact"], "properties": {"actor_id": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}, "redact": {"type": "boolean"}}}]},
+      "ForgetMemoryResponse": {"type": "object", "required": ["workflow_id", "status", "receipts"], "properties": {"workflow_id": {"type": "string", "description": "Durable lifecycle key forget/{user_id}/{memory_id}, scoped by tenant."}, "status": {"enum": ["completed", "incomplete"]}, "receipts": {"type": "array", "items": {"type": "object"}}}},
+      "ScheduleReminderRequest": {"allOf": [{"$ref": "#/components/schemas/Scope"}, {"type": "object", "required": ["source_memory_id", "kind", "title", "due_at", "timezone"], "properties": {"source_memory_id": {"type": "string"}, "kind": {"enum": ["follow_up", "commitment", "task"]}, "title": {"type": "string", "minLength": 1}, "due_at": {"type": "string", "description": "RFC3339 timestamp or epoch-seconds string"}, "timezone": {"type": "string", "description": "IANA timezone name"}, "priority": {"enum": ["low", "normal", "high"]}}}]},
+      "Reminder": {"type": "object", "required": ["id", "tenant_id", "user_id", "source_memory_id", "due_at", "status"], "properties": {"id": {"type": "string"}, "tenant_id": {"type": "string"}, "user_id": {"type": "string"}, "source_memory_id": {"type": "string"}, "due_at": {"type": "string"}, "status": {"type": "string"}}},
+      "Readiness": {"type": "object", "required": ["fail_fast", "backends"], "properties": {"fail_fast": {"type": "boolean"}, "backends": {"type": "array", "items": {"type": "object", "required": ["backend", "status"], "properties": {"backend": {"type": "string"}, "status": {"enum": ["ready", "unavailable"]}, "degraded_signature": {"type": ["string", "null"]}}}}}}
     }
   }
 }

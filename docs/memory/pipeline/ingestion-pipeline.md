@@ -1,53 +1,17 @@
-# Ingestion Pipeline
+# Ingestion pipeline
 
-## Purpose
+## Session append is not memory extraction
 
-Move live messages into session memory with minimal latency and full traceability.
+`nextral.session.append` records a scoped message in the full PostgreSQL transcript and refreshes the Redis last-20 tail. Appending text does not automatically call a model, embed a fact, infer a reminder, or invoke retrieval.
 
-## Stages
+## Explicit durable candidate ingestion
 
-1. **Ingress**
-   - receive message with user/session metadata
-2. **Validation**
-   - schema and policy checks
-3. **Hot write**
-   - append to Redis session list
-4. **Warm write**
-   - persist transcript row in PostgreSQL
-5. **Context fetch trigger**
-   - initiate retrieval pipeline for response assembly
+1. The host supplies tenant/user scope, optional stable ID/session provenance, content/type, source IDs, scores, privacy, entities/tags, typed graph hints and embedding.
+2. Rust validates identifiers, content, scores, policy thresholds and production vector/provider dimensions. Rejection can be a normal `status: rejected` result.
+3. Canonical memory, audit and outbox state commit together in PostgreSQL.
+4. External vector/graph work produces real receipts; durable outbox processing repairs incomplete effects.
+5. Retrieval later reloads active canonical state instead of trusting stale index content.
 
-## Idempotency keys
+The request is an executable write, not a schema response. Use Rust CLI `schema nextral.memory.ingest` or Python `memory ingest-schema` for inspection. See [record payloads](../contracts/memory-record-schema.md).
 
-- message-level idempotency key
-- session + message hash fallback key
-
-## Failure modes
-
-| Failure | Handling |
-|---|---|
-| Redis write failure | retry then fallback to warm-only mode |
-| PostgreSQL write failure | fail request write stage with explicit error |
-| Duplicate message | reject or no-op based on idempotency key |
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+A stable explicit identity is useful for replay. Do not assume an undocumented message-hash fallback or transactional all-or-nothing batch behavior. Preserve returned validation errors, receipts and trace IDs without logging sensitive bodies.

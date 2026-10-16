@@ -1,63 +1,48 @@
-use nextral::package::{e2e_smoke_json, ingest_request_schema_json, mcp_call_json};
-use std::{env, process};
+use nextral::package::PackageError;
+use nextral_mcp::{command_arguments, configure_runtime, input_error, protocol};
+use std::{env, io, process::ExitCode};
 
-fn main() {
-    tracing_subscriber::fmt::init();
-    if let Err(error) = run() {
-        tracing::error!(error = %error, "MCP call failed");
-        eprintln!("{error}");
-        process::exit(1);
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .init();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":{"code":error.code,"message":error.message}})
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn run() -> Result<(), String> {
-    match env::args().nth(1).as_deref() {
-        Some("tools") => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "tools": [
-                        "nextral.memory.ingest",
-                        "nextral.memory.retrieve",
-                        "nextral.memory.forget",
-                        "nextral.memory.list",
-                        "nextral.graph.query",
-                        "nextral.graph.graphify",
-                        "nextral.reminders.due",
-                        "nextral.reminders.schedule",
-                        "nextral.session.append",
-                        "nextral.session.context",
-                        "nextral.consolidation.run",
-                        "nextral.reembed.plan",
-                        "nextral.health",
-                        "nextral.runtime.scored_search",
-                        "nextral.memory.update",
-                        "nextral.memory.stats",
-                        "nextral.memory.search_by_tag",
-                        "nextral.memory.search_by_entity",
-                        "nextral.batch.ingest",
-                        "nextral.batch.retrieve",
-                        "nextral.batch.forget",
-                        "experiments.create",
-                        "experiments.promote",
-                        "experiments.rollback",
-                        "experiments.status",
-                        "safety.policy.get",
-                        "safety.policy.set"
-                    ]
-                })
-            );
+fn run() -> Result<(), PackageError> {
+    let (config, args) = command_arguments(env::args().skip(1).collect())?;
+    match args.as_slice() {
+        [flag] if flag == "--help" || flag == "-h" => {
+            eprintln!("nextral-mcp [--config FILE] [stdio]\nNewline-delimited MCP JSON-RPC over stdin/stdout. Configure with --config or NEXTRAL_CONFIG.\n--help, -h    Show help\n--version, -V Show version");
+            return Ok(());
         }
-        Some("schema") => println!("{}", ingest_request_schema_json()),
-        Some("smoke") => println!("{}", e2e_smoke_json().map_err(|error| error.message)?),
-        Some("call") => {
-            let request_json = env::args().nth(2).ok_or("missing MCP call request JSON")?;
-            println!(
-                "{}",
-                mcp_call_json(&request_json).map_err(|error| error.message)?
-            );
+        [flag] if flag == "--version" || flag == "-V" => {
+            eprintln!("nextral-mcp {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
         }
-        _ => println!("usage: nextral-mcp tools | schema | smoke | call '<json>'"),
+        [] => {}
+        [command] if command == "stdio" => {}
+        _ => {
+            return Err(input_error(
+                "usage: nextral-mcp [--config FILE] [stdio] | --help | --version",
+            ))
+        }
     }
-    Ok(())
+    configure_runtime(config.as_deref())?;
+    protocol::serve(&mut io::stdin().lock(), &mut io::stdout().lock()).map_err(|error| {
+        PackageError {
+            code: "io".into(),
+            message: error.to_string(),
+        }
+    })
 }

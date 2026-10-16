@@ -31,7 +31,11 @@ impl SessionMessage {
         let idempotency_key = idempotency_key.into();
         const MAX_MESSAGE_CONTENT: usize = 100_000;
         if content.len() > MAX_MESSAGE_CONTENT {
-            content.truncate(MAX_MESSAGE_CONTENT);
+            let mut boundary = MAX_MESSAGE_CONTENT;
+            while !content.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            content.truncate(boundary);
         }
         let id = deterministic_id(&[
             &tenant_id,
@@ -56,6 +60,13 @@ impl SessionMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EligibleSession {
+    pub session_id: String,
+    pub last_message_at: String,
+    pub message_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
     pub tenant_id: String,
@@ -74,4 +85,10 @@ pub struct WorkingContext {
     pub session_tail: Vec<SessionMessage>,
     pub retrieved_memory_ids: Vec<String>,
     pub procedural_policy_ids: Vec<String>,
+    pub procedural_policies: Vec<crate::domain::ProceduralPolicy>,
+    pub session_summary: Option<SessionSummary>,
+    pub retrieved_memories: Vec<crate::retrieval::RetrievedItem>,
+    pub token_estimate: u32,
+    #[serde(default)]
+    pub degraded_reasons: Vec<String>,
 }

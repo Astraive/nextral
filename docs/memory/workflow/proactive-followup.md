@@ -1,59 +1,12 @@
-# Workflow: Proactive Follow-up
+# Workflow: proactive follow-up
 
-## Scenario
+1. Host extraction identifies a commitment and ingests an owned source memory with explicit model outputs.
+2. Host resolves due time, timezone, privacy and channel consent, then schedules the reminder explicitly.
+3. A host-owned scheduler invokes `nextral.reminders.due` with scope, cutoff, actor and retry policy.
+4. Rust claims durable delivery work, checks source availability, privacy/channel policy, priority, quiet hours, dedupe and expiry.
+5. The configured webhook receives a real HTTP request; acknowledgement or error determines the persisted attempt outcome and next state.
+6. Inspect `reminders.list` for status, retries, terminal reason and receipts without sending again.
 
-Tony proactively follows up on a commitment extracted from earlier conversation.
+Set `NEXTRAL_REMINDER_WEBHOOK_URL` and optional `NEXTRAL_REMINDER_WEBHOOK_TOKEN`. No magic title simulates delivery. A restarted host can recover durable state/expired leases; downstream handlers must remain idempotent under retries. Completion means acknowledged delivery, not human engagement or execution of an arbitrary agent workflow.
 
-## Flow
-
-1. Consolidation extracts commitment/reminder candidate.
-2. Candidate is normalized into prospective record (`scheduled` state).
-3. Package scheduler integration evaluates due window and policy constraints.
-4. At due time, workflow dispatches follow-up action.
-5. Outcome is recorded:
-   - `completed`
-   - `retry_scheduled`
-   - `failed`
-   - `expired`
-
-## Policy gates
-
-- quiet-hour and channel constraints
-- dedupe by reminder key
-- privacy-level constraints for proactive content
-
-## Reliability behavior
-
-- at-least-once scheduling
-- idempotent dispatch handlers
-- bounded retries with explicit terminal reasons
-
-## Traceability
-
-Each proactive action links back to:
-
-- source memory ID
-- reminder ID
-- dispatch attempt history
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+A package import does not install cron, extract future actions automatically, or generate follow-up prose. See [reminder payloads](../contracts/prospective-contract.md).

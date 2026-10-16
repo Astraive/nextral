@@ -4,85 +4,268 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}-target
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   rust:
+    name: Rust / ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check release versions
+        run: python scripts/verify-release.py versions
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Strict all-feature Clippy
+        run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+      - name: All-feature tests
+        run: cargo test --workspace --locked --all-targets --all-features
+      - name: Documentation tests
+        run: cargo test --workspace --locked --all-features --doc
 
-  node:
+  packages:
+    name: Native packages / ${{ matrix.platform }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - { os: ubuntu-22.04, platform: linux-x64, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, platform: darwin-x64, target: x86_64-apple-darwin }
+          - { os: macos-14, platform: darwin-arm64, target: aarch64-apple-darwin }
+          - { os: windows-latest, platform: win32-x64, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
-          node-version: "22"
+          python-version: '3.10'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
           cache: npm
-      - name: Install root dependencies
-        run: npm ci
-      - name: Install node binding dependencies
+          cache-dependency-path: bindings/node/package-lock.json
+      - name: Install locked Node build dependencies
         working-directory: bindings/node
-        run: npm ci
-      - name: Build node package
-        run: npm --workspace bindings/node run build
-      - name: Node smoke
-        run: node -e "const n=require('./bindings/node/index.js'); console.log(n.e2ESmoke())"
+        run: npm ci --workspaces=false
+      - name: Build native Node artifact
+        working-directory: bindings/node
+        run: npm run build -- --target ${{ matrix.target }}
+      - name: Check Node declarations
+        working-directory: bindings/node
+        run: npm run test:types
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-${{ matrix.platform }}
+          path: bindings/node/native/*.node
+          if-no-files-found: error
+      - name: Build portable stable-ABI Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: '2_28'
+          # Build against container OpenSSL; repair bundles libssl/libcrypto into the wheel.
+          before-script-linux: dnf install -y openssl-devel pkgconf-pkg-config patchelf
+          args: --release --locked --auditwheel repair --manifest-path bindings/python/Cargo.toml --out artifacts/wheels
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: artifacts/wheels/*.whl
+          if-no-files-found: error
 
-  python:
+  npm-package:
+    name: Pack universal npm artifact
+    needs: packages
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: native-*
+          path: artifacts/native
+          merge-multiple: true
+      - name: Install locked pack dependencies
+        working-directory: bindings/node
+        run: npm ci --workspaces=false
+      - name: Collect all supported native targets
+        working-directory: bindings/node
+        run: npm run artifacts:collect -- ../../artifacts/native
+      - name: Require complete native artifact set
+        working-directory: bindings/node
+        run: npm run release:check
+      - name: Pack npm artifact
+        working-directory: bindings/node
+        run: npm pack --pack-destination ${{ runner.temp }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/nextral-*.tgz
+          if-no-files-found: error
+
+  node-consumer:
+    name: Installed npm / ${{ matrix.platform }} / Node ${{ matrix.node }}
+    needs: npm-package
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+        platform: [linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64]
+        include:
+          - { os: ubuntu-22.04, platform: linux-x64 }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { os: macos-15-intel, platform: darwin-x64 }
+          - { os: macos-14, platform: darwin-arm64 }
+          - { os: windows-latest, platform: win32-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-      - name: Install maturin
-        run: python -m pip install maturin
-      - name: Build Python wheel
-        working-directory: bindings/python
-        run: python -m maturin build
-      - name: Install Python wheel (Linux)
-        if: runner.os == 'Linux'
-        run: python -m pip install $(ls target/wheels/*.whl | head -1)
-      - name: Install Python wheel (Windows)
-        if: runner.os == 'Windows'
-        run: python -m pip install (Get-ChildItem target/wheels/*.whl | Select-Object -First 1).FullName
-      - name: Python CLI help
-        working-directory: bindings/python
-        run: python -m nextral --help
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: npm-package
+          path: artifacts/npm
+      - name: Install packed artifact in clean consumer and exercise behavior
+        run: python scripts/verify-release.py node-smoke artifacts/npm
+
+  python-consumer:
+    name: Installed wheel / ${{ matrix.platform }} / Python ${{ matrix.python }}
+    needs: packages
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        platform: [linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64]
+        include:
+          - { os: ubuntu-22.04, platform: linux-x64 }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { os: macos-15-intel, platform: darwin-x64 }
+          - { os: macos-14, platform: darwin-arm64 }
+          - { os: windows-latest, platform: win32-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: artifacts/wheels
+      - name: Install wheel in clean environment and exercise behavior
+        run: python scripts/verify-release.py python-smoke artifacts/wheels
+
+  crate:
+    name: Pack and consume Rust core and API crates
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package publishable crates together with locked dependencies
+        run: python scripts/verify-release.py crate-package
+      - name: Exercise clean Rust consumer and compile packaged examples and API
+        run: python scripts/verify-release.py crate-smoke "${{ env.CARGO_TARGET_DIR }}/crate-package/package"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: rust-crate
+          path: ${{ env.CARGO_TARGET_DIR }}/crate-package/package/nextral-*.crate
+          if-no-files-found: error
+
+  release-artifacts:
+    name: Validate complete release artifact set
+    needs: [packages, npm-package, crate]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts/downloads
+      - name: Collect release files
+        run: python scripts/verify-release.py collect artifacts/downloads artifacts/release
+      - name: Check versions, native architectures, package contents and checksums
+        run: python scripts/verify-release.py artifacts artifacts/release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-bundle
+          path: artifacts/release/*
+          if-no-files-found: error
 
   docker-e2e:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Production Docker integration
+    needs: [npm-package, packages]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
-      - name: Install node binding dependencies
-        working-directory: bindings/node
-        run: npm ci
-      - name: Build node package
-        run: npm --workspace bindings/node run build
-      - name: Run Docker integration E2E
-        run: bash scripts/e2e-docker.sh
+          cache-dependency-path: bindings/node/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v7
+        with:
+          name: wheel-linux-x64
+          path: artifacts/wheels
+      - uses: actions/download-artifact@v7
+        with:
+          name: npm-package
+          path: artifacts/npm
+      - name: Build CLI, MCP and API hosts
+        run: cargo build --locked -p nextral-cli -p nextral-mcp -p nextral-api
+      - name: Build pinned upstream MinIO server and fixture client
+        run: docker compose -f docker-compose.integration.yml --profile tooling build minio mc
+      - name: Exercise genuine production persistence and protocol operations
+        run: bash scripts/e2e-docker.sh --skip-build --wheel-dir artifacts/wheels --npm-package artifacts/npm/*.tgz
+      - name: Retain measured replay and native control evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: integration-research
+          path: ${{ env.CARGO_TARGET_DIR }}/integration-research/
+          if-no-files-found: warn

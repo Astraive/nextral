@@ -1,65 +1,14 @@
-# Retrieval Pipeline
+# Retrieval pipeline
 
-## Purpose
+1. Host supplies query text/vector, entities and scope; Rust does not embed the query.
+2. Enabled vector and graph paths execute in parallel with their configured limits.
+3. Merge candidate IDs, deduplicate, then fetch active canonical records in a single tenant/user/privacy-scoped query.
+4. Compute configured weighted similarity, recency, importance and access scores.
+5. Fit selected items to the token estimate budget, with score/source breakdowns.
+6. Atomically update access metadata without vector reindexing and return status, safety decision and telemetry.
 
-Return the best possible memory context for a request by combining vector similarity and graph structure.
+One enabled path failing yields degraded results if another survives. All enabled paths failing yields an error; do not invent session-only success as though retrieval succeeded. Hosts may explicitly choose their own fallback behavior.
 
-## Stages
+Batch retrieval keys validate request fingerprints, not stored raw response bodies. Every read observes current canonical content and lifecycle/privacy state after mutations. Never turn idempotency into stale memory replay.
 
-1. **Query build**
-   - compose query text from message + entities + intent
-2. **Parallel retrieval**
-   - vector path (Qdrant)
-   - graph path (Neo4j)
-3. **Rerank**
-   - compute retrieval score components
-4. **Merge**
-   - dedupe and unify rankings
-5. **Token fit**
-   - trim to memory layer budget
-6. **ContextBundle emit**
-   - return memory layer to response pipeline
-
-## Scoring contract
-
-```text
-retrieval_score =
-  (0.5 * semantic_similarity) +
-  (0.2 * exp(-0.05 * days_since_creation)) +
-  (0.2 * importance_score) +
-  (0.1 * normalized_access_count)
-```
-
-## Degraded behavior
-
-- one-path failure -> continue with surviving path + degrade marker
-- two-path failure -> explicit retrieval failure status
-
-## Telemetry
-
-- stage latency breakdown
-- per-path candidate volume
-- merge dedupe ratio
-- token utilization
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+Latency/count telemetry reflects actual stages. Optional exported telemetry and replay reports are separate from performance guarantees; see [measurement](../operations/slos-alerting-and-capacity.md).

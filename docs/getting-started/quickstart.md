@@ -1,60 +1,46 @@
 # Quickstart
 
-Nextral is a package-first memory runtime. Install the Python or npm package,
-provide production store/provider config, and use the CLI or language bindings
-from your app.
+## 1. Configure a backend
 
-## Validate Config
+For durable use, copy `examples/config.production.example.json` to a deployment file, replace placeholders, configure credentials and reachable stores, and set `stores.qdrant_collection`. The host must supply model outputs; provider configuration does not call a provider. For isolated tests only, explicitly select `test_memory` as shown in the [Node example](../../bindings/node/README.md#configure-explicitly).
 
-```bash
-nextral config validate examples/config.production.example.json
+## 2. Validate and migrate
+
+Using the Rust CLI:
+
+```sh
+nextral config validate runtime.json
+nextral --config owner-config.json database migrate '{}'
 ```
 
-The production backend requires PostgreSQL, Redis, Qdrant, Neo4j, MinIO/S3,
-embedding provider config, extraction provider config, cache policy, auth, and
-retrieval policy. Example values are placeholders; production values must be
-supplied by the host application or deployment environment.
+Use a schema-owning migration role, then a restricted no-DDL runtime role with tenant/user RLS. Python's migration spelling is `python -m nextral db migrate owner-config.json`. Validation is not migration, store provisioning, or a readiness check.
 
-## Inspect Runtime Shapes
+## 3. Execute actual operations
 
-```bash
-nextral memory ingest
+```sh
+nextral schema nextral.memory.ingest
+nextral --config runtime.json memory ingest ingest.json
+nextral --config runtime.json memory retrieve query.json
+nextral --config runtime.json memory get '{"tenant_id":"example","user_id":"alice","memory_id":"atlas-database"}'
+```
+
+Create `ingest.json` from the schema and supply your own content, embedding, metadata, scores and policy; create `query.json` with a matching `query_vector` and explicit tenant/user/privacy scope. The [Python](../../bindings/python/README.md) and [Node](../../bindings/node/README.md) guides show programmatic calls. `memory ingest` is not a schema command. Python's template command is `python -m nextral memory ingest-schema`.
+
+For the deliberately isolated native testkit flow:
+
+```sh
 nextral memory smoke
-nextral jobs reembed-plan examples/reembed.example.json
 ```
 
-`memory smoke` uses the explicit testkit backend. It is not a hidden production
-default.
+This does not exercise production persistence or an embedding provider.
 
-## Optional Service Modes
+## 4. Optional hosts and integration
 
-```bash
-nextral-api plan http examples/config.production.example.json
-nextral-api plan grpc examples/config.production.example.json
-nextral-api plan graphql examples/config.production.example.json
-nextral-mcp tools
+```sh
+nextral-api serve all runtime.json
+nextral-mcp --config runtime.json stdio
 ```
 
-HTTP, gRPC, GraphQL, and MCP are optional package-provided service surfaces over
-the same Rust runtime.
+The API command starts real listeners. `nextral-api plan all runtime.json` only prints a plan. MCP uses JSON-RPC `tools/list`, not a `nextral-mcp tools` subcommand. See [CLI and protocol examples](../cli/README.md).
 
-## Docker Integration E2E
-
-Run the full local store verification when Docker is available:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\e2e-docker.ps1
-```
-
-The harness starts PostgreSQL, Redis, Qdrant, Neo4j, and MinIO/S3 from
-`docker-compose.integration.yml`; applies migrations/provisioning; writes
-fixtures for working, session, episodic, semantic, relational, procedural, and
-prospective memory; verifies retrieval/storage effects; and runs CLI plus Node
-package smoke checks.
-
-## Architecture Docs
-
-- `docs/architecture/project-structure.md`
-- `docs/memory/README.md`
-- `docs/package-production.md`
-
+For real-store integration with Docker, run `scripts/e2e-docker.ps1` on Windows or `scripts/e2e-docker.sh` on a shell host. The harness provisions fixtures and exercises durable operations; run it against disposable infrastructure, not user data. Its scope is not a production readiness certification.

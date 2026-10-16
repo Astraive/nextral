@@ -2,9 +2,25 @@
 
 ## Unreleased
 
-- Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
-
 ## 0.1.0
+
+- Preserved local runtime, adapter, binding, and CI work and integrated upstream isolation fixes.
+- Pinned the five-store fixture and loopback ports; build official MinIO/mc releases from checksum-verified source.
+- Froze PostgreSQL 16.15/Redis 7.4.11 fixture identities and moved Neo4j to its identical upstream digest after the mirror quota failure.
+- Added persisted canonical-memory graph replay, explicit positive/`NOT_` contradictions, and authoritative graph hints.
+- Exposed binding experiment/safety controls, restoring prior runtime state on reasoned active-experiment rollback.
+- Added explicit private-CA JWKS trust and provenance-aware archive cleanup with same-key tombstones, immutable uploads and scrubbed-job fencing.
+- Replaced the yanked transitive ChaCha release with compatible `0.10.2`.
+- Required the corrected async-trait macro and portable bundled-TLS wheel builds.
+- Added applied-policy replay validation and persisted canonical contradiction evidence.
+- Classify malformed caller configuration and tool payloads as invalid input while preserving internal serialization errors.
+- Preserve checked trace sequence allocation across supported Rust versions.
+- Isolate crate verification from native Cargo caches and normalize CI artifact paths.
+- Removed incidental error-wording pins from authenticated denial and migration-exposure verification.
+- Added scoped aged-session metadata selection and explicit PostgreSQL warm recovery when Redis is unavailable.
+- Guard scheduled retention with verified transcript payload coverage before source erasure.
+- Reject unknown or gapped migration histories and verify concurrent populated upgrades.
+- Default release tags to artifact verification; publication requires explicit manual opt-in.
 
 - Added production package runtime contracts for all seven memory systems.
 - Structured the Rust core into domain, config, providers, ports, adapters, runtime, API, package, and testkit modules.

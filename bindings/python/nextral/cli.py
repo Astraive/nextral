@@ -1,182 +1,212 @@
-"""CLI for nextral."""
+"""Installed command-line bridge to the canonical Rust package runtime."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
+from . import core
 from ._version import __version__
-from .core import e2e_smoke, ingest_request_schema, mcp_call, reembed_plan, validate_config
+from .errors import InvalidInputError, NextralError, SerializationError, StorageError
 
 
-def _load_json(path: str) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+_COMMANDS = {
+    "memory": {
+        "ingest": "nextral.memory.ingest",
+        "get": "nextral.memory.get",
+        "retrieve": "nextral.memory.retrieve",
+        "forget": "nextral.memory.forget",
+        "list": "nextral.memory.list",
+        "update": "nextral.memory.update",
+        "stats": "nextral.memory.stats",
+        "search-by-tag": "nextral.memory.search_by_tag",
+        "search-by-entity": "nextral.memory.search_by_entity",
+    },
+    "session": {
+        "append": "nextral.session.append",
+        "eligible": "nextral.session.eligible",
+        "context": "nextral.session.context",
+    },
+    "graph": {"query": "nextral.graph.query", "graphify": "nextral.graph.graphify"},
+    "reminders": {
+        "due": "nextral.reminders.due",
+        "schedule": "nextral.reminders.schedule",
+        "list": "nextral.reminders.list",
+    },
+    "consolidation": {"run": "nextral.consolidation.run"},
+    "batch": {
+        "ingest": "nextral.batch.ingest",
+        "retrieve": "nextral.batch.retrieve",
+        "forget": "nextral.batch.forget",
+    },
+    "runtime": {"scored-search": "nextral.runtime.scored_search"},
+    "outbox": {"run": "nextral.outbox.run"},
+    "policy": {
+        "upsert": "nextral.policy.upsert",
+        "list": "nextral.policy.list",
+        "remove": "nextral.policy.remove",
+    },
+}
 
 
-def _handle_about(_: argparse.Namespace) -> int:
-    print(f"nextral {__version__}")
-    print("Status: package-first production runtime with configured storage and model providers.")
-    print("Docs:")
-    print("  - docs\\README.md")
-    print("  - docs\\architecture\\project-structure.md")
-    print("  - docs\\memory\\README.md")
-    return 0
+def _load_json(source: str) -> dict[str, Any]:
+    try:
+        if source == "-":
+            text = sys.stdin.read()
+        elif source.lstrip().startswith(("{", "[")):
+            text = source
+        else:
+            text = Path(source).read_text(encoding="utf-8")
+        value = json.loads(text)
+    except (OSError, UnicodeError) as error:
+        raise StorageError("io", str(error)) from error
+    except ValueError as error:
+        raise SerializationError("serialization", str(error)) from error
+    if not isinstance(value, dict):
+        raise InvalidInputError("invalid_input", "JSON input must be an object")
+    return value
 
 
-def _handle_config_validate(args: argparse.Namespace) -> int:
-    result = validate_config(_load_json(args.config))
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def _handle_e2e_smoke(_: argparse.Namespace) -> int:
-    print(json.dumps(e2e_smoke(), indent=2))
-    return 0
-
-
-def _handle_ingest_schema(_: argparse.Namespace) -> int:
-    print(json.dumps(ingest_request_schema(), indent=2))
-    return 0
-
-
-def _handle_reembed_plan(args: argparse.Namespace) -> int:
-    print(json.dumps(reembed_plan(_load_json(args.request)), indent=2))
-    return 0
-
-
-def _handle_service_plan(args: argparse.Namespace) -> int:
-    config = _load_json(args.config)
-    validate_config(config)
-    print(
-        json.dumps(
-            {
-                "mode": args.mode,
-                "status": "configured",
-                "config": args.config,
-            },
-            indent=2,
-        )
+def _runtime_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--config", dest="runtime_config", default=argparse.SUPPRESS,
+        help="Configure the runtime from JSON (otherwise Rust reads NEXTRAL_CONFIG).",
     )
-    return 0
 
 
-def _handle_graph_query(args: argparse.Namespace) -> int:
-    print(
-        json.dumps(
-            mcp_call(
-                "nextral.graph.query",
-                {
-                    "tenant_id": args.tenant_id,
-                    "user_id": args.user_id,
-                    "session_id": None,
-                    "query_text": args.query_text,
-                    "entities": args.entities,
-                    "intent_topic": args.intent_topic,
-                    "token_budget": args.token_budget,
-                    "privacy_scope": args.privacy_scope,
-                    "top_k_vector": args.top_k_vector,
-                    "max_graph_hops": args.max_graph_hops,
-                },
-            ),
-            indent=2,
-        )
-    )
-    return 0
-
-
-def _handle_due_reminders(args: argparse.Namespace) -> int:
-    print(
-        json.dumps(
-            mcp_call(
-                "nextral.reminders.due",
-                {
-                    "tenant_id": args.tenant_id,
-                    "user_id": args.user_id,
-                    "due_at_or_before": args.due_at_or_before,
-                    "actor": args.actor,
-                    "retry_delay_seconds": args.retry_delay_seconds,
-                },
-            ),
-            indent=2,
-        )
-    )
-    return 0
+def _request_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("request", help="Inline JSON, JSON file, or '-' for stdin.")
+    _runtime_option(parser)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="nextral",
-        description="Nextral CLI - package-first memory runtime backed by configured production stores.",
-    )
+    parser = argparse.ArgumentParser(prog="nextral", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    _runtime_option(parser)
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-    about_parser = subparsers.add_parser("about", help="Show package status and documentation entry points.")
-    about_parser.set_defaults(handler=_handle_about)
+    about = commands.add_parser("about", help="Show package metadata.")
+    about.set_defaults(action="about")
 
-    config_parser = subparsers.add_parser("config", help="Configuration commands.")
-    config_subparsers = config_parser.add_subparsers(dest="config_command", metavar="SUBCOMMAND")
-    validate_parser = config_subparsers.add_parser("validate", help="Validate a Nextral runtime config file.")
-    validate_parser.add_argument("config", help="Path to JSON config.")
-    validate_parser.set_defaults(handler=_handle_config_validate)
+    config = commands.add_parser("config", help="Configuration operations.")
+    config_commands = config.add_subparsers(required=True)
+    validate = config_commands.add_parser("validate", help="Validate runtime configuration.")
+    validate.add_argument("request", help="JSON configuration file, inline JSON, or '-'.")
+    validate.set_defaults(action="validate")
 
-    memory_parser = subparsers.add_parser("memory", help="Memory ingestion, search, and governance commands.")
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", metavar="SUBCOMMAND")
-    ingest_parser = memory_subparsers.add_parser("ingest", help="Print the JSON request shape for memory ingestion.")
-    ingest_parser.set_defaults(handler=_handle_ingest_schema)
-    smoke_parser = memory_subparsers.add_parser("smoke", help="Run a testkit E2E memory flow.")
-    smoke_parser.set_defaults(handler=_handle_e2e_smoke)
+    for group_name, operations in _COMMANDS.items():
+        group = commands.add_parser(group_name, help=f"{group_name.capitalize()} operations.")
+        subcommands = group.add_subparsers(dest="operation", required=True)
+        for operation, tool in operations.items():
+            command = subcommands.add_parser(operation, help=f"Execute {tool}.")
+            _request_option(command)
+            command.set_defaults(action="tool", tool=tool)
+        if group_name == "memory":
+            schema = subcommands.add_parser("ingest-schema", help="Print the ingest request template.")
+            schema.set_defaults(action="schema")
+            smoke = subcommands.add_parser("smoke", help="Execute an isolated native testkit flow.")
+            smoke.set_defaults(action="smoke")
 
-    jobs_parser = subparsers.add_parser("jobs", help="Runtime job planning commands.")
-    jobs_subparsers = jobs_parser.add_subparsers(dest="jobs_command", metavar="SUBCOMMAND")
-    reembed_parser = jobs_subparsers.add_parser("reembed-plan", help="Plan a re-embed operation from JSON.")
-    reembed_parser.add_argument("request", help="Path to re-embed plan JSON.")
-    reembed_parser.set_defaults(handler=_handle_reembed_plan)
+    jobs = commands.add_parser("jobs", help="Native runtime job operations.")
+    job_commands = jobs.add_subparsers(required=True)
+    plan = job_commands.add_parser("reembed-plan", help="Plan vector re-embedding.")
+    _request_option(plan)
+    plan.set_defaults(action="reembed_plan")
+    execute = job_commands.add_parser("reembed-execute", help="Execute host-vector re-embedding.")
+    _request_option(execute)
+    execute.set_defaults(action="tool", tool="nextral.jobs.reembed.execute")
+    for operation in ("enqueue", "run", "list", "get"):
+        command = job_commands.add_parser(operation, help=f"Execute nextral.jobs.{operation}.")
+        _request_option(command)
+        command.set_defaults(action="tool", tool=f"nextral.jobs.{operation}")
 
-    serve_parser = subparsers.add_parser("serve", help="Run optional HTTP, gRPC, or GraphQL service modes.")
-    serve_subparsers = serve_parser.add_subparsers(dest="serve_command", metavar="SUBCOMMAND")
-    for mode in ["http", "grpc", "graphql", "all"]:
-        mode_parser = serve_subparsers.add_parser(mode, help=f"Show {mode} service startup plan.")
-        mode_parser.add_argument("config", help="Path to JSON config.")
-        mode_parser.set_defaults(handler=_handle_service_plan, mode=mode)
+    database = commands.add_parser("db", help="Database migrations.")
+    database_commands = database.add_subparsers(required=True)
+    migrate = database_commands.add_parser("migrate", help="Apply native database migrations.")
+    migrate.add_argument("request", help="Runtime configuration JSON file, inline JSON, or '-'.")
+    migrate.set_defaults(action="db_migrate")
 
-    db_parser = subparsers.add_parser("db", help="Database migration and provisioning commands.")
-    db_parser.add_argument("config", help="Path to JSON config.")
-    db_parser.set_defaults(handler=_handle_config_validate)
+    adapters = commands.add_parser("adapters", help="Production adapter operations.")
+    adapter_commands = adapters.add_subparsers(required=True)
+    smoke = adapter_commands.add_parser("smoke", help="Exercise real production adapters.")
+    _request_option(smoke)
+    smoke.set_defaults(action="adapter_smoke")
 
-    session_parser = subparsers.add_parser("session", help="Session append and lifecycle commands.")
-    session_parser.set_defaults(handler=_handle_e2e_smoke)
+    health = commands.add_parser("health", help="Report native package health.")
+    _runtime_option(health)
+    health.set_defaults(action="health")
 
-    graph_parser = subparsers.add_parser("graph", help="Graph query commands.")
-    graph_parser.add_argument("tenant_id")
-    graph_parser.add_argument("user_id")
-    graph_parser.add_argument("query_text")
-    graph_parser.add_argument("--entities", nargs="*", default=[])
-    graph_parser.add_argument("--intent-topic", default=None)
-    graph_parser.add_argument("--token-budget", type=int, default=1800)
-    graph_parser.add_argument("--privacy-scope", nargs="*", default=["private", "sensitive", "shared"])
-    graph_parser.add_argument("--top-k-vector", type=int, default=12)
-    graph_parser.add_argument("--max-graph-hops", type=int, default=2)
-    graph_parser.set_defaults(handler=_handle_graph_query)
+    mcp = commands.add_parser("mcp", help="Raw native tool dispatch.")
+    mcp_commands = mcp.add_subparsers(required=True)
+    call = mcp_commands.add_parser("call", help="Dispatch a native MCP call envelope.")
+    _request_option(call)
+    call.set_defaults(action="mcp")
 
-    reminders_parser = subparsers.add_parser("reminders", help="Prospective memory commands.")
-    reminders_parser.add_argument("tenant_id")
-    reminders_parser.add_argument("user_id")
-    reminders_parser.add_argument("due_at_or_before")
-    reminders_parser.add_argument("--actor", default="system")
-    reminders_parser.add_argument("--retry-delay-seconds", type=int, default=300)
-    reminders_parser.set_defaults(handler=_handle_due_reminders)
-
+    serve = commands.add_parser("serve", help="Run optional native service hosts.")
+    modes = serve.add_subparsers(required=True)
+    for mode in ("http", "grpc", "graphql", "all"):
+        host = modes.add_parser(mode, help=f"Run {mode} until shutdown.")
+        host.add_argument("request", help="Runtime configuration JSON file, inline JSON, or '-'.")
+        host.set_defaults(action="serve", mode=mode)
     return parser
 
 
+def _execute(args: argparse.Namespace) -> Any:
+    config = getattr(args, "runtime_config", None)
+    if config is not None:
+        core.configure_runtime(_load_json(config))
+    if args.action == "about":
+        return {"name": "nextral", "version": __version__, "runtime": "rust"}
+    if args.action == "validate":
+        return core.validate_config(_load_json(args.request))
+    if args.action == "schema":
+        return core.ingest_request_schema()
+    if args.action == "smoke":
+        return core.e2e_smoke()
+    if args.action == "health":
+        return core.health()
+    if args.action == "db_migrate":
+        core.configure_runtime(_load_json(args.request))
+        return core.migrate_database()
+    if args.action == "serve":
+        return core.serve(_load_json(args.request), [args.mode])
+    request = _load_json(args.request)
+    if args.action == "tool":
+        return core.mcp_call(args.tool, request)
+    if args.action == "reembed_plan":
+        return core.reembed_plan(request)
+    if args.action == "adapter_smoke":
+        return core.adapter_smoke(request)
+    if args.action == "mcp":
+        tool = request.get("tool")
+        payload = request.get("payload_json")
+        if not isinstance(tool, str) or not isinstance(payload, str):
+            raise InvalidInputError(
+                "invalid_input", "MCP envelope requires string tool and payload_json fields"
+            )
+        try:
+            decoded = json.loads(payload)
+        except ValueError as error:
+            raise SerializationError("serialization", str(error)) from error
+        if not isinstance(decoded, dict):
+            raise InvalidInputError("invalid_input", "MCP payload_json must encode an object")
+        return core.mcp_call(tool, decoded)
+    raise InvalidInputError("invalid_input", f"unknown command action: {args.action}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    handler = getattr(args, "handler", None)
-    if handler is None:
-        parser.print_help()
+    args = build_parser().parse_args(argv)
+    try:
+        result = _execute(args)
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
         return 0
-    return handler(args)
+    except NextralError as error:
+        print(json.dumps({"error": error.as_dict()}), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        return 1

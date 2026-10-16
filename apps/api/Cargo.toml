@@ -2,9 +2,14 @@
 name = "nextral-api"
 version = "0.1.0"
 edition = "2021"
+description = "HTTP, gRPC and GraphQL host for the Nextral memory runtime."
+license = "MIT"
+repository = "https://github.com/Astraive/nextral"
+readme = "../../README.md"
+include = ["Cargo.toml", "Cargo.lock", "src/**", "README.md"]
 
 [dependencies]
-nextral = { path = "../.." }
+nextral = { path = "../..", version = "0.1.0" }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"

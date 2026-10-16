@@ -4,11 +4,14 @@ pub mod governance;
 pub mod graphify;
 pub mod ingestion;
 pub mod intelligence;
+pub mod lifecycle;
+pub mod observability;
 pub mod prospective;
 pub mod reembed;
 pub mod reminders;
 pub mod retrieval;
 pub mod session;
+pub mod storage;
 
 use crate::{
     contracts::CoreResult,

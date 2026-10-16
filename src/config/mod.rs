@@ -92,6 +92,8 @@ pub struct StoreConfig {
     pub postgres_url: String,
     pub redis_url: String,
     pub qdrant_url: String,
+    #[serde(default)]
+    pub qdrant_collection: Option<String>,
     pub neo4j_url: String,
     pub s3_endpoint: String,
     pub s3_bucket: String,
@@ -122,6 +124,9 @@ pub struct AuthConfig {
     pub issuer: Option<String>,
     pub audience: Option<String>,
     pub jwks_url: Option<String>,
+    /// Environment variable containing an additional PEM CA for the HTTPS JWKS endpoint.
+    #[serde(default)]
+    pub jwks_ca_pem_env: Option<String>,
     pub service_token_env: Option<String>,
 }
 
@@ -202,6 +207,7 @@ impl NextralConfig {
             validate_reranker(reranker)?;
         }
         validate_cache(&self.cache)?;
+        validate_jwks_ca(&self.auth)?;
 
         if self.backend == RuntimeBackend::ProductionStores {
             let stores = self.stores.as_ref().ok_or_else(|| {
@@ -271,15 +277,14 @@ pub fn resolve_env_vars(input: &str) -> String {
 
 pub fn load_config(config_json: &str) -> CoreResult<NextralConfig> {
     let resolved = resolve_env_vars(config_json);
-    let config: NextralConfig = serde_json::from_str(&resolved)?;
+    let config: NextralConfig = serde_json::from_str(&resolved)
+        .map_err(|_| CoreError::InvalidInput("invalid input format".into()))?;
     config.validate()?;
     Ok(config)
 }
 
 pub fn validate_config_json(config_json: &str) -> CoreResult<String> {
-    let resolved = resolve_env_vars(config_json);
-    let config: NextralConfig = serde_json::from_str(&resolved)?;
-    config.validate()?;
+    load_config(config_json)?;
     Ok("{\"status\":\"ok\"}".to_string())
 }
 
@@ -293,13 +298,28 @@ fn validate_score(name: &str, value: f32) -> CoreResult<()> {
 }
 
 pub fn validate_scoring_weights(weights: &ScoringWeights) -> CoreResult<()> {
-    if weights.semantic_similarity < 0.0
-        || weights.recency < 0.0
-        || weights.importance < 0.0
-        || weights.access < 0.0
+    if [
+        weights.semantic_similarity,
+        weights.recency,
+        weights.importance,
+        weights.access,
+    ]
+    .iter()
+    .any(|weight| !weight.is_finite() || *weight < 0.0)
     {
         return Err(CoreError::InvalidInput(
-            "scoring weights must be non-negative".to_string(),
+            "scoring weights must be finite and non-negative".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_retrieval_weights(weights: &ScoringWeights) -> CoreResult<()> {
+    validate_scoring_weights(weights)?;
+    let total = weights.semantic_similarity + weights.recency + weights.importance + weights.access;
+    if (total - 1.0).abs() > 0.001 {
+        return Err(CoreError::InvalidInput(
+            "retrieval scoring weights must sum to 1.0".to_string(),
         ));
     }
     Ok(())
@@ -331,16 +351,7 @@ fn validate_retrieval_policy(policy: &RetrievalPolicy) -> CoreResult<()> {
             "retrieval max_graph_hops must not exceed 10".to_string(),
         ));
     }
-    validate_scoring_weights(&policy.scoring_weights)?;
-    let total = policy.scoring_weights.semantic_similarity
-        + policy.scoring_weights.recency
-        + policy.scoring_weights.importance
-        + policy.scoring_weights.access;
-    if (total - 1.0).abs() > 0.001 {
-        return Err(CoreError::InvalidInput(
-            "retrieval scoring weights must sum to 1.0".to_string(),
-        ));
-    }
+    validate_retrieval_weights(&policy.scoring_weights)?;
     Ok(())
 }
 
@@ -397,6 +408,21 @@ fn validate_reranker(config: &RerankerProviderConfig) -> CoreResult<()> {
     Ok(())
 }
 
+fn validate_jwks_ca(config: &AuthConfig) -> CoreResult<()> {
+    if let Some(name) = &config.jwks_ca_pem_env {
+        require("auth.jwks_ca_pem_env", name)?;
+        if name.bytes().any(|byte| matches!(byte, b'=' | 0)) {
+            return Err(CoreError::InvalidInput(
+                "auth.jwks_ca_pem_env must be a valid environment variable name".into(),
+            ));
+        }
+        require_option("auth.issuer", &config.issuer)?;
+        require_option("auth.audience", &config.audience)?;
+        require_option("auth.jwks_url", &config.jwks_url)?;
+    }
+    Ok(())
+}
+
 fn validate_cache(config: &CacheConfig) -> CoreResult<()> {
     require("cache.key_prefix", &config.key_prefix)?;
     if config.session_ttl_seconds == 0
@@ -423,6 +449,20 @@ fn validate_stores(config: &StoreConfig) -> CoreResult<()> {
     require("stores.postgres_url", &config.postgres_url)?;
     require("stores.redis_url", &config.redis_url)?;
     require("stores.qdrant_url", &config.qdrant_url)?;
+    let collection = config.qdrant_collection.as_deref().ok_or_else(|| {
+        CoreError::InvalidInput("stores.qdrant_collection is required for production".into())
+    })?;
+    if collection.is_empty()
+        || collection.len() > 240
+        || !collection
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        || matches!(collection, "." | "..")
+    {
+        return Err(CoreError::InvalidInput(
+            "stores.qdrant_collection must be a valid nonempty collection alias".into(),
+        ));
+    }
     require("stores.neo4j_url", &config.neo4j_url)?;
     require("stores.s3_endpoint", &config.s3_endpoint)?;
     require("stores.s3_bucket", &config.s3_bucket)?;
@@ -437,32 +477,37 @@ fn validate_stores(config: &StoreConfig) -> CoreResult<()> {
             ));
         }
     }
-    if config.enforce_tls.unwrap_or(false) {
-        for (name, value) in [
-            ("stores.qdrant_url", &config.qdrant_url),
-            ("stores.s3_endpoint", &config.s3_endpoint),
-            ("stores.neo4j_url", &config.neo4j_url),
-        ] {
-            if !value.starts_with("https://") && !value.starts_with("neo4j+s://") {
-                return Err(CoreError::InvalidInput(format!(
-                    "{name} must use https:// or neo4j+s:// when stores.enforce_tls is true"
-                )));
-            }
-        }
-        // Check postgres uses sslmode in URL
-        if !config.postgres_url.contains("sslmode=require")
-            && !config.postgres_url.starts_with("postgresql://")
-        {
-            // Only warn-style check for postgres since it uses connection string params
-        }
-        // Check redis uses rediss:// for TLS
-        if !config.redis_url.starts_with("rediss://")
-            && !config.redis_url.starts_with("redis+tls://")
-        {
+    let require_tls = config.enforce_tls.unwrap_or(false)
+        || config.transport_profile.as_deref() == Some("strict");
+    crate::adapters::transport::validate_transport_url(&config.qdrant_url, require_tls)
+        .map_err(CoreError::InvalidInput)?;
+    crate::adapters::transport::validate_transport_url(&config.s3_endpoint, require_tls)
+        .map_err(CoreError::InvalidInput)?;
+    let neo4j = config
+        .neo4j_url
+        .replacen("neo4j+s://", "https://", 1)
+        .replacen("bolt+s://", "https://", 1)
+        .replacen("neo4j://", "http://", 1)
+        .replacen("bolt://", "http://", 1);
+    crate::adapters::transport::validate_transport_url(&neo4j, require_tls)
+        .map_err(CoreError::InvalidInput)?;
+    let redis = reqwest::Url::parse(&config.redis_url)
+        .map_err(|_| CoreError::InvalidInput("invalid stores.redis_url".into()))?;
+    if !matches!(redis.scheme(), "redis" | "rediss")
+        || redis.host_str().is_none()
+        || redis.fragment().is_some()
+    {
+        return Err(CoreError::InvalidInput(
+            "stores.redis_url must use redis:// or verified rediss:// without fragments".into(),
+        ));
+    }
+    if require_tls {
+        if redis.scheme() != "rediss" {
             return Err(CoreError::InvalidInput(
-                "stores.redis_url must use rediss:// or redis+tls:// when stores.enforce_tls is true".to_string(),
+                "strict Redis transport requires rediss://".into(),
             ));
         }
+        validate_postgres_tls(&config.postgres_url)?;
     }
     Ok(())
 }
@@ -476,4 +521,131 @@ fn require(name: &str, value: &str) -> CoreResult<()> {
 
 fn require_option(name: &str, value: &Option<String>) -> CoreResult<()> {
     require(name, value.as_deref().unwrap_or(""))
+}
+
+fn validate_postgres_tls(value: &str) -> CoreResult<()> {
+    let mode = if value.starts_with("postgres://") || value.starts_with("postgresql://") {
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| CoreError::InvalidInput("invalid stores.postgres_url".into()))?;
+        let modes: Vec<String> = url
+            .query_pairs()
+            .filter(|(key, _)| key == "sslmode")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        if modes.len() != 1 {
+            return Err(CoreError::InvalidInput(
+                "strict Postgres transport requires exactly one sslmode=require or verify-full"
+                    .into(),
+            ));
+        }
+        modes.into_iter().next()
+    } else {
+        let modes: Vec<&str> = value
+            .split_whitespace()
+            .filter_map(|part| part.strip_prefix("sslmode="))
+            .collect();
+        if modes.len() != 1 {
+            return Err(CoreError::InvalidInput(
+                "strict Postgres transport requires exactly one sslmode=require or verify-full"
+                    .into(),
+            ));
+        }
+        modes
+            .first()
+            .map(|value| value.trim_matches('\'').to_string())
+    };
+    if !matches!(mode.as_deref(), Some("require" | "verify-full")) {
+        return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require or verify-full with certificate verification".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn jwt_auth() -> AuthConfig {
+        AuthConfig {
+            issuer: Some("https://issuer.example".into()),
+            audience: Some("nextral".into()),
+            jwks_url: Some("https://issuer.example/jwks".into()),
+            jwks_ca_pem_env: Some("NEXTRAL_JWKS_CA".into()),
+            service_token_env: None,
+        }
+    }
+
+    #[test]
+    fn jwks_ca_environment_name_rejects_empty_and_invalid_names() {
+        for name in ["", " ", "BAD=NAME", "BAD\0NAME"] {
+            let mut auth = jwt_auth();
+            auth.jwks_ca_pem_env = Some(name.into());
+            assert!(validate_jwks_ca(&auth).is_err());
+        }
+        assert!(validate_jwks_ca(&jwt_auth()).is_ok());
+    }
+
+    #[test]
+    fn jwks_ca_requires_complete_jwt_configuration() {
+        for field in 0..3 {
+            let mut auth = jwt_auth();
+            match field {
+                0 => auth.issuer = None,
+                1 => auth.audience = None,
+                _ => auth.jwks_url = None,
+            }
+            assert!(validate_jwks_ca(&auth).is_err());
+        }
+    }
+
+    #[test]
+    fn jwks_ca_is_optional_when_deserializing_existing_configuration() {
+        let auth: AuthConfig = serde_json::from_value(serde_json::json!({
+            "issuer": null, "audience": null, "jwks_url": null, "service_token_env": null
+        }))
+        .unwrap();
+        assert!(auth.jwks_ca_pem_env.is_none());
+        assert!(validate_jwks_ca(&auth).is_ok());
+    }
+
+    #[test]
+    fn postgres_tls_requires_explicit_unambiguous_mode() {
+        assert!(validate_postgres_tls("postgresql://localhost/db").is_err());
+        assert!(
+            validate_postgres_tls("postgresql://localhost/db?sslmode=disable&sslmode=require")
+                .is_err()
+        );
+        assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=require").is_ok());
+        assert!(validate_postgres_tls("host=localhost sslmode='verify-full'").is_ok());
+        assert!(validate_postgres_tls("host=localhost sslmode=prefer").is_err());
+    }
+
+    #[test]
+    fn scoring_weights_reject_each_nonfinite_component() {
+        for invalid in [f32::NAN, f32::INFINITY] {
+            for index in 0..4 {
+                let mut values = [0.25; 4];
+                values[index] = invalid;
+                let weights = ScoringWeights {
+                    semantic_similarity: values[0],
+                    recency: values[1],
+                    importance: values[2],
+                    access: values[3],
+                };
+                assert!(validate_scoring_weights(&weights).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn retrieval_weights_reject_zero_and_overflowing_totals() {
+        for weight in [0.0, 2.0, f32::MAX] {
+            let weights = ScoringWeights {
+                semantic_similarity: weight,
+                recency: weight,
+                importance: weight,
+                access: weight,
+            };
+            assert!(validate_retrieval_weights(&weights).is_err());
+        }
+    }
 }

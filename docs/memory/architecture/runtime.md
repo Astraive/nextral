@@ -1,143 +1,36 @@
-# Memory Runtime Architecture
+# Runtime and host control
 
-## 1. Runtime objectives
+## Process and trust boundary
 
-1. keep active conversation continuity without latency spikes
-2. make durable memory available quickly after session idle/close
-3. recover the most relevant context under strict token budgets
-4. preserve correctness and auditability across async operations
+The package dispatcher owns a process-wide configured `RuntimeStore`. Configure before operations or provide `NEXTRAL_CONFIG`. Production dispatch uses `ProductionStore`; explicit `test_memory` is test-only. Python/Node wrappers serialize native requests and do not implement a second memory system.
 
-## 2. Core runtime components
+The host authenticates embedded/CLI/MCP callers and supplies tenant/user scope. Network services add verified JWT scope binding or privileged service-token authorization. Do not expose raw package dispatch as an unauthenticated remote endpoint.
 
-| Component | Responsibility |
-|---|---|
-| `SessionWriteHook` | appends turn data to hot and warm stores |
-| `ContextAssembler` | builds context from session + retrieved memory |
-| `MemoryAgent` | extraction, scoring, consolidation, writes |
-| `HybridMemoryRetriever` | vector + graph retrieval merge |
-| `Graphify` | entity/relationship extraction and Neo4j update |
-| `ProspectiveScheduler` | due reminders and proactive follow-ups |
-| `PolicyLayer` | privacy, access, and forget constraints |
+## Request loop
 
-## 3. Runtime control loops
+1. Append a message with tenant, user, session and stable message identity.
+2. Persist the warm transcript and refresh the bounded Redis tail.
+3. Supply a query vector/entities and request working context.
+4. Receive session tail, summary, policies and retrieved memories with token accounting.
+   The response also includes `degraded_reasons`: Redis unavailability falls back to the canonical warm transcript rather than silently returning an empty tail.
+5. Let the host run its own agent/model/tool loop and discard transient reasoning as appropriate.
 
-### Loop A: request-response loop (synchronous)
+No internal `MemoryAgent`, Claude call, prompt runner, or `asyncio` pipeline is implied by these steps.
 
-1. ingest user message with `session_id`
-2. write to session buffers
-3. retrieve memory context (dual-path)
-4. assemble context bundle
-5. run agent/tool loop
-6. synthesize and send response
+## Worker loop
 
-### Loop B: fast consolidation loop (asynchronous)
+The host chooses idle/close/deep/retention scheduling. `nextral.jobs.enqueue` persists work, `nextral.jobs.run` claims due jobs with durable leases and records retry/terminal/completion state, and `jobs.list/get` expose it. Expired leases allow recovery after process loss. Workers consume host outputs carried in consolidation requests, not an internal extraction provider.
 
-Trigger: session idle (about 10m) or explicit close.
+Claimed progress/completion writes require a live matching lease and an unchanged persisted request. Existing terminal state or a request scrubbed by forget wins over stale worker state; the worker cannot overwrite cancellation or restore removed consolidation payloads.
 
-1. load transcript and summary candidates
-2. extract memory items
-3. score and threshold
-4. write accepted memories
-5. dispatch Graphify
-6. emit metrics and traces
+`nextral.outbox.run` drains external-store operations left pending after canonical transactions. Reminder delivery uses its own due scan and durable dispatch state; call `nextral.reminders.due` on a host-owned schedule. A package import does not start these loops.
 
-### Loop C: deep consolidation loop (scheduled)
+## Replay and failure
 
-Trigger: nightly, usually for sessions older than 7 days.
+Use stable session/version/candidate provenance for unchanged consolidation inputs; changed input requires a new version. Preserve explicit failures and inspect receipts rather than synthesizing success. Batch writes report item-level results, not cross-item transactions. Batch reads with a repeated fingerprint key still observe fresh canonical state.
 
-1. select eligible sessions
-2. stable chunking
-3. embed and write chunk memories
-4. archive raw transcript
-5. mark archive version
+## Experiment control
 
-### Loop D: prospective execution loop
+Promotion requires a newly created candidate and comparable measured baseline/candidate replay evidence matching the active/candidate policies. Promotion saves the prior lane, policy version and active experiment identity. Rollback requires a nonblank reason, a saved rollback point and the currently active promoted experiment; it restores that snapshot, not a fixed stable/default policy. Created, superseded and already rolled-back candidates cannot change runtime state through rollback.
 
-Trigger: schedule (cron/calendar/webhook).
-
-1. scan due reminders/commitments
-2. apply trigger policy and dedupe
-3. execute follow-up workflow
-4. persist outcome and next state
-
-## 4. Lane model
-
-| Lane | Trigger | Max stale window intent | Output |
-|---|---|---|---|
-| Real-time lane | explicit memorable statement | immediate | direct memory write |
-| Fast lane | idle/close | low | summary + high-value memories |
-| Deep lane | nightly | medium/high | durable chunk embeddings + archive |
-| Prospective lane | schedule/event | due-time bounded | reminders/follow-ups |
-
-## 5. Runtime state machine (memory item)
-
-```text
-detected -> extracted -> scored -> accepted/rejected
-accepted -> embedded -> indexed -> graphified -> retrievable
-accepted -> scheduled (if prospective) -> due -> completed/expired
-```
-
-Terminal failure states must include explicit reason and retry policy classification.
-
-## 6. Runtime interfaces
-
-### Input contract (retrieval)
-
-- query text
-- extracted entities
-- intent topic
-- user/session identity
-- memory policy context (privacy level, filters)
-
-### Output contract (retrieval)
-
-- ranked memory candidates
-- scoring breakdown per candidate
-- source path (`vector`, `graph`, `both`)
-- token estimate metadata
-
-## 7. Guardrails
-
-- hard cap on retrieved candidate count before merge
-- token budget fit before prompt injection
-- privacy-level filter before ranking
-- no silent failure on write/extract/retrieval
-
-## 8. Concurrency and idempotency
-
-- retrieval paths execute in parallel
-- consolidation jobs are idempotent by session + version keys
-- graph updates use deterministic merge keys and timestamps
-- reminder triggers use dedupe keys to avoid duplicate follow-ups
-
-## 9. Runtime observability hooks
-
-Per request/job, emit:
-
-- latency by stage
-- candidate counts before/after filters
-- acceptance/rejection counts
-- retry attempts and terminal reasons
-- final context token allocation by layer
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+See [worker operations](../operations/consolidation-and-retention.md) and [recovery](../operations/incidents-and-recovery.md).

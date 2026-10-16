@@ -1,60 +1,17 @@
-# Consolidation Pipeline
+# Consolidation pipeline
 
-## Purpose
-
-Convert session transcript history into durable memory artifacts.
+The host supplies `{tenant_id,user_id,session_id,lane,policy,version,summary,candidates,chunk_messages}`. Model extraction and embedding happen outside Nextral. Use `lane: fast` or `deep`; `chunk_messages` defaults to 100.
 
 ## Fast lane
 
-Trigger: session idle/close.
-
-1. load transcript
-2. summarize
-3. extract candidates
-4. score and threshold
-5. write accepted memories
-6. queue graphify payloads
+Load the session, produce a nonempty host summary, and supply explicit ingestion candidates with provenance and vectors. Rust checks scope/source linkage, ingests accepted candidates, persists the summary and records durable job/provenance results. It does not generate a summary from an omitted field.
 
 ## Deep lane
 
-Trigger: scheduled nightly process.
+Candidates correspond to deterministic contiguous message chunks: join each message as `role: content` with newline separators. Supply matching ordered source message IDs and vectors for those exact chunks. Rust validates the correspondence, writes accepted memory, and uploads the actual transcript archive to S3. An object key alone is not archive success.
 
-1. select aged sessions
-2. deterministic chunking
-3. embedding and vector write
-4. archive raw transcript
-5. version stamp and completion event
+## Scheduling, replay and recovery
 
-## Quality controls
+The host decides when a session is idle/closed or eligible for deep work; no built-in nightly or seven-day schedule is promised. Persist asynchronous work with `jobs.enqueue` and process it through `jobs.run`. Stable session/lane/version and source keys fence replay; changed input requires a new version. Inspect completion, archive/store receipts and durable failures; run outbox recovery as needed.
 
-- acceptance ratio monitoring
-- extraction drift checks
-- per-content-type distribution checks
-
-## Failure and replay
-
-- retry transient extraction/embed/write failures
-- preserve replay manifests for terminal failures
-- ensure replay uses idempotent identifiers
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+See [worker runbook](../operations/consolidation-and-retention.md) for leases and retention.

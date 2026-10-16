@@ -1,86 +1,31 @@
-# Project structure (Nextral runtime-neutral layout)
+# Project structure
 
-```text
-nextral/
-├── src/
-│   ├── adapters/           # production store implementations
-│   │   ├── postgres.rs
-│   │   ├── redis.rs
-│   │   ├── qdrant.rs
-│   │   ├── neo4j.rs
-│   │   ├── s3.rs
-│   │   └── transport.rs
-│   ├── api/                # HTTP/gRPC/GraphQL server
-│   ├── config/             # configuration types and validation
-│   ├── contracts/          # shared error types
-│   ├── domain/             # core domain types
-│   │   ├── memory.rs
-│   │   ├── graph.rs
-│   │   ├── reminder.rs
-│   │   ├── session.rs
-│   │   ├── policy.rs
-│   │   ├── audit.rs
-│   │   └── runtime_policy.rs
-│   ├── graph/              # graph utilities and re-exports
-│   ├── ingestion.rs        # memory ingestion pipeline
-│   ├── memory/             # memory record types and re-exports
-│   ├── package/            # MCP tools, smoke tests, batch operations
-│   ├── planner.rs          # operation planning
-│   ├── ports/              # trait definitions for adapters
-│   ├── prospective.rs      # reminder types and re-exports
-│   ├── providers/          # provider traits (embedding, extraction, reranker)
-│   ├── retrieval/          # retrieval scoring and execution
-│   ├── runtime/            # orchestration and runtime execution
-│   ├── scoring/            # lexical and multi-factor scoring
-│   ├── store.rs            # test store re-exports
-│   ├── testkit/            # TestMemoryStore for in-memory testing
-│   ├── topology.rs         # memory type to store role mapping
-│   └── lib.rs
-├── bindings/
-│   ├── python/
-│   │   ├── nextral/
-│   │   ├── src/
-│   │   ├── pyproject.toml
-│   │   └── Cargo.toml
-│   └── node/
-│       ├── src/
-│       ├── package.json
-│       ├── Cargo.toml
-│       └── index.ts
-├── apps/
-│   ├── api/                # HTTP API server binary
-│   ├── cli/                # CLI application
-│   ├── mcp/                # MCP tool server
-│   ├── web/                # optional web frontend (planned)
-│   └── examples/           # usage examples (planned)
-├── contracts/
-│   ├── http/openapi.json   # HTTP API contract
-│   ├── grpc/nextral.proto  # gRPC service definition
-│   └── graphql/schema.graphql # GraphQL schema
-├── migrations/             # database migration files
-├── tests/                  # integration tests (planned)
-├── docs/
-├── scripts/
-├── Cargo.toml
-├── package.json
-├── pyproject.toml
-├── README.md
-└── CHANGELOG.md
-```
+| Path | Responsibility |
+| --- | --- |
+| `src/domain/` | Memory, graph, session, policy, reminder and audit types |
+| `src/runtime/` | Storage orchestration, sessions, retrieval, lifecycle jobs, governance, research and telemetry |
+| `src/adapters/` | PostgreSQL, Redis, Qdrant, authenticated Neo4j and S3 transport |
+| `src/config/` | Configuration types, environment resolution and validation |
+| `src/package/` | Configured package dispatcher and native JSON boundary |
+| `src/api/` | HTTP, gRPC and GraphQL implementation and authentication |
+| `src/testkit/` | Explicit in-memory test store |
+| `bindings/python/nextral/` | Python dictionary API, errors, types and installed CLI |
+| `bindings/python/src/` | PyO3 native bridge |
+| `bindings/node/api.js`, `api.d.ts` | Canonical Node object API and TypeScript declarations |
+| `bindings/node/src/` | Private napi-rs transport; not a public generated-index API |
+| `bindings/node/native/` | Collected platform `.node` outputs, not committed source |
+| `apps/cli/`, `apps/mcp/`, `apps/api/` | Rust executable entry points |
+| `contracts/` | HTTP OpenAPI, gRPC proto, GraphQL schema |
+| `migrations/` | Store/schema provisioning resources |
+| `examples/` | Production configuration, reembed request, measured replay host/runner |
+| `fixtures/evaluation/` | Representative replay inputs and expectations |
+| `scripts/` | Integration, telemetry and release packaging tools |
+| `docs/` | Public usage and operations guides |
 
-## Runtime-neutral boundary
+`apps/web/` and `apps/examples/` are not required runtime entry points. Use the implemented binaries and root `examples/` rather than assuming an application exists in those directories.
 
-- The Rust core in `src/` is canonical and language-agnostic.
-- Core APIs use Rust-native types (`Vec<T>`, structs, enums) and `thiserror` for domain errors.
-- FFI crates in `bindings/python` and `bindings/node` map those errors into runtime-native exceptions.
+## Runtime boundary
 
-## Async strategy
+Rust owns business logic and Serde contracts. Python and Node serialize objects and translate native errors, preserving host vectors and extraction results. Most package calls are synchronous; they are not uniformly asyncio/Promise APIs. Python `serve` blocks with the GIL released; Node `serve` runs on a native async worker and returns a Promise. Both have explicit shutdown controls.
 
-- Internal concurrency and orchestration are handled in the Rust runtime module (Tokio-based).
-- Python bindings bridge async work into `asyncio` with `pyo3-async-runtimes`.
-- Node bindings expose async Rust work as Promise-based APIs through napi-rs.
-
-## Serialization strategy
-
-- Shared graph/memory payloads are represented as Serde-compatible Rust types in the core.
-- Bindings convert those payloads into runtime-native objects without duplicating business logic.
+The configured runtime is process-wide. Production calls use external persistence; test memory must be explicitly selected. See [deployment and capability boundaries](../package-production.md).

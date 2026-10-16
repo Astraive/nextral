@@ -1,192 +1,49 @@
-# Tony Memory System Architecture (Canonical)
+# Nextral memory architecture
 
-This is the canonical architecture specification for Tony memory.  
-It defines how memory is modeled, written, retrieved, scored, governed, and operated at scale.
+Nextral stores host-prepared memory and assembles scoped context. It is not an autonomous agent, model provider, extraction service, or a background scheduler installed by importing a package.
 
-## 1. Design Intent
+## Memory topology
 
-Tony is built around seven memory systems because each one prevents a specific failure mode:
+| Type | Runtime representation | Persistence |
+| --- | --- | --- |
+| Working | Request-local context assembled for the host | Ephemeral; the host owns model context and disposal |
+| Session | Messages, hot tail, host summary | PostgreSQL full transcript plus Redis last 20 messages |
+| Episodic | Event/episode memory records with provenance | PostgreSQL canonical rows, Qdrant vectors, S3 transcript archive |
+| Semantic | Facts, preferences, decisions | PostgreSQL canonical rows and Qdrant vectors |
+| Relational | Memory entities and typed graph hints | Canonical source plus Neo4j nodes/edges |
+| Procedural | Explicit scoped policies and procedural records | PostgreSQL with Redis policy cache |
+| Prospective | Owned source memory plus scheduled reminder | PostgreSQL durable reminder/attempt state and delivery integration |
 
-1. loss of in-flight reasoning state
-2. loss of active conversation continuity
-3. loss of historical events over time
-4. loss of stable facts/preferences/decisions
-5. loss of entity relationships and dependencies
-6. loss of personalized behavioral consistency
-7. loss of future commitments and follow-through
+`production_stores` uses all five external stores. `test_memory` is an explicitly selected process-local test backend; its lexical retrieval and receipts are not production evidence. See [package boundaries](../package-production.md).
 
-## 2. Canonical Diagrams
+## Write and recovery boundary
 
-| Diagram | Contract role |
-|---|---|
-| `memory_taxonomy.svg` | Type system contract (what memory exists) |
-| `memory_lifecycle.svg` | Lifecycle contract (how memory moves) |
-| `graphify_dual_retrieval.svg` | Retrieval contract (how memory is recovered) |
+The host supplies embeddings, scores, entities, graph hints and consolidation outputs. Ingestion validates policy, records canonical/audit/outbox state transactionally in PostgreSQL, and performs external indexing with acknowledged receipts. PostgreSQL canonical lifecycle state is authoritative; there is no atomic transaction spanning all stores. Durable outbox work repairs partial external failures. Callers must inspect status, receipts and pending/retry work rather than equating an HTTP acceptance response with universal store completion.
 
-All architecture docs must remain semantically aligned with these three diagrams.
+Use explicit schema-owner migration before startup. Runtime operations use tenant/user-scoped RLS with a restricted no-DDL role. Authentication and scope authorization remain required at the host boundary.
 
-## 3. Memory Type Topology
+## Session and consolidation lifecycle
 
-| Type | Question answered | Primary backend(s) | Write mode | Read mode |
-|---|---|---|---|---|
-| Working | "What is happening right now?" | LLM context | ephemeral only | direct in-call |
-| Session | "What is happening in this conversation?" | Redis + PostgreSQL | real-time append | hot tail + warm summary |
-| Episodic | "What happened and when?" | Qdrant + PostgreSQL events + MinIO | consolidation lanes | semantic + temporal |
-| Semantic | "What is true / preferred / decided?" | Qdrant + PostgreSQL index | realtime + consolidation | vector retrieval |
-| Relational | "How are entities connected?" | Neo4j | Graphify post-write | graph traversal |
-| Procedural | "How should Tony behave for this user?" | PostgreSQL + Redis + package-managed playbooks | config + analytics loop | pre-response policy load |
-| Prospective | "What must Tony do later?" | PostgreSQL + Redis queue + package callbacks/webhooks + Qdrant context | extraction + scheduling | due-trigger + context recall |
+Every accepted session append persists the full warm transcript; Redis bounds the hot tail to 20, with configured TTL. It is not necessary to wait for overflow before PostgreSQL durability. Context assembly combines the tail, stored host summary, enabled scoped policies and retrieved memories within a token estimate/budget.
 
-## 4. Storage Architecture and Tiers
+Fast consolidation needs a nonempty host `summary` and explicit candidates. Deep consolidation validates deterministic role-prefixed transcript chunks and matching contiguous source IDs, embeds using supplied candidate vectors, and uploads the real archive. Lane and version fence replay. Applications enqueue idle/close/deep/retention jobs and invoke workers; no implicit nightly extraction or model call occurs.
 
-### Tier 0: Live
+## Retrieval
 
-- In-request memory in model context.
-- Contains prompt state, tool results, and temporary execution-plan state.
-- Destroyed after final synthesis.
+The host supplies `query_vector` and entities. Enabled vector and graph paths run in parallel. The merge deduplicates IDs, loads active canonical candidates in one tenant/user/privacy-scoped query, applies configured scoring weights and token fitting, and atomically records access without reindexing vectors. One failed enabled path produces degraded results from the survivor; all enabled paths failing is an explicit error.
 
-### Tier 1: Hot
+Batch read idempotency keys fence request fingerprints, not raw response-body caches. Reusing an unchanged key must still read current canonical state after updates, forget, or privacy changes.
 
-- Redis keeps last 20 messages in `session:{id}:messages`.
-- Context fetch is sub-millisecond.
-- TTL keeps this tier lean (commonly ~2h).
+## Governance and operations
 
-### Tier 2: Warm
+Forget operates on an exact owned memory ID and scrubs exact source references across derived state. It is not substring replacement or query/category deletion; unrelated manual policies survive. Required store acknowledgements and durable recovery state govern completion.
 
-- PostgreSQL stores full transcript rows and session summaries.
-- Used for older in-session turns and short/medium horizon search.
-- Supports FTS and indexed retrieval by user/session/topic/date.
+Reembedding persists progress and an effective vector route for a specific tenant and user. Hosts provide vectors; partial runs resume before validated cutover, and rollback is explicit. It is not a global Qdrant alias swap.
 
-### Tier 3: Cold durable
+- [Runtime control](architecture/runtime.md)
+- [Storage and lifecycle](architecture/storage-and-lifecycle.md)
+- [Retrieval and graph](architecture/retrieval-and-graph.md)
+- [Types](types/README.md), [pipelines](pipeline/README.md), [payloads](contracts/README.md), [workflows](workflow/README.md)
+- [Workers, recovery, SLO targets and measured research](operations/README.md)
 
-- Qdrant stores semantic vectors and payload metadata.
-- Neo4j stores entity graph and relationship evidence.
-- MinIO keeps immutable raw transcript archive.
-- PostgreSQL stores audit, job, event, and timeline rows for episodic/procedural insights; optional observability exports metrics when configured.
-
-## 5. Write Paths
-
-### Real-time path
-
-Used when an interaction is explicitly memory-worthy in current turn.
-
-1. classify memory candidate
-2. assign `content_type` and preliminary importance
-3. embed and write to Qdrant
-4. persist index/audit row in PostgreSQL
-5. trigger Graphify for relational extraction
-
-### Consolidation path (async)
-
-Triggered on session idle/close and by nightly deep passes.
-
-1. load transcript
-2. summarize and extract candidates
-3. score and threshold
-4. write accepted memories to vector store and index
-5. feed accepted memories to Graphify
-6. archive full session payload to MinIO
-
-## 6. Graphify Contract (Architecture View)
-
-Graphify converts accepted memory chunks into graph structure:
-
-- Extracts typed nodes and directed edges.
-- Emits relationship confidence scores.
-- Writes to Neo4j via `MERGE`, not `CREATE`.
-
-`MERGE` is intentionally used for idempotent updates.  
-For performance and consistency, graph schema must include supporting indexes/constraints for merge keys.
-
-## 7. Retrieval Architecture
-
-Every request runs a dual-path retrieval:
-
-1. **Vector path (Qdrant)**
-   - embed query
-   - nearest-neighbor search (top-k, commonly 12)
-   - rerank by combined score
-2. **Graph path (Neo4j)**
-   - entity extraction from query
-   - node match
-   - 1-2 hop traversal for structurally relevant context
-3. **Merge path**
-   - deduplicate overlap
-   - unified ranking
-   - token-budget fitting
-   - inject into ContextBundle
-
-Parallel execution of both paths is required so memory retrieval remains low-latency.
-
-## 8. Scoring and Decay
-
-Canonical ranking formula:
-
-```text
-retrieval_score =
-  (0.5 * semantic_similarity) +
-  (0.2 * exp(-0.05 * days_since_creation)) +
-  (0.2 * importance_score) +
-  (0.1 * normalized_access_count)
-```
-
-Implications:
-
-- semantic relevance remains dominant
-- old but important/frequently accessed memory can still win
-- recency decays continuously, not as a hard cutoff
-
-## 9. Safety, Policy, and Governance
-
-Memory architecture enforces:
-
-- user-level data partitioning and access controls
-- privacy-level tagging (`private`, `sensitive`, etc.)
-- explicit forget/redaction workflows across all stores
-- auditability for writes, updates, and deletions
-
-No silent write failure is allowed; failures are retried or surfaced with explicit terminal reason.
-
-## 10. Operational Architecture
-
-Memory is operated as asynchronous jobs with clear SLOs:
-
-- fast-lane consolidation availability
-- deep-lane throughput
-- retrieval latency and hit quality
-- forget completion reliability
-
-Operational and incident details are defined in `operations/`.
-
-## 11. Extended Spec Map
-
-- Type-level behavior: `types/README.md`
-- Runtime and control flow: `architecture/runtime.md`
-- Storage/lifecycle details: `architecture/storage-and-lifecycle.md`
-- Retrieval/graph internals: `architecture/retrieval-and-graph.md`
-- Data/interface contracts: `contracts/`
-- Runbooks and SRE guidance: `operations/`
-- End-to-end behavior flows: `workflow/`
-- Stage-by-stage implementation pipelines: `pipeline/`
-
-<!-- memory-expansion-2026-04-10 -->
-
-## Builder Addendum: Expanded Control Surface
-
-This addendum extends the document with practical implementation controls for the Tony memory runtime.
-
-| Control surface | Default posture | Why it matters |
-|---|---|---|
-| Candidate precision | threshold-gated writes | reduces low-signal memory pollution |
-| Recall diversity | vector + graph blending | improves answer richness and grounding |
-| Durability | multi-store receipts + audit trail | prevents silent memory loss |
-| Cost efficiency | token-budget fitting and pruning | preserves quality under context limits |
-
-```mermaid
-flowchart LR
-    A[Input signal] --> B[Memory classification]
-    B --> C[Store writes and indexing]
-    C --> D[Hybrid retrieval]
-    D --> E[Context budget fit]
-    E --> F[Response + post-hooks]
-```
+The SVG diagrams in this folder are conceptual design illustrations, not authoritative API schemas, measured latency charts, or promises that automatic model/scheduler components exist. Current source contracts and these implementation guides define executable behavior.

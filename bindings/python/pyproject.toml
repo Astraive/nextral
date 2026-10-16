@@ -8,11 +8,26 @@ version = "0.1.0"
 description = "Python package for the Nextral production memory runtime."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [
   { name = "Nextral Maintainers" }
 ]
 dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/Astraive/nextral"
+Repository = "https://github.com/Astraive/nextral"
+Issues = "https://github.com/Astraive/nextral/issues"
 
 [project.scripts]
 nextral = "nextral.cli:main"
@@ -22,3 +37,17 @@ bindings = "pyo3"
 module-name = "nextral._nextral"
 python-source = "."
 manifest-path = "Cargo.toml"
+features = ["pyo3/abi3-py310"]
+include = [
+  { path = "nextral/py.typed", format = ["sdist", "wheel"] },
+  { path = "nextral/*.pyi", format = ["sdist", "wheel"] },
+  { path = "LICENSE", format = ["sdist", "wheel"] },
+  { path = "tests/**", format = "sdist" },
+]
+exclude = [
+  { path = "nextral/*.pyd", format = "sdist" },
+  { path = "nextral/*.so", format = "sdist" },
+  "nextral/_nextral.cp*.pyd",
+  "nextral/_nextral.cpython-*.so",
+  "**/__pycache__/**",
+]
