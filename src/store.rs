@@ -37,6 +37,7 @@ pub trait MemoryIndexStore: Sync {
         query_vector: Option<&[f32]>,
         top_k: usize,
         privacy_scope: &[PrivacyLevel],
+        filters: Option<&crate::memory::MemoryFilters>,
     ) -> CoreResult<Vec<(String, f32)>>;
     fn commit_ingestion(
         &mut self,
@@ -66,6 +67,10 @@ pub trait MemoryIndexStore: Sync {
         user_id: &str,
         ids: &[&str],
     ) -> CoreResult<Vec<MemoryRecord>>;
+    fn query_memories(
+        &self,
+        request: &crate::memory::MemoryQuery,
+    ) -> CoreResult<crate::memory::MemoryPage>;
     fn list_memories(
         &self,
         tenant_id: &str,
@@ -111,6 +116,14 @@ pub trait ReminderStore {
         user_id: &str,
         due_at_or_before: &str,
     ) -> CoreResult<Vec<ReminderRecord>>;
+    fn commit_reminder_delivery(
+        &mut self,
+        claim: &crate::runtime::lifecycle::LeaseClaim,
+        state_key: &str,
+        state: &serde_json::Value,
+        reminder: &ReminderRecord,
+        audits: &[AuditEvent],
+    ) -> CoreResult<()>;
 }
 
 pub trait SessionStore {

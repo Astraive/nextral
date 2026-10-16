@@ -1,10 +1,11 @@
 use crate::contracts::{CoreError, CoreResult};
+use crate::providers::Clock;
 use crate::{
     adapters::{
         neo4j::Neo4jAdapter, postgres::PostgresAdapter, qdrant::QdrantAdapter, redis::RedisAdapter,
         s3::S3Adapter,
     },
-    config::IngestionPolicy,
+    config::{IngestionPolicy, NextralConfig},
     ingestion::IngestMemoryRequest,
     memory::{ContentType, MemoryRecord, MemoryType, SourceType},
     ports::{
@@ -30,13 +31,120 @@ use crate::{
     runtime::{lifecycle::LifecycleStore, storage::RuntimeStore},
     store::{MemoryIndexStore, TestMemoryStore},
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_status: Option<String>,
+}
+
+impl std::fmt::Display for PackageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for PackageError {}
+
+#[derive(Debug, Clone, Default)]
+pub struct CallOptions {
+    pub timeout_ms: Option<u64>,
+    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShutdownReport {
+    pub drained: bool,
+    pub in_flight_remaining: usize,
+}
+
+pub struct ServiceHandle {
+    pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
+    pub(crate) join_handle:
+        Mutex<Option<tokio::task::JoinHandle<CoreResult<crate::api::ServiceRuntimeReport>>>>,
+    pub(crate) binds: Vec<String>,
+}
+
+impl ServiceHandle {
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), PackageError> {
+        self.shutdown_token.cancel();
+        let handle = {
+            let mut guard = self.join_handle.lock();
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(timeout, handle).await;
+        }
+        Ok(())
+    }
+
+    pub fn binds(&self) -> &[String] {
+        &self.binds
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkerHandle {
+    pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
+    pub(crate) join_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub(crate) tick_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) client: RuntimeClient,
+    pub(crate) config: crate::runtime::prospective::WorkerConfig,
+}
+impl std::fmt::Debug for WorkerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerHandle").finish()
+    }
+}
+
+impl WorkerHandle {
+    pub async fn tick(
+        &self,
+    ) -> Result<crate::runtime::prospective::WorkerTickReport, PackageError> {
+        let Ok(_guard) = self.tick_lock.try_lock() else {
+            return Err(PackageError {
+                code: "conflict".into(),
+                message: "worker tick already in progress".into(),
+                execution_status: None,
+            });
+        };
+        let store = self.client.store().clone();
+        let config = self.config.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            crate::runtime::prospective::run_worker_tick(&store, &config)
+        })
+        .await
+        .map_err(|e| PackageError {
+            code: "io".into(),
+            message: e.to_string(),
+            execution_status: None,
+        })??;
+        Ok(report)
+    }
+
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), PackageError> {
+        self.shutdown_token.cancel();
+        let handle = {
+            let mut guard = self.join_handle.lock();
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(timeout, handle).await;
+        }
+        Ok(())
+    }
+    pub fn tick_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.tick_lock.clone()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,11 +190,17 @@ pub struct McpCallRequest {
     pub payload_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExperimentCreateRequest {
     pub lane: RuntimeLane,
     pub policy_version: String,
     pub description: String,
+    #[serde(default)]
+    pub scoring_weights: Option<crate::config::ScoringWeights>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub top_k_vector: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,102 +278,453 @@ fn with_control(
     operation: impl FnOnce(&mut RuntimeControlPlane) -> CoreResult<serde_json::Value>,
 ) -> CoreResult<serde_json::Value> {
     let owner = crate::runtime::lifecycle::worker_owner();
-    if !store.lifecycle_claim(
-        "__nextral_control",
-        "control-lease",
-        &owner,
-        crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,
-        300,
-    )? {
-        return Err(CoreError::Conflict(
-            "control plane is leased by another worker".into(),
-        ));
-    }
+    let claim = store
+        .lifecycle_claim_fenced(
+            "__nextral_control",
+            None,
+            crate::runtime::lifecycle::LeaseResource::RuntimeState,
+            "control-lease",
+            &owner,
+            300,
+        )?
+        .ok_or_else(|| CoreError::Conflict("control plane is leased by another worker".into()))?;
+
     let result = (|| {
         let mut control = load_control(store)?;
         let result = operation(&mut control)?;
-        let receipt = store.lifecycle_save(
-            "__nextral_control",
+        let write_res = store.lifecycle_save_guarded(
+            &claim,
             "control-plane",
             &serde_json::to_value(control)?,
         )?;
-        if !crate::runtime::lifecycle::acknowledged(&receipt) {
-            return Err(CoreError::Io(
-                "control plane persistence was not acknowledged".into(),
+        if matches!(
+            write_res,
+            crate::runtime::lifecycle::GuardedWriteResult::Superseded(_)
+        ) {
+            return Err(CoreError::LeaseLost(
+                "control plane write superseded".into(),
             ));
         }
         Ok(result)
     })();
-    let release = store.lifecycle_release("__nextral_control", "control-lease", &owner);
-    match result {
-        Ok(value) => {
-            release?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = release;
-            Err(error)
-        }
-    }
+    let _ = store.lifecycle_release_fenced(&claim);
+    result
 }
 
 fn invalid_json_input(_: serde_json::Error) -> CoreError {
     CoreError::InvalidInput("invalid input format".into())
 }
 
-static RUNTIME: OnceLock<Mutex<RuntimeStore>> = OnceLock::new();
-
-pub fn configure_runtime_json(config_json: &str) -> Result<String, PackageError> {
-    let config = crate::config::load_config(config_json)?;
-    crate::runtime::observability::configure(&config.observability)?;
-    let backend = serde_json::to_value(&config.backend).map_err(CoreError::from)?;
-    let configured = RuntimeStore::configured(config)?;
-    if let Some(current) = RUNTIME.get() {
-        *current
-            .lock()
-            .map_err(|e| CoreError::Conflict(e.to_string()))? = configured;
-    } else {
-        RUNTIME
-            .set(Mutex::new(configured))
-            .map_err(|_| CoreError::Conflict("runtime was configured concurrently".into()))?;
-    }
-    Ok(serde_json::json!({"backend":backend,"status":"configured"}).to_string())
+#[derive(Clone)]
+pub struct RuntimeClient {
+    inner: Arc<ClientInner>,
 }
 
-fn runtime_store() -> CoreResult<&'static Mutex<RuntimeStore>> {
-    if let Some(store) = RUNTIME.get() {
-        return Ok(store);
+struct ClientInner {
+    config: NextralConfig,
+    store: RuntimeStore,
+    clock: Arc<dyn Clock>,
+    #[allow(dead_code)]
+    telemetry_lease: Option<crate::runtime::observability::ObservabilityLease>,
+    in_flight_semaphore: Arc<tokio::sync::Semaphore>,
+    pending_count: AtomicUsize,
+    pending_bytes: AtomicUsize,
+    closed: AtomicBool,
+    close_token: tokio_util::sync::CancellationToken,
+    active_service: Mutex<Option<Arc<ServiceHandle>>>,
+    active_worker: Mutex<Option<Arc<WorkerHandle>>>,
+}
+
+struct AdmissionGuard {
+    inner: Arc<ClientInner>,
+    bytes: usize,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        self.inner.pending_count.fetch_sub(1, Ordering::Release);
+        self.inner
+            .pending_bytes
+            .fetch_sub(self.bytes, Ordering::Release);
     }
-    if let Ok(path) = std::env::var("NEXTRAL_CONFIG") {
-        let config = std::fs::read_to_string(path).map_err(|e| CoreError::Io(e.to_string()))?;
-        configure_runtime_json(&config).map_err(|e| CoreError::InvalidInput(e.message))?;
-    } else {
-        #[cfg(test)]
-        {
-            let _ = RUNTIME.set(Mutex::new(RuntimeStore::Test(Box::default())));
+}
+
+impl RuntimeClient {
+    pub fn from_config(config: NextralConfig) -> Result<Self, PackageError> {
+        Self::from_config_with_clock(config, Arc::new(crate::providers::SystemClock))
+    }
+
+    pub fn from_config_with_clock(
+        config: NextralConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, PackageError> {
+        config.validate().map_err(PackageError::from)?;
+        let telemetry_lease = crate::runtime::observability::acquire_lease(&config.observability)
+            .map_err(PackageError::from)?;
+        let store = RuntimeStore::configured(config.clone()).map_err(PackageError::from)?;
+        let in_flight = config.execution.max_in_flight;
+        Ok(Self {
+            inner: Arc::new(ClientInner {
+                config,
+                store,
+                clock,
+                telemetry_lease: Some(telemetry_lease),
+                in_flight_semaphore: Arc::new(tokio::sync::Semaphore::new(in_flight)),
+                pending_count: AtomicUsize::new(0),
+                pending_bytes: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+                close_token: tokio_util::sync::CancellationToken::new(),
+                active_service: Mutex::new(None),
+                active_worker: Mutex::new(None),
+            }),
+        })
+    }
+
+    pub fn config(&self) -> &NextralConfig {
+        &self.inner.config
+    }
+
+    pub fn store(&self) -> &RuntimeStore {
+        &self.inner.store
+    }
+
+    pub fn readiness(&self) -> serde_json::Value {
+        self.inner.store.readiness()
+    }
+
+    pub async fn call_json(
+        &self,
+        tool: &str,
+        payload_json: String,
+        options: CallOptions,
+    ) -> Result<String, PackageError> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(PackageError {
+                code: "conflict".into(),
+                message: "client is closed".into(),
+                execution_status: Some("not_started".into()),
+            });
         }
-        #[cfg(not(test))]
-        {
-            return Err(CoreError::InvalidInput(
-                "configure_runtime_json or NEXTRAL_CONFIG is required".into(),
-            ));
+        let payload_bytes = payload_json.len();
+        if payload_bytes > MAX_PAYLOAD_BYTES {
+            return Err(PackageError {
+                code: "invalid_input".into(),
+                message: "request exceeds maximum payload size".into(),
+                execution_status: Some("not_started".into()),
+            });
+        }
+        let max_pending = self.inner.config.execution.max_pending;
+        let max_pending_bytes = self.inner.config.execution.max_pending_bytes;
+
+        let mut current_count = self.inner.pending_count.load(Ordering::Relaxed);
+        loop {
+            if current_count >= max_pending {
+                crate::runtime::observability::record_admission(false);
+                return Err(PackageError {
+                    code: "resource_exhausted".into(),
+                    message: "admission capacity exceeded".into(),
+                    execution_status: Some("not_started".into()),
+                });
+            }
+            match self.inner.pending_count.compare_exchange_weak(
+                current_count,
+                current_count + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(c) => current_count = c,
+            }
+        }
+
+        let mut current_bytes = self.inner.pending_bytes.load(Ordering::Relaxed);
+        loop {
+            if current_bytes.saturating_add(payload_bytes) > max_pending_bytes {
+                self.inner.pending_count.fetch_sub(1, Ordering::Release);
+                crate::runtime::observability::record_admission(false);
+                return Err(PackageError {
+                    code: "resource_exhausted".into(),
+                    message: "admission byte capacity exceeded".into(),
+                    execution_status: Some("not_started".into()),
+                });
+            }
+            match self.inner.pending_bytes.compare_exchange_weak(
+                current_bytes,
+                current_bytes + payload_bytes,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(b) => current_bytes = b,
+            }
+        }
+
+        let admission_guard = AdmissionGuard {
+            inner: Arc::clone(&self.inner),
+            bytes: payload_bytes,
+        };
+        crate::runtime::observability::record_admission(true);
+
+        let request_timeout_ms = self.inner.config.execution.request_timeout_ms;
+        let effective_timeout_ms = options
+            .timeout_ms
+            .map_or(request_timeout_ms, |t| t.min(request_timeout_ms));
+        let deadline =
+            self.inner.clock.monotonic_now() + Duration::from_millis(effective_timeout_ms);
+
+        let sem = Arc::clone(&self.inner.in_flight_semaphore);
+        let cancel = options.cancellation_token.clone();
+        let close_token = self.inner.close_token.clone();
+        let now = self.inner.clock.monotonic_now();
+        let queue_timeout = deadline.saturating_duration_since(now);
+        if queue_timeout.is_zero() {
+            crate::runtime::observability::record_queue_timeout();
+            return Err(PackageError {
+                code: "deadline_exceeded".into(),
+                message: "deadline exceeded before admission".into(),
+                execution_status: Some("not_started".into()),
+            });
+        }
+
+        let permit = tokio::select! {
+            permit = sem.acquire_owned() => {
+                match permit {
+                    Ok(p) => p,
+                    Err(_) => {
+                        return Err(PackageError {
+                            code: "conflict".into(),
+                            message: "client is closed".into(),
+                            execution_status: Some("not_started".into()),
+                        });
+                    }
+                }
+            }
+            _ = tokio::time::sleep(queue_timeout) => {
+                crate::runtime::observability::record_queue_timeout();
+                return Err(PackageError {
+                    code: "deadline_exceeded".into(),
+                    message: "request deadline exceeded in queue".into(),
+                    execution_status: Some("not_started".into()),
+                });
+            }
+            _ = close_token.cancelled() => {
+                return Err(PackageError {
+                    code: "conflict".into(),
+                    message: "client closed".into(),
+                    execution_status: Some("not_started".into()),
+                });
+            }
+            _ = async {
+                if let Some(ref c) = cancel {
+                    c.cancelled().await
+                } else {
+                    std::future::pending::<()>().await
+                }
+            } => {
+                return Err(PackageError {
+                    code: "cancelled".into(),
+                    message: "request cancelled".into(),
+                    execution_status: Some("not_started".into()),
+                });
+            }
+        };
+
+        let remaining = deadline.saturating_duration_since(self.inner.clock.monotonic_now());
+        let tool_owned = tool.to_string();
+        let store = self.inner.store.clone();
+        let config = self.inner.config.clone();
+
+        let blocking_task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _guard = admission_guard;
+            dispatch_tool(&store, &config, &tool_owned, &payload_json)
+        });
+
+        let res = tokio::select! {
+            task_res = blocking_task => {
+                match task_res {
+                    Ok(res) => res,
+                    Err(join_err) => {
+                        Err(PackageError {
+                            code: "io".into(),
+                            message: format!("task panicked: {join_err}"),
+                            execution_status: Some("outcome_unknown".into()),
+                        })
+                    }
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                crate::runtime::observability::record_execution_timeout();
+                Err(PackageError {
+                    code: "deadline_exceeded".into(),
+                    message: "runtime request deadline exceeded".into(),
+                    execution_status: Some("outcome_unknown".into()),
+                })
+            }
+            _ = async {
+                if let Some(ref c) = cancel {
+                    c.cancelled().await
+                } else {
+                    std::future::pending::<()>().await
+                }
+            } => {
+                Err(PackageError {
+                    code: "cancelled".into(),
+                    message: "request cancelled during execution".into(),
+                    execution_status: Some("outcome_unknown".into()),
+                })
+            }
+        };
+        res
+    }
+
+    pub async fn close(&self, timeout: Duration) -> Result<ShutdownReport, PackageError> {
+        self.inner.closed.store(true, Ordering::Release);
+        self.inner.close_token.cancel();
+
+        let service_handle = {
+            let mut guard = self.inner.active_service.lock();
+            guard.take()
+        };
+        if let Some(service) = service_handle {
+            let _ = service.shutdown(timeout).await;
+        }
+
+        let worker_handle = {
+            let mut guard = self.inner.active_worker.lock();
+            guard.take()
+        };
+        if let Some(worker) = worker_handle {
+            let _ = worker.shutdown(timeout).await;
+        }
+
+        let start = std::time::Instant::now();
+        let max_in_flight = self.inner.config.execution.max_in_flight;
+        loop {
+            let available = self.inner.in_flight_semaphore.available_permits();
+            let in_flight = max_in_flight.saturating_sub(available);
+            if in_flight == 0 {
+                return Ok(ShutdownReport {
+                    drained: true,
+                    in_flight_remaining: 0,
+                });
+            }
+            if start.elapsed() >= timeout {
+                return Ok(ShutdownReport {
+                    drained: false,
+                    in_flight_remaining: in_flight,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    RUNTIME
-        .get()
-        .ok_or_else(|| CoreError::Conflict("runtime initialization failed".into()))
+
+    pub async fn serve(&self) -> Result<ServiceHandle, PackageError> {
+        {
+            let active = self.inner.active_service.lock();
+            if active.is_some() {
+                return Err(PackageError {
+                    code: "conflict".into(),
+                    message: "service host already running for this client".into(),
+                    execution_status: None,
+                });
+            }
+        }
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let token = shutdown_token.clone();
+        let client_clone = self.clone();
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        let join_handle =
+            tokio::spawn(
+                async move { crate::api::serve_client(client_clone, token, ready_tx).await },
+            );
+
+        let binds = ready_rx.await.map_err(|_| PackageError {
+            code: "io".into(),
+            message: "service host startup failed".into(),
+            execution_status: None,
+        })??;
+
+        let handle = Arc::new(ServiceHandle {
+            shutdown_token: shutdown_token.clone(),
+            join_handle: Mutex::new(Some(join_handle)),
+            binds: binds.clone(),
+        });
+        {
+            let mut active = self.inner.active_service.lock();
+            *active = Some(handle.clone());
+        }
+        Ok(ServiceHandle {
+            shutdown_token,
+            join_handle: Mutex::new(None),
+            binds,
+        })
+    }
+
+    pub async fn start_worker(
+        &self,
+        config: crate::runtime::prospective::WorkerConfig,
+    ) -> Result<WorkerHandle, PackageError> {
+        config.validate().map_err(PackageError::from)?;
+        {
+            let active = self.inner.active_worker.lock();
+            if active.is_some() {
+                return Err(PackageError {
+                    code: "conflict".into(),
+                    message: "worker already running for this client".into(),
+                    execution_status: None,
+                });
+            }
+        }
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let token = shutdown_token.clone();
+        let tick_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let tick_lock_loop = tick_lock.clone();
+        let store = self.store().clone();
+        let worker_cfg = config.clone();
+        let interval = Duration::from_millis(config.poll_interval_ms);
+
+        let join_handle = tokio::spawn(async move {
+            while !token.is_cancelled() {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {
+                        if let Ok(_guard) = tick_lock_loop.try_lock() {
+                            let s = store.clone();
+                            let c = worker_cfg.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::runtime::prospective::run_worker_tick(&s, &c)
+                            }).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let handle = WorkerHandle {
+            shutdown_token: shutdown_token.clone(),
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
+            tick_lock,
+            client: self.clone(),
+            config,
+        };
+        {
+            let mut active = self.inner.active_worker.lock();
+            *active = Some(Arc::new(handle.clone()));
+        }
+        Ok(handle)
+    }
 }
 
-pub fn runtime_readiness_json() -> Result<String, PackageError> {
-    Ok(runtime_store()?
-        .lock()
-        .map_err(|e| CoreError::Conflict(e.to_string()))?
-        .readiness()
-        .to_string())
-}
-
-pub fn run_service_hosts_json(config_json: &str, modes_json: &str) -> Result<String, PackageError> {
-    crate::api::run_service_hosts_json(config_json, modes_json).map_err(PackageError::from)
+impl Drop for RuntimeClient {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) == 1 {
+            self.inner.closed.store(true, Ordering::Release);
+            self.inner.close_token.cancel();
+        }
+    }
 }
 
 pub fn e2e_smoke_json() -> Result<String, PackageError> {
@@ -391,6 +856,7 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
             query_vector: request.qdrant_query_vector.clone(),
             privacy_scope: vec![crate::memory::PrivacyLevel::Private],
             top_k: 3,
+            filters: None,
         },
     )?;
     neo4j.merge_node(&crate::graph::GraphNode::new(
@@ -463,46 +929,48 @@ fn validate_tenant_user(payload: &serde_json::Value) -> Result<(), PackageError>
         return Err(PackageError {
             code: "invalid_input".into(),
             message: "tenant_id and user_id are required".into(),
+            execution_status: None,
         });
     }
     if tenant_id.len() > 128 || user_id.len() > 128 {
         return Err(PackageError {
             code: "invalid_input".into(),
             message: "tenant_id and user_id must not exceed 128 characters".into(),
+            execution_status: None,
         });
     }
     Ok(())
 }
 
-pub fn mcp_call_json(request_json: &str) -> Result<String, PackageError> {
+pub fn dispatch_tool(
+    store: &RuntimeStore,
+    config: &NextralConfig,
+    tool: &str,
+    payload_json: &str,
+) -> Result<String, PackageError> {
     let mut span = crate::runtime::observability::start_span("nextral.dispatch");
-    let result = mcp_call_impl(request_json);
+    let result = dispatch_tool_impl(store, config, tool, payload_json);
     if result.is_err() {
         span.fail();
     }
     result
 }
 
-fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
-    if request_json.len() > MAX_PAYLOAD_BYTES {
-        return Err(CoreError::InvalidInput("request exceeds maximum payload size".into()).into());
-    }
-    let request: McpCallRequest = serde_json::from_str(request_json).map_err(invalid_json_input)?;
-    if request.payload_json.len() > MAX_PAYLOAD_BYTES {
-        return Err(CoreError::InvalidInput("tool payload exceeds maximum size".into()).into());
-    }
+fn dispatch_tool_impl(
+    store: &RuntimeStore,
+    _config: &NextralConfig,
+    tool: &str,
+    payload_json: &str,
+) -> Result<String, PackageError> {
     let payload: serde_json::Value =
-        serde_json::from_str(&request.payload_json).map_err(invalid_json_input)?;
-    if request.tool == "nextral.health" {
-        return runtime_readiness_json();
+        serde_json::from_str(payload_json).map_err(invalid_json_input)?;
+    if tool == "nextral.health" {
+        return Ok(store.readiness().to_string());
     }
-    let mut guard = runtime_store()?
-        .lock()
-        .map_err(|e| CoreError::Conflict(e.to_string()))?;
-    let store = &mut *guard;
-    if request.tool.starts_with("nextral.")
+    let mut store = store.clone();
+    if tool.starts_with("nextral.")
         && !matches!(
-            request.tool.as_str(),
+            tool,
             "nextral.database.migrate"
                 | "nextral.reembed.plan"
                 | "nextral.jobs.reembed.execute"
@@ -510,6 +978,8 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 | "nextral.batch.ingest"
                 | "nextral.batch.retrieve"
                 | "nextral.batch.forget"
+                | "nextral.test.delay"
+                | "nextral.index.repair"
         )
     {
         validate_tenant_user(&payload)?;
@@ -533,16 +1003,41 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             serde_json::to_value($expr).map_err(CoreError::from)?
         };
     }
-    let result = match request.tool.as_str() {
+    let store = &mut store;
+    let result = match tool {
+        "nextral.test.delay" => {
+            let ms = payload
+                .get("delay_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100);
+            std::thread::sleep(Duration::from_millis(ms));
+            serde_json::json!({"status": "delayed"})
+        }
         "nextral.database.migrate" => store.migrate()?,
         "nextral.outbox.run" => store.drain_outbox(string_field("tenant_id")?)?,
         "nextral.memory.ingest" => {
             let result = crate::ingestion::ingest_memory(store, decode!(IngestMemoryRequest))?;
             value!(result)
         }
-        "nextral.memory.retrieve" | "nextral.runtime.scored_search" => {
-            let mut result = crate::retrieval::retrieve(store, decode!(RetrievalRequest))?;
+        "nextral.memory.retrieve" => {
+            let mut req = decode!(RetrievalRequest);
             let control = load_control(store)?;
+            if req.scoring_weights.is_none() {
+                if let Some(weights) = &control.registry.scoring_weights {
+                    req.scoring_weights = Some(weights.clone());
+                }
+            }
+            if let Some(budget) = control.registry.token_budget {
+                if req.token_budget == 1800 {
+                    req.token_budget = budget;
+                }
+            }
+            if let Some(top_k) = control.registry.top_k_vector {
+                if req.top_k_vector == 12 {
+                    req.top_k_vector = top_k;
+                }
+            }
+            let mut result = crate::retrieval::retrieve(store, req)?;
             result.decision_action = decision_for(&control.safety_policy, &result.severity);
             result.lane = control.registry.current_lane.clone();
             result.policy_version = control.registry.active_policy_version.clone();
@@ -556,36 +1051,77 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             value!(store.get_memory(tenant, user, string_field("memory_id")?)?)
         }
         "nextral.memory.forget" => value!(forget_memory(store, decode!(ForgetMemoryRequest))?),
-        "nextral.memory.list"
-        | "nextral.memory.search_by_tag"
-        | "nextral.memory.search_by_entity" => {
-            let privacy = payload
-                .get("privacy_scope")
-                .map(|v| serde_json::from_value(v.clone()))
-                .transpose()
-                .map_err(invalid_json_input)?
-                .unwrap_or_else(|| {
-                    vec![
-                        crate::memory::PrivacyLevel::Private,
-                        crate::memory::PrivacyLevel::Shared,
-                        crate::memory::PrivacyLevel::Sensitive,
-                    ]
-                });
-            let mut records = store.list_memories(
-                tenant,
-                user,
-                &privacy,
-                payload["include_inactive"].as_bool().unwrap_or(false),
-            )?;
-            if request.tool == "nextral.memory.search_by_tag" {
-                let tag = string_field("tag")?;
-                records.retain(|r| r.has_tag(tag));
+        "nextral.memory.list" | "nextral.memory.query" => {
+            let mut query = decode!(crate::memory::MemoryQuery);
+            query.tenant_id = tenant.to_string();
+            query.user_id = user.to_string();
+            let page = store.query_memories(&query)?;
+            value!(page)
+        }
+        "nextral.memory.search_by_tag" => {
+            let tag = string_field("tag")?;
+            let query = crate::memory::MemoryQuery {
+                tenant_id: tenant.to_string(),
+                user_id: user.to_string(),
+                privacy_scope: Vec::new(),
+                filters: crate::memory::MemoryFilters {
+                    tags_any: Some(vec![tag.to_string()]),
+                    ..Default::default()
+                },
+                limit: 100,
+                cursor: None,
+            };
+            let page = store.query_memories(&query)?;
+            value!(page.items)
+        }
+        "nextral.memory.search_by_entity" => {
+            let entity = string_field("entity")?;
+            let query = crate::memory::MemoryQuery {
+                tenant_id: tenant.to_string(),
+                user_id: user.to_string(),
+                privacy_scope: Vec::new(),
+                filters: crate::memory::MemoryFilters {
+                    entities_any: Some(vec![entity.to_string()]),
+                    ..Default::default()
+                },
+                limit: 100,
+                cursor: None,
+            };
+            let page = store.query_memories(&query)?;
+            value!(page.items)
+        }
+        "nextral.index.repair" => {
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            if limit == 0 || limit > 1000 {
+                return Err(
+                    CoreError::InvalidInput("limit must be between 1 and 1000".into()).into(),
+                );
             }
-            if request.tool == "nextral.memory.search_by_entity" {
-                let entity = string_field("entity")?;
-                records.retain(|r| r.has_entity(entity));
-            }
-            value!(records)
+            let res = match store {
+                RuntimeStore::Test(_) => serde_json::json!({
+                    "repaired": 0,
+                    "checked": 0,
+                    "updated": 0,
+                    "removed": 0,
+                    "remaining": 0,
+                    "complete": true,
+                }),
+                RuntimeStore::Production(p) => {
+                    let mut r = p.index_repair(tenant, user, limit)?;
+                    let repaired = r
+                        .get("repaired")
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| {
+                            let u = r.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let rm = r.get("removed").and_then(|v| v.as_u64()).unwrap_or(0);
+                            Some(u + rm)
+                        })
+                        .unwrap_or(0);
+                    r["repaired"] = serde_json::json!(repaired);
+                    r
+                }
+            };
+            value!(res)
         }
         "nextral.memory.update" => {
             let mut record = store
@@ -765,7 +1301,11 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             decode!(crate::runtime::prospective::RunLifecycleJobsRequest)
         )?),
         "nextral.jobs.list" => {
-            let mut jobs = store.lifecycle_list(tenant, &format!("scheduled-job/{user}/"))?;
+            let mut jobs: Vec<serde_json::Value> = store
+                .lifecycle_job_list(tenant, user)?
+                .into_iter()
+                .map(|j| serde_json::to_value(j).unwrap())
+                .collect();
             for checkpoint in store.lifecycle_list(tenant, &format!("reembed/{user}/"))? {
                 let report = checkpoint["report"].clone();
                 jobs.push(serde_json::json!({"id":report["plan_id"],"job_type":"reembed","status":report["status"],"report":report}));
@@ -775,10 +1315,8 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
         "nextral.jobs.get" => {
             let id = string_field("job_id")?;
             crate::store::validate_scope_component(id, "job_id")?;
-            if let Some(job) =
-                store.lifecycle_load(tenant, &format!("scheduled-job/{user}/{id}"))?
-            {
-                job
+            if let Some(job) = store.lifecycle_job_get(tenant, user, id)? {
+                value!(job)
             } else if let Some(checkpoint) =
                 store.lifecycle_load(tenant, &format!("reembed/{user}/{id}"))?
             {
@@ -809,7 +1347,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
             )?)
         }
         "nextral.batch.ingest" | "nextral.batch.retrieve" | "nextral.batch.forget" => {
-            let array_name = if request.tool == "nextral.batch.retrieve" {
+            let array_name = if tool == "nextral.batch.retrieve" {
                 "queries"
             } else {
                 "items"
@@ -850,11 +1388,11 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 }
             }
             let fingerprint =
-                crate::memory::deterministic_id(&[&request.tool, &payload[array_name].to_string()]);
+                crate::memory::deterministic_id(&[&tool, &payload[array_name].to_string()]);
             let key = payload["idempotency_key"].as_str().map(|k| {
                 format!(
                     "idempotency/{}",
-                    crate::memory::deterministic_id(&[batch_tenant, batch_user, &request.tool, k])
+                    crate::memory::deterministic_id(&[batch_tenant, batch_user, &tool, k])
                 )
             });
             let lease = key.as_ref().map(|key| format!("lease/{key}"));
@@ -884,7 +1422,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                         )
                         .into());
                     }
-                    if request.tool != "nextral.batch.retrieve"
+                    if tool != "nextral.batch.retrieve"
                         && cached["response"]["failed"].as_u64() == Some(0)
                     {
                         if let Some(lease) = &lease {
@@ -905,7 +1443,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 if let Some(lease) = &lease {
                     if !store.lifecycle_claim(batch_tenant,lease,&owner,crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,300)?{return Err(CoreError::Conflict("batch idempotency lease lost".into()).into());}
                 }
-                let result: CoreResult<serde_json::Value> = (|| match request.tool.as_str() {
+                let result: CoreResult<serde_json::Value> = (|| match tool {
                     "nextral.batch.ingest" => {
                         Ok(serde_json::to_value(crate::ingestion::ingest_memory(
                             store,
@@ -949,7 +1487,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
                 store.lifecycle_save(
                     batch_tenant,
                     &key,
-                    &serde_json::json!({"tenant_id":batch_tenant,"user_id":batch_user,"tool":request.tool,"fingerprint":fingerprint,"response":(request.tool != "nextral.batch.retrieve").then_some(&result)}),
+                    &serde_json::json!({"tenant_id":batch_tenant,"user_id":batch_user,"tool":tool,"fingerprint":fingerprint,"response":(tool != "nextral.batch.retrieve").then_some(&result)}),
                 )?;
             }
             if let Some(lease) = &lease {
@@ -960,10 +1498,13 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
         "experiments.create" => {
             let p = decode!(ExperimentCreateRequest);
             with_control(store, |c| {
-                Ok(serde_json::to_value(c.registry.create(
+                Ok(serde_json::to_value(c.registry.create_with_settings(
                     p.lane,
                     p.policy_version,
                     p.description,
+                    p.scoring_weights,
+                    p.token_budget,
+                    p.top_k_vector,
                 ))?)
             })?
         }
@@ -1000,10 +1541,7 @@ fn mcp_call_impl(request_json: &str) -> Result<String, PackageError> {
         }
         other => return Err(CoreError::InvalidInput(format!("unknown MCP tool: {other}")).into()),
     };
-    if matches!(
-        request.tool.as_str(),
-        "nextral.consolidation.run" | "nextral.jobs.run"
-    ) {
+    if matches!(tool, "nextral.consolidation.run" | "nextral.jobs.run") {
         store.drain_outbox(tenant)?;
     }
     Ok(result.to_string())
@@ -1137,12 +1675,18 @@ impl From<CoreError> for PackageError {
             CoreError::InvalidInput(msg) => ("invalid_input", msg.as_str()),
             CoreError::NotFound(msg) => ("not_found", msg.as_str()),
             CoreError::Conflict(msg) => ("conflict", msg.as_str()),
+            CoreError::ResourceExhausted(msg) => ("resource_exhausted", msg.as_str()),
+            CoreError::DeadlineExceeded(msg) => ("deadline_exceeded", msg.as_str()),
+            CoreError::Cancelled(msg) => ("cancelled", msg.as_str()),
+            CoreError::LeaseLost(msg) => ("lease_lost", msg.as_str()),
+            CoreError::IndexNotReady(msg) => ("index_not_ready", msg.as_str()),
             CoreError::Io(_) => ("io", "internal error"),
             CoreError::Serialization(_) => ("serialization", "invalid input format"),
         };
         Self {
             code: code.to_string(),
             message: sanitize_error_message(raw_message),
+            execution_status: None,
         }
     }
 }

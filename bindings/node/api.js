@@ -7,6 +7,7 @@ class NextralError extends Error {
     super(message, options);
     this.name = 'NextralError';
     this.code = code;
+    this.executionStatus = options && options.executionStatus ? options.executionStatus : undefined;
   }
 }
 
@@ -16,12 +17,18 @@ function normalizeError(error) {
     try {
       const details = JSON.parse(error.message);
       if (typeof details.code === 'string' && typeof details.message === 'string') {
-        return new NextralError(details.code, details.message, { cause: error });
+        return new NextralError(details.code, details.message, {
+          cause: error,
+          executionStatus: details.execution_status || undefined,
+        });
       }
     } catch { /* Native transport errors are not always JSON. */ }
   }
-  return new NextralError(error instanceof TypeError ? 'invalid_input' : 'native_error',
-    error instanceof Error ? error.message : String(error), { cause: error });
+  return new NextralError(
+    error instanceof TypeError ? 'invalid_input' : 'native_error',
+    error instanceof Error ? error.message : String(error),
+    { cause: error },
+  );
 }
 
 function encode(value) {
@@ -43,22 +50,6 @@ function invoke(method, ...args) {
   }
 }
 
-function call(tool, request) {
-  try {
-    return JSON.parse(invoke('mcpCall', encode({ tool, payload_json: encode(request) })));
-  } catch (error) {
-    throw normalizeError(error);
-  }
-}
-
-function configureRuntime(config) {
-  try {
-    return JSON.parse(invoke('configureRuntime', encode(config)));
-  } catch (error) {
-    throw normalizeError(error);
-  }
-}
-
 function validateConfig(config) {
   try {
     return JSON.parse(invoke('validateConfig', encode(config)));
@@ -67,57 +58,304 @@ function validateConfig(config) {
   }
 }
 
-async function serve(config, modes) {
-  try {
-    return JSON.parse(await invoke('runServiceHosts', encode(config), encode(modes)));
-  } catch (error) {
-    throw normalizeError(error);
+class ServiceHandle {
+  constructor(nativeHandle) {
+    this._native = nativeHandle;
+  }
+
+  async shutdown(timeoutMs) {
+    try {
+      return await this._native.shutdown(timeoutMs);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  get binds() {
+    return this._native.binds();
+  }
+}
+class WorkerHandle {
+  constructor(nativeHandle) {
+    this._native = nativeHandle;
+  }
+
+  async tick() {
+    try {
+      const raw = await this._native.tick();
+      return JSON.parse(raw);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async shutdown(timeoutMs) {
+    try {
+      return await this._native.shutdown(timeoutMs);
+    } catch (error) {
+      throw normalizeError(error);
+    }
   }
 }
 
+
+class Client {
+  constructor(nativeClient) {
+    this._native = nativeClient;
+  }
+
+  static async create(config) {
+    try {
+      const native = loadNative().Client.create(encode(config));
+      return new Client(native);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async call(tool, payload, options = {}) {
+    const { timeoutMs, signal } = options;
+    const ticket = this._native.createTicket();
+    let onAbort;
+    if (signal) {
+      if (signal.aborted) {
+        ticket.cancel();
+      } else {
+        onAbort = () => ticket.cancel();
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+    try {
+      const raw = await this._native.callJsonWithTicket(
+        tool,
+        encode(payload),
+        timeoutMs !== undefined ? timeoutMs : null,
+        ticket,
+      );
+      return JSON.parse(raw);
+    } catch (error) {
+      throw normalizeError(error);
+    } finally {
+      if (signal && onAbort) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    }
+  }
+
+  async close(timeoutMs) {
+    try {
+      const raw = await this._native.close(timeoutMs !== undefined ? timeoutMs : null);
+      return JSON.parse(raw);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async serve() {
+    try {
+      const nativeHandle = await this._native.serve();
+      return new ServiceHandle(nativeHandle);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async startWorker(config) {
+    try {
+      const nativeHandle = await this._native.startWorker(encode(config));
+      return new WorkerHandle(nativeHandle);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async health(options) {
+    return this.call('nextral.health', {}, options);
+  }
+
+  async ingest(request, options) {
+    return this.call('nextral.memory.ingest', request, options);
+  }
+
+  async retrieve(request, options) {
+    return this.call('nextral.memory.retrieve', request, options);
+  }
+
+  async forget(request, options) {
+    return this.call('nextral.memory.forget', request, options);
+  }
+
+  async getMemory(request, options) {
+    return this.call('nextral.memory.get', request, options);
+  }
+
+  async listMemories(request, options) {
+    const payload = { ...request };
+    if (payload.include_inactive && (!payload.filters || !payload.filters.statuses)) {
+      payload.filters = { ...(payload.filters || {}), statuses: ['active', 'soft_deleted', 'redacted', 'archived'] };
+    }
+    const res = await this.call('nextral.memory.list', payload, options);
+    const items = Array.isArray(res) ? res : (res && res.items ? res.items : []);
+    return items.map(item => {
+      const { preview, content_preview, ...rest } = item;
+      return {
+        embedding_provider: null,
+        extraction_provider: null,
+        extraction_model: null,
+        schema_version: '1.0.0',
+        ...rest,
+      };
+    });
+  }
+
+  async queryMemories(request, options) {
+    return this.call('nextral.memory.list', request, options);
+  }
+
+  async repairIndex(request, options) {
+    return this.call('nextral.index.repair', request, options);
+  }
+
+  async updateMemory(request, options) {
+    return this.call('nextral.memory.update', request, options);
+  }
+
+  async memoryStats(request, options) {
+    return this.call('nextral.memory.stats', request, options);
+  }
+
+  async searchByTag(request, options) {
+    return this.call('nextral.memory.search_by_tag', request, options);
+  }
+
+  async searchByEntity(request, options) {
+    return this.call('nextral.memory.search_by_entity', request, options);
+  }
+
+  async scoredSearch(request, options) {
+    return this.call('nextral.runtime.scored_search', request, options);
+  }
+
+  async appendSessionMessage(request, options) {
+    return this.call('nextral.session.append', request, options);
+  }
+
+  async eligibleSessions(request, options) {
+    return this.call('nextral.session.eligible', request, options);
+  }
+
+  async workingContext(request, options) {
+    return this.call('nextral.session.context', request, options);
+  }
+
+  async queryGraph(request, options) {
+    return this.call('nextral.graph.query', request, options);
+  }
+
+  async graphify(request, options) {
+    return this.call('nextral.graph.graphify', request, options);
+  }
+
+  async consolidate(request, options) {
+    return this.call('nextral.consolidation.run', request, options);
+  }
+
+  async scheduleReminder(request, options) {
+    return this.call('nextral.reminders.schedule', request, options);
+  }
+
+  async listReminders(request, options) {
+    return this.call('nextral.reminders.list', request, options);
+  }
+
+  async executeDueReminders(request, options) {
+    return this.call('nextral.reminders.due', request, options);
+  }
+
+  async planReembed(request, options) {
+    return this.call('nextral.reembed.plan', request, options);
+  }
+
+  async executeReembed(request, options) {
+    return this.call('nextral.jobs.reembed.execute', request, options);
+  }
+
+  async enqueueJob(request, options) {
+    return this.call('nextral.jobs.enqueue', request, options);
+  }
+
+  async getJob(request, options) {
+    return this.call('nextral.jobs.get', request, options);
+  }
+
+  async listJobs(request, options) {
+    return this.call('nextral.jobs.list', request, options);
+  }
+
+  async runJobs(request, options) {
+    return this.call('nextral.jobs.run', request, options);
+  }
+
+  async runOutbox(request, options) {
+    return this.call('nextral.outbox.run', request, options);
+  }
+
+  async migrateDatabase(options) {
+    return this.call('nextral.database.migrate', {}, options);
+  }
+
+  async upsertPolicy(request, options) {
+    return this.call('nextral.policy.upsert', request, options);
+  }
+
+  async listPolicies(request, options) {
+    return this.call('nextral.policy.list', request, options);
+  }
+
+  async removePolicy(request, options) {
+    return this.call('nextral.policy.remove', request, options);
+  }
+
+  async createExperiment(request, options) {
+    return this.call('experiments.create', request, options);
+  }
+
+  async promoteExperiment(request, options) {
+    return this.call('experiments.promote', request, options);
+  }
+
+  async rollbackExperiment(request, options) {
+    return this.call('experiments.rollback', request, options);
+  }
+
+  async experimentStatus(request = {}, options) {
+    return this.call('experiments.status', request, options);
+  }
+
+  async safetyPolicy(options) {
+    return this.call('safety.policy.get', {}, options);
+  }
+
+  async setSafetyPolicy(request, options) {
+    return this.call('safety.policy.set', request, options);
+  }
+
+  async batchIngest(request, options) {
+    return this.call('nextral.batch.ingest', request, options);
+  }
+
+  async batchRetrieve(request, options) {
+    return this.call('nextral.batch.retrieve', request, options);
+  }
+
+  async batchForget(request, options) {
+    return this.call('nextral.batch.forget', request, options);
+  }
+}
+exports.WorkerHandle = WorkerHandle;
+
+exports.Client = Client;
+exports.ServiceHandle = ServiceHandle;
 exports.NextralError = NextralError;
-exports.configureRuntime = configureRuntime;
 exports.validateConfig = validateConfig;
-exports.serve = serve;
 exports.lexicalScore = (text, query) => invoke('lexicalScore', text, query);
-exports.health = () => call('nextral.health', {});
-exports.ingestMemory = request => call('nextral.memory.ingest', request);
-exports.retrieve = request => call('nextral.memory.retrieve', request);
-exports.forgetMemory = request => call('nextral.memory.forget', request);
-exports.updateMemory = request => call('nextral.memory.update', request);
-exports.listMemories = request => call('nextral.memory.list', request);
-exports.memoryStats = request => call('nextral.memory.stats', request);
-exports.searchByTag = request => call('nextral.memory.search_by_tag', request);
-exports.searchByEntity = request => call('nextral.memory.search_by_entity', request);
-exports.appendSessionMessage = request => call('nextral.session.append', request);
-exports.eligibleSessions = request => call('nextral.session.eligible', request);
-exports.workingContext = request => call('nextral.session.context', request);
-exports.queryGraph = request => call('nextral.graph.query', request);
-exports.graphify = request => call('nextral.graph.graphify', request);
-exports.consolidate = request => call('nextral.consolidation.run', request);
-exports.scheduleReminder = request => call('nextral.reminders.schedule', request);
-exports.executeDueReminders = request => call('nextral.reminders.due', request);
-exports.planReembed = request => call('nextral.reembed.plan', request);
-exports.batchIngest = request => call('nextral.batch.ingest', request);
-exports.batchRetrieve = request => call('nextral.batch.retrieve', request);
-exports.batchForget = request => call('nextral.batch.forget', request);
-exports.migrateDatabase = () => call('nextral.database.migrate', {});
-exports.getMemory = request => call('nextral.memory.get', request);
-exports.listReminders = request => call('nextral.reminders.list', request);
-exports.executeReembed = request => call('nextral.jobs.reembed.execute', request);
-exports.enqueueJob = request => call('nextral.jobs.enqueue', request);
-exports.runJobs = request => call('nextral.jobs.run', request);
-exports.listJobs = request => call('nextral.jobs.list', request);
-exports.getJob = request => call('nextral.jobs.get', request);
-exports.runOutbox = request => call('nextral.outbox.run', request);
-exports.stopServing = () => invoke('stopServing');
-exports.upsertPolicy = request => call('nextral.policy.upsert', request);
-exports.listPolicies = request => call('nextral.policy.list', request);
-exports.removePolicy = request => call('nextral.policy.remove', request);
-exports.createExperiment = request => call('experiments.create', request);
-exports.promoteExperiment = request => call('experiments.promote', request);
-exports.rollbackExperiment = request => call('experiments.rollback', request);
-exports.experimentStatus = (request = {}) => call('experiments.status', request);
-exports.getSafetyPolicy = () => call('safety.policy.get', {});
-exports.setSafetyPolicy = request => call('safety.policy.set', request);
-exports.scoredSearch = request => call('nextral.runtime.scored_search', request);

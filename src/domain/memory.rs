@@ -40,13 +40,14 @@ pub enum MemoryType {
     Prospective,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     Realtime,
     FastLane,
     DeepLane,
     Import,
+    #[default]
     Manual,
 }
 
@@ -429,4 +430,391 @@ pub fn deterministic_id(parts: &[&str]) -> String {
 
 pub fn estimate_tokens(text: &str) -> u32 {
     text.split_whitespace().count().max(1) as u32
+}
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_types: Option<Vec<MemoryType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_types: Option<Vec<ContentType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_types: Option<Vec<SourceType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags_any: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags_all: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities_any: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities_all: Option<Vec<String>>,
+    #[serde(default, alias = "created_after")]
+    pub created_at_gte: Option<String>,
+    #[serde(default, alias = "created_before")]
+    pub created_at_lt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statuses: Option<Vec<MemoryStatus>>,
+}
+
+pub fn normalize_rfc3339_micros(input: &str) -> CoreResult<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(input)
+        .map_err(|e| CoreError::InvalidInput(format!("invalid RFC3339 timestamp '{input}': {e}")))?
+        .with_timezone(&chrono::Utc);
+    Ok(parsed.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+}
+
+impl MemoryFilters {
+    pub fn validate(&mut self) -> CoreResult<()> {
+        fn validate_terms(terms: &mut Option<Vec<String>>) -> CoreResult<()> {
+            if let Some(list) = terms {
+                if list.len() > 32 {
+                    return Err(CoreError::InvalidInput(
+                        "filter array exceeds 32 entries".into(),
+                    ));
+                }
+                for item in list.iter() {
+                    if item.is_empty() || item.chars().count() > 256 {
+                        return Err(CoreError::InvalidInput(
+                            "filter term must be 1..=256 Unicode characters".into(),
+                        ));
+                    }
+                }
+                list.sort();
+                list.dedup();
+            }
+            Ok(())
+        }
+        validate_terms(&mut self.tags_any)?;
+        validate_terms(&mut self.tags_all)?;
+        validate_terms(&mut self.entities_any)?;
+        validate_terms(&mut self.entities_all)?;
+
+        if let Some(ref session) = self.session_id {
+            if session.is_empty() || session.len() > 256 {
+                return Err(CoreError::InvalidInput(
+                    "session_id must be 1..=256 bytes".into(),
+                ));
+            }
+        }
+        if let Some(ref mut gte) = self.created_at_gte {
+            *gte = normalize_rfc3339_micros(gte)?;
+        }
+        if let Some(ref mut lt) = self.created_at_lt {
+            *lt = normalize_rfc3339_micros(lt)?;
+        }
+        if let (Some(gte), Some(lt)) = (&self.created_at_gte, &self.created_at_lt) {
+            if gte > lt {
+                return Err(CoreError::InvalidInput("reversed date interval".into()));
+            }
+        }
+        if let Some(ref mut statuses) = self.statuses {
+            statuses.sort_by_key(|s| serde_json::to_string(s).unwrap_or_default());
+            statuses.dedup();
+        }
+        Ok(())
+    }
+
+    pub fn normalized(&self) -> Self {
+        let mut copy = self.clone();
+        let _ = copy.validate();
+        if copy.statuses.as_ref().map_or(true, |s| s.is_empty()) {
+            copy.statuses = Some(vec![MemoryStatus::Active]);
+        }
+        copy
+    }
+
+    pub fn matches(&self, record: &MemoryRecord) -> bool {
+        if let Some(ref types) = self.memory_types {
+            if !types.is_empty() && !types.contains(&record.memory_type) {
+                return false;
+            }
+        }
+        if let Some(ref types) = self.content_types {
+            if !types.is_empty() && !types.contains(&record.content_type) {
+                return false;
+            }
+        }
+        if let Some(ref types) = self.source_types {
+            if !types.is_empty() && !types.contains(&record.source_type) {
+                return false;
+            }
+        }
+        if let Some(ref session_id) = self.session_id {
+            if record.session_id.as_deref() != Some(session_id.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref tags_any) = self.tags_any {
+            if !tags_any.is_empty() && !tags_any.iter().any(|t| record.has_tag(t)) {
+                return false;
+            }
+        }
+        if let Some(ref tags_all) = self.tags_all {
+            if !tags_all.iter().all(|t| record.has_tag(t)) {
+                return false;
+            }
+        }
+        if let Some(ref entities_any) = self.entities_any {
+            if !entities_any.is_empty() && !entities_any.iter().any(|e| record.has_entity(e)) {
+                return false;
+            }
+        }
+        if let Some(ref entities_all) = self.entities_all {
+            if !entities_all.iter().all(|e| record.has_entity(e)) {
+                return false;
+            }
+        }
+        if let Some(ref gte) = self.created_at_gte {
+            let record_created = normalize_rfc3339_micros(&record.created_at)
+                .unwrap_or_else(|_| record.created_at.clone());
+            if record_created < *gte {
+                return false;
+            }
+        }
+        if let Some(ref lt) = self.created_at_lt {
+            let record_created = normalize_rfc3339_micros(&record.created_at)
+                .unwrap_or_else(|_| record.created_at.clone());
+            if record_created >= *lt {
+                return false;
+            }
+        }
+        let effective_statuses = self.statuses.as_ref().filter(|s| !s.is_empty());
+        match effective_statuses {
+            Some(statuses) => statuses.contains(&record.status),
+            None => record.status == MemoryStatus::Active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemorySummary {
+    pub id: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub user_id: String,
+    pub session_id: Option<String>,
+    pub memory_type: MemoryType,
+    pub content_type: ContentType,
+    pub source_type: SourceType,
+    pub privacy_level: PrivacyLevel,
+    pub status: MemoryStatus,
+    #[serde(default)]
+    pub importance_score: f32,
+    #[serde(default)]
+    pub confidence_score: Option<f32>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub preview: String,
+    pub content_preview: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    pub embedding_dim: Option<u32>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub access_count: u64,
+    #[serde(default)]
+    pub last_accessed_at: Option<String>,
+}
+
+impl MemorySummary {
+    pub fn from_record(record: &MemoryRecord) -> Self {
+        let preview = if record.status == MemoryStatus::Redacted {
+            "[redacted]".to_string()
+        } else {
+            record.content.chars().take(256).collect::<String>()
+        };
+        Self {
+            id: record.id.clone(),
+            tenant_id: record.tenant_id.clone(),
+            user_id: record.user_id.clone(),
+            session_id: record.session_id.clone(),
+            content: record.content.clone(),
+            memory_type: record.memory_type.clone(),
+            content_type: record.content_type.clone(),
+            source_type: record.source_type.clone(),
+            source_message_ids: record.source_message_ids.clone(),
+            entities: record.entities.clone(),
+            tags: record.tags.clone(),
+            embedding: record.embedding.clone(),
+            embedding_dim: record.embedding_dim,
+            embedding_model: record.embedding_model.clone(),
+            access_count: record.access_count,
+            last_accessed_at: record.last_accessed_at.clone(),
+            privacy_level: record.privacy_level.clone(),
+            status: record.status.clone(),
+            importance_score: record.importance_score,
+            confidence_score: record.confidence_score,
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+            preview: preview.clone(),
+            content_preview: preview,
+        }
+    }
+}
+
+fn default_query_limit() -> usize {
+    50
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    let opt = Option::<T>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
+fn deserialize_limit_null_default<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<usize>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(50))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryQuery {
+    pub tenant_id: String,
+    pub user_id: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub privacy_scope: Vec<PrivacyLevel>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub filters: MemoryFilters,
+    #[serde(
+        default = "default_query_limit",
+        deserialize_with = "deserialize_limit_null_default"
+    )]
+    pub limit: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+impl MemoryQuery {
+    pub fn validate(&mut self) -> CoreResult<()> {
+        if self.tenant_id.is_empty() || self.tenant_id.len() > 256 {
+            return Err(CoreError::InvalidInput(
+                "tenant_id must be 1..=256 bytes".into(),
+            ));
+        }
+        if self.user_id.is_empty() || self.user_id.len() > 256 {
+            return Err(CoreError::InvalidInput(
+                "user_id must be 1..=256 bytes".into(),
+            ));
+        }
+        if self.limit == 0 || self.limit > 100 {
+            return Err(CoreError::InvalidInput(
+                "limit must be between 1 and 100".into(),
+            ));
+        }
+        if let Some(ref c) = self.cursor {
+            if c.is_empty() {
+                return Err(CoreError::InvalidInput(
+                    "cursor cannot be empty string".into(),
+                ));
+            }
+            if c.len() > 4096 {
+                return Err(CoreError::InvalidInput(
+                    "cursor exceeds maximum size of 4096 bytes".into(),
+                ));
+            }
+        }
+        self.filters.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryPage {
+    pub items: Vec<MemorySummary>,
+    pub next_cursor: Option<String>,
+}
+
+pub fn compute_query_fingerprint(
+    tenant_id: &str,
+    user_id: &str,
+    effective_privacy: &[PrivacyLevel],
+    filters: &MemoryFilters,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(user_id.as_bytes());
+    hasher.update(b":");
+    let mut sorted_privacy = effective_privacy.to_vec();
+    sorted_privacy.sort_by_key(|p| serde_json::to_string(p).unwrap_or_default());
+    sorted_privacy.dedup();
+    hasher.update(
+        serde_json::to_string(&sorted_privacy)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update(b":");
+    let normalized_filters = filters.normalized();
+    hasher.update(
+        serde_json::to_string(&normalized_filters)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn encode_cursor(after_created_at: &str, after_id: &str, fingerprint: &str) -> String {
+    let payload = serde_json::json!({
+        "v": 1,
+        "after_created_at": after_created_at,
+        "after_id": after_id,
+        "scope_filter_sha256": fingerprint,
+    });
+    URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes())
+}
+
+pub fn decode_cursor(cursor: &str, expected_fingerprint: &str) -> CoreResult<(String, String)> {
+    if cursor.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "cursor cannot be empty string".into(),
+        ));
+    }
+    if cursor.len() > 4096 {
+        return Err(CoreError::InvalidInput("cursor exceeds 4096 bytes".into()));
+    }
+    let decoded_bytes = URL_SAFE_NO_PAD
+        .decode(cursor.as_bytes())
+        .map_err(|_| CoreError::InvalidInput("malformed base64url cursor".into()))?;
+    let val: serde_json::Value = serde_json::from_slice(&decoded_bytes)
+        .map_err(|_| CoreError::InvalidInput("malformed JSON in cursor".into()))?;
+    if val["v"].as_u64() != Some(1) {
+        return Err(CoreError::InvalidInput("unsupported cursor version".into()));
+    }
+    let after_created = val["after_created_at"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing after_created_at".into()))?;
+    let after_id = val["after_id"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing after_id".into()))?;
+    let fingerprint = val["scope_filter_sha256"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("cursor missing scope_filter_sha256".into()))?;
+    if fingerprint != expected_fingerprint {
+        return Err(CoreError::InvalidInput(
+            "cursor filter or scope mismatch".into(),
+        ));
+    }
+    Ok((after_created.to_string(), after_id.to_string()))
 }

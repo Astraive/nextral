@@ -21,12 +21,7 @@ fn test_config() -> NextralConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_protocols_share_runtime_and_execute_every_declared_operation() {
     let config = test_config();
-    let state = tokio::task::spawn_blocking(move || {
-        crate::package::configure_runtime_json(&serde_json::to_string(&config).unwrap()).unwrap();
-        ServiceState::new(config).unwrap()
-    })
-    .await
-    .unwrap();
+    let state = ServiceState::new(config).unwrap();
     let http_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let grpc_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let graphql_socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -106,7 +101,73 @@ async fn all_protocols_share_runtime_and_execute_every_declared_operation() {
         .await
         .unwrap()
         .into_inner();
+    assert!(!retrieved.retrieval_id.is_empty());
     assert!(retrieved.items.iter().any(|m| m.memory_id == first_id));
+
+    // Exercise gRPC Query and RepairIndex
+    let grpc_page = memories
+        .query(proto::MemoryQueryRequest {
+            tenant_id: "protocol-tenant".into(),
+            user_id: "protocol-user".into(),
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!grpc_page.items.is_empty());
+
+    let grpc_repair = memories
+        .repair_index(proto::RepairIndexRequest {
+            tenant_id: "protocol-tenant".into(),
+            limit: Some(10),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(grpc_repair.repaired, 0);
+    assert!(grpc_repair.complete);
+
+    // Exercise REST query, retrieve, and repair
+    let rest_query_res = client
+        .post(format!("{http_url}/v1/memories/query"))
+        .json(&json!({"tenant_id": "protocol-tenant", "user_id": "protocol-user", "limit": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rest_query_res.status(), 200);
+    let rest_page: Value = rest_query_res.json().await.unwrap();
+    assert!(rest_page["items"].is_array());
+    assert!(!rest_page["items"].as_array().unwrap().is_empty());
+
+    let rest_retrieve_res = client
+        .post(format!("{http_url}/v1/retrieve"))
+        .json(&json!({
+            "tenant_id": "protocol-tenant",
+            "user_id": "protocol-user",
+            "query_text": "protocol client",
+            "token_budget": 1000,
+            "privacy_scope": ["private"],
+            "top_k_vector": 12,
+            "max_graph_hops": 2
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rest_retrieve_res.status(), 200);
+    let rest_ret_body: Value = rest_retrieve_res.json().await.unwrap();
+    assert!(!rest_ret_body["retrieval_id"].as_str().unwrap().is_empty());
+
+    let rest_repair_res = client
+        .post(format!("{http_url}/v1/index/repair"))
+        .json(&json!({"tenant_id": "protocol-tenant", "limit": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rest_repair_res.status(), 200);
+    let rest_repair_body: Value = rest_repair_res.json().await.unwrap();
+    assert_eq!(rest_repair_body["repaired"], 0);
+    assert_eq!(rest_repair_body["complete"], true);
     let mut reminders = ReminderServiceClient::connect(grpc_url).await.unwrap();
     let reminder = reminders
         .schedule(proto::ScheduleReminderRequest {
@@ -133,6 +194,40 @@ async fn all_protocols_share_runtime_and_execute_every_declared_operation() {
         .into_inner();
     assert!(due.reminder_ids.contains(&reminder.reminder_id));
     let document = "query CrossProtocol($id: ID!) { memory(tenantId:\"protocol-tenant\",userId:\"protocol-user\",id:$id) { id content } retrieve(tenantId:\"protocol-tenant\",userId:\"protocol-user\",queryText:\"protocol client\",privacyScope:[\"private\"],tokenBudget:1000) { tenantId items { memoryId } telemetry { degradedReasons } } reminders(tenantId:\"protocol-tenant\",userId:\"protocol-user\",dueAtOrBefore:\"2031-01-01T00:00:00Z\") { id priority } __schema { queryType { name } } }";
+    // Exercise GraphQL memories query and repairIndex mutation
+    let gql_query = "query { memories(query: { tenantId: \"protocol-tenant\", userId: \"protocol-user\", limit: 10 }) { items { id preview } nextCursor totalCount } }";
+    let result: Value = client
+        .post(&graphql_url)
+        .json(&json!({"query": gql_query}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(result.get("errors").is_none(), "{result}");
+    assert!(
+        result["data"]["memories"]["items"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 1
+    );
+
+    let gql_repair = "mutation { repairIndex(tenantId: \"protocol-tenant\", limit: 10) { repaired remaining complete } }";
+    let result: Value = client
+        .post(&graphql_url)
+        .json(&json!({"query": gql_repair}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(result.get("errors").is_none(), "{result}");
+    assert_eq!(result["data"]["repairIndex"]["repaired"], 0);
+    assert_eq!(result["data"]["repairIndex"]["complete"], true);
+
     let result: Value = client
         .post(&graphql_url)
         .json(

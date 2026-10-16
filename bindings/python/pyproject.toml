@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nextral"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python package for the Nextral production memory runtime."
 readme = "README.md"
 requires-python = ">=3.10"

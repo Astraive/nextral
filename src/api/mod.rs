@@ -1,4 +1,5 @@
-mod auth;
+pub mod auth;
+pub use auth::Principal;
 pub mod graphql;
 pub mod grpc;
 
@@ -10,7 +11,7 @@ use crate::{
     config::NextralConfig,
     contracts::{CoreError, CoreResult},
 };
-use auth::{Authenticator, Principal};
+use auth::Authenticator;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -61,7 +62,7 @@ pub struct StartupReadinessMatrix {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     pub status: u16,
     pub code: String,
     pub message: String,
@@ -92,6 +93,11 @@ impl From<crate::package::PackageError> for ApiError {
             "conflict" => 409,
             "unauthenticated" => 401,
             "permission_denied" => 403,
+            "resource_exhausted" => 429,
+            "deadline_exceeded" => 504,
+            "cancelled" => 408,
+            "lease_lost" => 409,
+            "index_not_ready" => 503,
             "io" | "io_error" | "unavailable" | "configuration" => 503,
             _ => 500,
         };
@@ -103,48 +109,124 @@ impl From<crate::package::PackageError> for ApiError {
     }
 }
 
+struct TokenBucket {
+    tokens: f64,
+    last_refill: std::time::Instant,
+}
+
+pub(crate) struct ScopedRateLimiter {
+    enabled: bool,
+    max_rps: f64,
+    burst_size: f64,
+    buckets: parking_lot::Mutex<std::collections::HashMap<(String, String), TokenBucket>>,
+}
+
+impl ScopedRateLimiter {
+    pub(crate) fn new(config: &crate::config::RateLimitConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            max_rps: config.max_requests_per_second as f64,
+            burst_size: config.burst_size as f64,
+            buckets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub(crate) fn check_and_consume(&self, tenant_id: &str, user_id: &str) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        let mut buckets = self.buckets.lock();
+        if buckets.len() > 10_000 {
+            buckets.retain(|_, b| {
+                now.duration_since(b.last_refill) < std::time::Duration::from_secs(3600)
+            });
+        }
+        let key = (tenant_id.to_string(), user_id.to_string());
+        let bucket = buckets.entry(key).or_insert_with(|| TokenBucket {
+            tokens: self.burst_size,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.max_rps).min(self.burst_size);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(crate) struct ServiceState {
+pub struct ServiceState {
     pub config: Arc<NextralConfig>,
-    pub auth: Authenticator,
+    pub(crate) auth: Authenticator,
+    pub client: Arc<crate::package::RuntimeClient>,
     permits: Arc<Semaphore>,
     request_permits: Arc<Semaphore>,
+    pub(crate) rate_limiter: Arc<ScopedRateLimiter>,
 }
 
 impl ServiceState {
-    fn new(config: NextralConfig) -> CoreResult<Self> {
+    pub fn new(config: NextralConfig) -> CoreResult<Self> {
+        config.validate()?;
+        let auth = Authenticator::new(&config)?;
+        let client = Arc::new(
+            crate::package::RuntimeClient::from_config(config.clone())
+                .map_err(|e| CoreError::InvalidInput(e.message))?,
+        );
+        Ok(Self {
+            config: Arc::new(config.clone()),
+            auth,
+            client,
+            permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            rate_limiter: Arc::new(ScopedRateLimiter::new(&config.rate_limit)),
+        })
+    }
+
+    pub(crate) fn new_with_client(
+        config: NextralConfig,
+        client: Arc<crate::package::RuntimeClient>,
+    ) -> CoreResult<Self> {
         config.validate()?;
         let auth = Authenticator::new(&config)?;
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(config.clone()),
             auth,
+            client,
             permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
             request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            rate_limiter: Arc::new(ScopedRateLimiter::new(&config.rate_limit)),
         })
     }
 
     pub(crate) async fn probe(&self) -> Result<StartupReadinessMatrix, ApiError> {
-        let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
-            ApiError::new(429, "resource_exhausted", "runtime request limit reached")
-        })?;
-        let task = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            readiness()
-        });
-        tokio::time::timeout(REQUEST_TIMEOUT, task)
-            .await
-            .map_err(|_| ApiError::new(503, "unavailable", "readiness probe timed out"))?
-            .map_err(|e| ApiError::new(503, "unavailable", e.to_string()))?
-            .map_err(|e| ApiError::new(503, "unavailable", e.to_string()))
+        let matrix = serde_json::from_value(self.client.readiness())
+            .map_err(|e| ApiError::new(503, "unavailable", e.to_string()))?;
+        Ok(matrix)
     }
-
-    pub(crate) async fn call(
+    pub async fn call(
         &self,
         principal: &Principal,
         tool: &'static str,
         mut payload: Value,
     ) -> Result<Value, ApiError> {
         principal.authorize(&payload)?;
+        let tenant_str = payload
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let user_str = payload.get("user_id").and_then(Value::as_str).unwrap_or("");
+        if !self.rate_limiter.check_and_consume(tenant_str, user_str) {
+            return Err(ApiError::new(
+                429,
+                "resource_exhausted",
+                "rate limit exceeded for scope",
+            ));
+        }
         self.prepare(tool, &mut payload)?;
         let permit = Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
             ApiError::new(429, "resource_exhausted", "runtime request limit reached")
@@ -167,22 +249,19 @@ impl ServiceState {
                     .map_err(|e| ApiError::invalid(e.to_string()))
             })
             .transpose()?;
-        let input = json!({"tool":tool,"payload_json":payload.to_string()}).to_string();
-        let task = tokio::task::spawn_blocking(move || {
-            // Keep capacity reserved even if the client deadline elapses.
-            let _permit = permit;
-            crate::package::mcp_call_json(&input)
-        });
-        let response = tokio::time::timeout(REQUEST_TIMEOUT, task)
+        let response = self
+            .client
+            .call_json(
+                tool,
+                payload.to_string(),
+                crate::package::CallOptions {
+                    timeout_ms: Some(REQUEST_TIMEOUT.as_millis() as u64),
+                    cancellation_token: None,
+                },
+            )
             .await
-            .map_err(|_| {
-                ApiError::new(
-                    504,
-                    "deadline_exceeded",
-                    "runtime request deadline exceeded",
-                )
-            })?
-            .map_err(|e| ApiError::new(500, "internal", e.to_string()))??;
+            .map_err(ApiError::from)?;
+        let _permit = permit;
         let mut value: Value = serde_json::from_str(&response)
             .map_err(|e| ApiError::new(500, "internal", e.to_string()))?;
         match tool {
@@ -378,19 +457,9 @@ pub fn startup_readiness_matrix(config: &NextralConfig) -> CoreResult<StartupRea
     Ok(serde_json::from_value(store.readiness())?)
 }
 
-pub(crate) fn readiness() -> CoreResult<StartupReadinessMatrix> {
-    let result = crate::package::runtime_readiness_json().map_err(|e| CoreError::Io(e.message))?;
-    Ok(serde_json::from_str(&result)?)
-}
-
 fn shutdown_sender() -> &'static watch::Sender<bool> {
     static SHUTDOWN: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::channel(false).0);
     &SHUTDOWN
-}
-
-/// Requests graceful shutdown of active service hosts in this process.
-pub fn request_service_shutdown() {
-    let _ = shutdown_sender().send(true);
 }
 
 pub fn run_service_hosts(
@@ -405,13 +474,6 @@ pub fn run_service_hosts(
     run_blocking(config.clone(), modes)
 }
 
-pub fn run_service_hosts_json(config_json: &str, modes_json: &str) -> CoreResult<String> {
-    let config: NextralConfig =
-        serde_json::from_str(&crate::config::resolve_env_vars(config_json))?;
-    let modes: Vec<ServiceMode> = serde_json::from_str(modes_json)?;
-    Ok(serde_json::to_string(&run_blocking(config, modes)?)?)
-}
-
 fn run_blocking(
     config: NextralConfig,
     modes: Vec<ServiceMode>,
@@ -423,9 +485,7 @@ fn run_blocking(
         ));
     }
     config.validate()?;
-    let config_json = serde_json::to_string(&config)?;
     let state = ServiceState::new(config)?;
-    crate::package::configure_runtime_json(&config_json).map_err(|e| CoreError::Io(e.message))?;
     shutdown_sender().send_replace(false);
     let mut shutdown = shutdown_sender().subscribe();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -439,11 +499,38 @@ fn run_blocking(
         }
     }));
     runtime.shutdown_timeout(REQUEST_TIMEOUT);
-    let telemetry = crate::runtime::observability::shutdown();
-    result.and_then(|report| {
-        telemetry?;
-        Ok(report)
-    })
+    result
+}
+
+pub async fn serve_client(
+    client: crate::package::RuntimeClient,
+    shutdown_token: tokio_util::sync::CancellationToken,
+    ready_sender: tokio::sync::oneshot::Sender<Result<Vec<String>, crate::package::PackageError>>,
+) -> CoreResult<ServiceRuntimeReport> {
+    let config = client.config().clone();
+    let state = ServiceState::new_with_client(config.clone(), Arc::new(client))?;
+    let mut modes = Vec::new();
+    if config.service.http_bind.is_some() {
+        modes.push(ServiceMode::Http);
+    }
+    if config.service.grpc_bind.is_some() {
+        modes.push(ServiceMode::Grpc);
+    }
+    if config.service.graphql_bind.is_some() {
+        modes.push(ServiceMode::Graphql);
+    }
+    if modes.is_empty() {
+        modes.push(ServiceMode::Http);
+    }
+    serve_state_ready(
+        state,
+        modes,
+        async move {
+            shutdown_token.cancelled().await;
+        },
+        Some(ready_sender),
+    )
+    .await
 }
 
 /// Serves an already configured runtime until the supplied future resolves.
@@ -476,6 +563,20 @@ async fn serve_state<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    serve_state_ready(state, modes, shutdown, None).await
+}
+
+pub(crate) async fn serve_state_ready<F>(
+    state: ServiceState,
+    modes: Vec<ServiceMode>,
+    shutdown: F,
+    mut ready_sender: Option<
+        tokio::sync::oneshot::Sender<Result<Vec<String>, crate::package::PackageError>>,
+    >,
+) -> CoreResult<ServiceRuntimeReport>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let mut active = Vec::new();
     for mode in modes {
         for mode in if mode == ServiceMode::All {
@@ -489,11 +590,14 @@ where
         }
     }
     if active.is_empty() {
-        return Err(CoreError::InvalidInput(
-            "at least one service mode is required".into(),
-        ));
+        let err = CoreError::InvalidInput("at least one service mode is required".into());
+        if let Some(tx) = ready_sender.take() {
+            let _ = tx.send(Err(crate::package::PackageError::from(
+                CoreError::InvalidInput("at least one service mode is required".into()),
+            )));
+        }
+        return Err(err);
     }
-    // Bind every socket before starting any server so partial startup cannot masquerade as success.
     let mut listeners = Vec::new();
     let mut binds = Vec::new();
     for mode in active {
@@ -503,13 +607,41 @@ where
             ServiceMode::Graphql => ("graphql", state.config.service.graphql_bind.as_deref()),
             ServiceMode::All => unreachable!(),
         };
-        let bind = bind
-            .ok_or_else(|| CoreError::InvalidInput(format!("{scheme} bind is not configured")))?;
-        let listener = tokio::net::TcpListener::bind(bind)
-            .await
-            .map_err(|e| CoreError::Io(format!("{scheme} bind {bind}: {e}")))?;
-        binds.push(format!("{scheme}://{}", listener.local_addr()?));
+        let bind = match bind {
+            Some(b) => b,
+            None => {
+                let err = CoreError::InvalidInput(format!("{scheme} bind is not configured"));
+                if let Some(tx) = ready_sender.take() {
+                    let _ = tx.send(Err(crate::package::PackageError::from(err.clone())));
+                }
+                return Err(err);
+            }
+        };
+        let listener = match tokio::net::TcpListener::bind(bind).await {
+            Ok(l) => l,
+            Err(e) => {
+                let err = CoreError::Io(format!("{scheme} bind {bind}: {e}"));
+                if let Some(tx) = ready_sender.take() {
+                    let _ = tx.send(Err(crate::package::PackageError::from(err.clone())));
+                }
+                return Err(err);
+            }
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                let err = CoreError::Io(e.to_string());
+                if let Some(tx) = ready_sender.take() {
+                    let _ = tx.send(Err(crate::package::PackageError::from(err.clone())));
+                }
+                return Err(err);
+            }
+        };
+        binds.push(format!("{scheme}://{addr}"));
         listeners.push((mode, listener));
+    }
+    if let Some(tx) = ready_sender.take() {
+        let _ = tx.send(Ok(binds.clone()));
     }
     let schema = graphql::build_schema()?;
     let (stop, _) = watch::channel(false);

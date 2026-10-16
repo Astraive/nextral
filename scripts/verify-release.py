@@ -380,7 +380,6 @@ def crate_smoke(directory: Path) -> None:
         shutil.copy2(ROOT / "bindings/python/tests/fixtures/test-config.json", consumer / "src/config.json")
         (consumer / "src/main.rs").write_text(
             'fn main() {\n'
-            '    nextral::package::configure_runtime_json(include_str!("config.json")).expect("configure");\n'
             '    let result = nextral::package::e2e_smoke_json().expect("run memory scenario");\n'
             '    let smoke: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");\n'
             '    assert_eq!(smoke["ingested"]["status"], "accepted");\n'

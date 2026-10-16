@@ -140,7 +140,16 @@ pub fn build_schema() -> crate::contracts::CoreResult<Schema> {
                             }
                             "nextral.memory.get"
                         }
+                        "memories" => {
+                            if let Some(Value::Object(query_fields)) = arguments.remove("query") {
+                                for (k, v) in query_fields {
+                                    arguments.insert(k, v);
+                                }
+                            }
+                            "nextral.memory.list"
+                        }
                         "retrieve" => "nextral.memory.retrieve",
+                        "repairIndex" => "nextral.index.repair",
                         "reminders" => "nextral.reminders.list",
                         "ingestMemory" => "nextral.memory.ingest",
                         "forgetMemory" => "nextral.memory.forget",

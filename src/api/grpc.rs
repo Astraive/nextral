@@ -96,6 +96,20 @@ impl MemoryService for Services {
     ) -> Result<Response<ForgetMemoryResponse>, Status> {
         response(self.invoke(request, "nextral.memory.forget").await?)
     }
+    async fn query(
+        &self,
+        request: Request<MemoryQueryRequest>,
+    ) -> Result<Response<MemoryPage>, Status> {
+        let result = self.invoke(request, "nextral.memory.list").await?;
+        response(result)
+    }
+    async fn repair_index(
+        &self,
+        request: Request<RepairIndexRequest>,
+    ) -> Result<Response<RepairIndexResponse>, Status> {
+        let result = self.invoke(request, "nextral.index.repair").await?;
+        response(result)
+    }
 }
 
 #[tonic::async_trait]

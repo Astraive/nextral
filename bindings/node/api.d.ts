@@ -23,7 +23,14 @@ export interface StoreConfig {
   s3_access_key_env: string; s3_secret_key_env: string;
   transport_profile?: string | null; enforce_tls?: boolean | null;
 }
-/** Runtime is process-wide, shared with every native package operation. */
+export interface ExecutionConfig {
+  max_in_flight?: number;
+  max_pending?: number;
+  max_pending_bytes?: number;
+  request_timeout_ms?: number;
+  shutdown_timeout_ms?: number;
+  lease_seconds?: number;
+}
 export interface RuntimeConfig {
   backend: 'production_stores' | 'test_memory'; stores?: StoreConfig | null;
   embedding: ProviderConfig & { dimension: number };
@@ -36,12 +43,14 @@ export interface RuntimeConfig {
   observability: { enabled: boolean; otlp_endpoint?: string | null; prometheus_bind?: string | null };
   rate_limit?: { enabled: boolean; max_requests_per_second: number; burst_size: number };
   batch?: { max_batch_size: number; max_concurrent_batches: number };
+  execution?: ExecutionConfig;
+  control_namespace?: string;
+  base_policy_version?: string;
 }
 export interface GraphHint {
   from_label: string; from_name: string; relationship_type: string;
   to_label: string; to_name: string; confidence: number;
 }
-/** Host extraction and vectors are serialized unchanged; Rust validates business rules. */
 export interface IngestMemoryRequest extends Scope {
   id?: string | null; session_id?: string | null; content: string; content_type: ContentType;
   memory_type: MemoryType; source_type: SourceType; source_message_ids: string[];
@@ -71,11 +80,11 @@ export interface RetrievalRequest extends Scope {
   scoring_weights?: ScoringWeights | null; query_vector?: number[] | null;
 }
 export interface RetrievedItem {
-  memory_id: string; content: string; source_path: 'vector' | 'graph' | 'both'; retrieval_score: number;
-  score_breakdown: ScoringWeights; token_estimate: number;
+  id: string; memory_id: string; content: string; score: number; component_scores: { vector: number; graph: number; recency: number; access: number };
+  source_path: 'vector' | 'graph' | 'both'; privacy_level: PrivacyLevel;
 }
 export interface RetrievalTelemetry {
-  vector_candidates: number; graph_candidates: number; merged_candidates: number;
+  vector_candidates: number; graph_candidates: number;
   selected_candidates: number; token_estimate: number; token_utilization: number;
   vector_ms: number; graph_ms: number; merge_ms: number; dedupe_ratio: number; degraded_reasons: string[];
 }
@@ -166,38 +175,6 @@ export interface ReembedPlanRequest {
 }
 export interface ReembedPlan extends ReembedPlanRequest { id: string; status: string }
 export interface BatchResponse<T> { total: number; succeeded: number; failed: number; errors: string[]; results: T[] }
-/** All native errors preserve Rust's machine-readable code. */
-export class NextralError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string, options?: ErrorOptions);
-}
-export function configureRuntime(config: RuntimeConfig): { backend: RuntimeConfig['backend']; status: 'configured' };
-export function validateConfig(config: RuntimeConfig): { status: 'ok' };
-export function lexicalScore(text: string, query: string): number;
-export function health(): { fail_fast: boolean; backends: { backend: string; status: 'ready' | 'unavailable'; degraded_signature: string | null }[] };
-/** Runs real service listeners off the Node event loop until native shutdown. */
-export function serve(config: RuntimeConfig, modes: ('http' | 'grpc' | 'graphql' | 'all')[]): Promise<{ status: 'stopped'; binds: string[] }>;
-export function ingestMemory(request: IngestMemoryRequest): IngestMemoryResponse;
-export function retrieve(request: RetrievalRequest): RetrievalResponse;
-export function forgetMemory(request: ForgetMemoryRequest): ForgetMemoryResponse;
-export function updateMemory(request: UpdateMemoryRequest): MemoryRecord;
-export function listMemories(request: ListMemoriesRequest): MemoryRecord[];
-export function memoryStats(request: Scope): MemoryStats;
-export function searchByTag(request: Scope & { tag: string }): MemoryRecord[];
-export function searchByEntity(request: Scope & { entity: string }): MemoryRecord[];
-export function appendSessionMessage(request: AppendSessionMessageRequest): { message_id: string; hot_tail_count: number; degraded_reasons: string[] };
-/** Scoped sessions inactive at the cutoff, ordered by oldest activity then session ID. Limit defaults to 100 (1–1000). */
-export function eligibleSessions(request: EligibleSessionsRequest): EligibleSession[];
-export function workingContext(request: RetrievalRequest): WorkingContext;
-export function queryGraph(request: RetrievalRequest): { items: RetrievedItem[] };
-export function graphify(request: Scope & { memory_id: string; hints?: GraphHint[] }): GraphifyResponse;
-export function consolidate(request: ConsolidationRequest): ConsolidationResponse;
-export function scheduleReminder(request: ScheduleReminderRequest): { trace_id: string; reminder: ReminderRecord; receipts: StoreReceipt[] };
-export function executeDueReminders(request: ExecuteDueRemindersRequest): { trace_id: string; results: ReminderDispatchResult[]; receipts: StoreReceipt[] };
-export function planReembed(request: ReembedPlanRequest): ReembedPlan;
-export function batchIngest(request: { items: IngestMemoryRequest[]; idempotency_key?: string | null }): BatchResponse<IngestMemoryResponse>;
-export function batchRetrieve(request: { queries: RetrievalRequest[]; idempotency_key?: string | null }): BatchResponse<RetrievalResponse>;
-export function batchForget(request: { items: ForgetMemoryRequest[]; idempotency_key?: string | null }): BatchResponse<ForgetMemoryResponse>;
 export interface LifecycleJobRequest extends Scope {
   session_id: string; trigger: 'idle' | 'close' | 'deep' | 'retention'; run_at: string;
   idle_seconds?: number | null; consolidation?: ConsolidationRequest | null;
@@ -218,23 +195,9 @@ export interface ReembedExecutionReport {
   cutover_applied: boolean;
   receipts: StoreReceipt[]; last_error: string | null;
 }
-export function migrateDatabase(): { status: string; backend: string };
-export function getMemory(request: Scope & { memory_id: string }): MemoryRecord | null;
-export function listReminders(request: Scope): ReminderRecord[];
-export function executeReembed(request: ReembedExecutionRequest): ReembedExecutionReport;
-export function enqueueJob(request: LifecycleJobRequest): LifecycleScheduledJob;
-export function runJobs(request: RunLifecycleJobsRequest): LifecycleScheduledJob[];
-export function listJobs(request: Scope): LifecycleScheduledJob[];
-export function getJob(request: Scope & { job_id: string }): LifecycleScheduledJob | null;
-export function runOutbox(request: { tenant_id: string }): { completed: number; failed: number };
-/** Requests graceful shutdown of service hosts started in this process. */
-export function stopServing(): void;
 export interface UpsertPolicyRequest extends Scope {
   policy_id?: string; name: string; body: string; privacy_level: PrivacyLevel; enabled?: boolean;
 }
-export function upsertPolicy(request: UpsertPolicyRequest): { policy: ProceduralPolicy; receipts: StoreReceipt[] };
-export function listPolicies(request: Scope & { privacy_scope?: PrivacyLevel[]; include_disabled?: boolean }): ProceduralPolicy[];
-export function removePolicy(request: Scope & { policy_id: string }): { policy_id: string; status: 'removed'; receipts: StoreReceipt[] };
 export type ExperimentStatus = 'created' | 'promoted' | 'rolled_back' | 'quarantined';
 export interface RuntimeSnapshot { lane: RuntimeLane; policy_version: string; experiment_id: string | null }
 export interface ExperimentCandidate {
@@ -274,11 +237,108 @@ export interface EvaluationReport {
 }
 export interface PromotionEvidence { baseline: EvaluationReport; candidate: EvaluationReport }
 export interface SafetyPolicy { actions: Partial<Record<Severity, DecisionAction>> }
-export function createExperiment(request: { lane: RuntimeLane; policy_version: string; description: string }): ExperimentCandidate;
-export function promoteExperiment(request: { experiment_id: string; evidence: PromotionEvidence }): ExperimentCandidate;
-export function rollbackExperiment(request: { experiment_id: string; reason: string }): ExperimentCandidate;
-export function experimentStatus(): ExperimentRegistryStatus;
-export function experimentStatus(request: { experiment_id: string }): ExperimentCandidate | null;
-export function getSafetyPolicy(): SafetyPolicy;
-export function setSafetyPolicy(request: { severity: Severity; action: DecisionAction }): SafetyPolicy;
-export function scoredSearch(request: RetrievalRequest): RetrievalResponse;
+
+export class NextralError extends Error {
+  readonly code: string;
+  readonly executionStatus?: string;
+  constructor(code: string, message: string, options?: ErrorOptions & { executionStatus?: string });
+}
+
+export interface CallOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export class ServiceHandle {
+  shutdown(timeoutMs?: number): Promise<void>;
+  readonly binds: string[];
+}
+export interface WorkerScope {
+  tenant_id: string;
+  user_id: string;
+}
+
+export interface WorkerConfig {
+  scopes: WorkerScope[];
+  actor: string;
+  poll_interval_ms?: number;
+  job_limit?: number;
+  reminder_limit?: number;
+  outbox_limit?: number;
+  lease_seconds?: number;
+}
+
+export interface KindStats {
+  processed: number;
+  succeeded: number;
+  retried: number;
+  failed: number;
+}
+
+export interface WorkerTickReport {
+  jobs: KindStats;
+  reminders: KindStats;
+  outbox: KindStats;
+  lease_lost: number;
+  errors: number;
+}
+
+export class WorkerHandle {
+  tick(): Promise<WorkerTickReport>;
+  shutdown(timeoutMs?: number): Promise<void>;
+}
+
+
+export class Client {
+  static create(config: RuntimeConfig): Promise<Client>;
+  call(tool: string, payload: unknown, options?: CallOptions): Promise<unknown>;
+  close(timeoutMs?: number): Promise<{ drained: boolean; in_flight_remaining: number }>;
+  serve(): Promise<ServiceHandle>;
+  startWorker(config: WorkerConfig): Promise<WorkerHandle>;
+  health(options?: CallOptions): Promise<{ fail_fast: boolean; backends: { backend: string; status: 'ready' | 'unavailable'; degraded_signature: string | null }[] }>;
+  ingest(request: IngestMemoryRequest, options?: CallOptions): Promise<IngestMemoryResponse>;
+  retrieve(request: RetrievalRequest, options?: CallOptions): Promise<RetrievalResponse>;
+  forget(request: ForgetMemoryRequest, options?: CallOptions): Promise<ForgetMemoryResponse>;
+  getMemory(request: Scope & { memory_id: string }, options?: CallOptions): Promise<MemoryRecord | null>;
+  listMemories(request: ListMemoriesRequest, options?: CallOptions): Promise<MemoryRecord[]>;
+  queryMemories(request: unknown, options?: CallOptions): Promise<unknown>;
+  repairIndex(request: { tenant_id: string; limit?: number }, options?: CallOptions): Promise<{ repaired: number; remaining: number; complete: boolean }>;
+  updateMemory(request: UpdateMemoryRequest, options?: CallOptions): Promise<MemoryRecord>;
+  memoryStats(request: Scope, options?: CallOptions): Promise<MemoryStats>;
+  searchByTag(request: Scope & { tag: string }, options?: CallOptions): Promise<MemoryRecord[]>;
+  searchByEntity(request: Scope & { entity: string }, options?: CallOptions): Promise<MemoryRecord[]>;
+  scoredSearch(request: RetrievalRequest, options?: CallOptions): Promise<RetrievalResponse>;
+  appendSessionMessage(request: AppendSessionMessageRequest, options?: CallOptions): Promise<{ message_id: string; hot_tail_count: number; degraded_reasons: string[] }>;
+  eligibleSessions(request: EligibleSessionsRequest, options?: CallOptions): Promise<EligibleSession[]>;
+  workingContext(request: RetrievalRequest, options?: CallOptions): Promise<WorkingContext>;
+  queryGraph(request: RetrievalRequest, options?: CallOptions): Promise<{ items: RetrievedItem[] }>;
+  graphify(request: Scope & { memory_id: string; hints?: GraphHint[] }, options?: CallOptions): Promise<GraphifyResponse>;
+  consolidate(request: ConsolidationRequest, options?: CallOptions): Promise<ConsolidationResponse>;
+  scheduleReminder(request: ScheduleReminderRequest, options?: CallOptions): Promise<{ trace_id: string; reminder: ReminderRecord; receipts: StoreReceipt[] }>;
+  listReminders(request: Scope, options?: CallOptions): Promise<ReminderRecord[]>;
+  executeDueReminders(request: ExecuteDueRemindersRequest, options?: CallOptions): Promise<{ trace_id: string; results: ReminderDispatchResult[]; receipts: StoreReceipt[] }>;
+  planReembed(request: ReembedPlanRequest, options?: CallOptions): Promise<ReembedPlan>;
+  executeReembed(request: ReembedExecutionRequest, options?: CallOptions): Promise<ReembedExecutionReport>;
+  enqueueJob(request: LifecycleJobRequest, options?: CallOptions): Promise<LifecycleScheduledJob>;
+  getJob(request: Scope & { job_id: string }, options?: CallOptions): Promise<LifecycleScheduledJob | null>;
+  listJobs(request: Scope, options?: CallOptions): Promise<LifecycleScheduledJob[]>;
+  runJobs(request: RunLifecycleJobsRequest, options?: CallOptions): Promise<LifecycleScheduledJob[]>;
+  runOutbox(request: { tenant_id: string }, options?: CallOptions): Promise<{ completed: number; failed: number }>;
+  migrateDatabase(options?: CallOptions): Promise<{ status: string; backend: string }>;
+  upsertPolicy(request: UpsertPolicyRequest, options?: CallOptions): Promise<{ policy: ProceduralPolicy; receipts: StoreReceipt[] }>;
+  listPolicies(request: Scope & { privacy_scope?: PrivacyLevel[]; include_disabled?: boolean }, options?: CallOptions): Promise<ProceduralPolicy[]>;
+  removePolicy(request: Scope & { policy_id: string }, options?: CallOptions): Promise<{ policy_id: string; status: 'removed'; receipts: StoreReceipt[] }>;
+  createExperiment(request: { lane: RuntimeLane; policy_version: string; description: string }, options?: CallOptions): Promise<ExperimentCandidate>;
+  promoteExperiment(request: { experiment_id: string; evidence: PromotionEvidence }, options?: CallOptions): Promise<ExperimentCandidate>;
+  rollbackExperiment(request: { experiment_id: string; reason: string }, options?: CallOptions): Promise<ExperimentCandidate>;
+  experimentStatus(options?: CallOptions): Promise<ExperimentRegistryStatus>;
+  experimentStatus(request: { experiment_id: string }, options?: CallOptions): Promise<ExperimentCandidate | null>;
+  safetyPolicy(options?: CallOptions): Promise<SafetyPolicy>;
+  setSafetyPolicy(request: { severity: Severity; action: DecisionAction }, options?: CallOptions): Promise<SafetyPolicy>;
+  batchIngest(request: { items: IngestMemoryRequest[]; idempotency_key?: string | null }, options?: CallOptions): Promise<BatchResponse<IngestMemoryResponse>>;
+  batchRetrieve(request: { queries: RetrievalRequest[]; idempotency_key?: string | null }, options?: CallOptions): Promise<BatchResponse<RetrievalResponse>>;
+  batchForget(request: { items: ForgetMemoryRequest[]; idempotency_key?: string | null }, options?: CallOptions): Promise<BatchResponse<ForgetMemoryResponse>>;
+}
+
+export function validateConfig(config: RuntimeConfig): { status: 'ok' };
+export function lexicalScore(text: string, query: string): number;

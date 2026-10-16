@@ -3,6 +3,29 @@ use crate::{
     domain::{MemoryRecord, ProceduralPolicy, ReminderRecord, StoreReceipt},
 };
 use serde_json::Value;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseResource {
+    RuntimeState,
+    LifecycleJob,
+    Outbox,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaseClaim {
+    pub tenant_id: String,
+    pub user_id: Option<String>,
+    pub resource: LeaseResource,
+    pub key: String,
+    pub owner: String,
+    pub fence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedWriteResult {
+    Applied,
+    Superseded(Value),
+}
 
 /// Durable state and externally acknowledged effects used by lifecycle workers.
 /// Claims must be atomic, expire at `now_epoch + lease_seconds`, and fence other owners.
@@ -80,6 +103,69 @@ pub trait LifecycleStore {
         source: &str,
         shadow: &str,
     ) -> CoreResult<StoreReceipt>;
+    fn lifecycle_claim_fenced(
+        &mut self,
+        tenant: &str,
+        user_id: Option<&str>,
+        resource: LeaseResource,
+        key: &str,
+        owner: &str,
+        lease_seconds: u64,
+    ) -> CoreResult<Option<LeaseClaim>>;
+
+    fn lifecycle_renew_fenced(
+        &mut self,
+        claim: &LeaseClaim,
+        lease_seconds: u64,
+    ) -> CoreResult<bool>;
+
+    fn lifecycle_release_fenced(&mut self, claim: &LeaseClaim) -> CoreResult<()>;
+
+    fn lifecycle_save_guarded(
+        &mut self,
+        claim: &LeaseClaim,
+        target_key: &str,
+        value: &Value,
+    ) -> CoreResult<GuardedWriteResult>;
+
+    fn lifecycle_job_enqueue(
+        &mut self,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()>;
+
+    fn lifecycle_job_get(
+        &self,
+        tenant: &str,
+        user: &str,
+        id: &str,
+    ) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>>;
+
+    fn lifecycle_job_list(
+        &self,
+        tenant: &str,
+        user: &str,
+    ) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>>;
+
+    fn lifecycle_job_claim_due(
+        &mut self,
+        tenant: &str,
+        user: &str,
+        owner: &str,
+        now_nanos: u128,
+        limit: usize,
+        lease_seconds: u64,
+    ) -> CoreResult<
+        Vec<(
+            crate::runtime::prospective::LifecycleScheduledJob,
+            LeaseClaim,
+        )>,
+    >;
+
+    fn lifecycle_job_save_guarded(
+        &mut self,
+        claim: &LeaseClaim,
+        job: &crate::runtime::prospective::LifecycleScheduledJob,
+    ) -> CoreResult<()>;
 }
 
 pub fn renew_lease(
@@ -107,7 +193,7 @@ pub fn with_user_lease<T, R>(
     store: &mut T,
     tenant: &str,
     user: &str,
-    work: impl FnOnce(&mut T) -> CoreResult<R>,
+    work: impl FnOnce(&mut T, &LeaseClaim) -> CoreResult<R>,
 ) -> CoreResult<R>
 where
     T: LifecycleStore,
@@ -115,9 +201,18 @@ where
     validate_identity(tenant, user, None)?;
     let owner = worker_owner();
     let key = format!("privacy/{user}");
-    renew_lease(store, tenant, &key, &owner, 300)?;
-    let result = work(store);
-    let release = store.lifecycle_release(tenant, &key, &owner);
+    let claim = store
+        .lifecycle_claim_fenced(
+            tenant,
+            Some(user),
+            LeaseResource::RuntimeState,
+            &key,
+            &owner,
+            300,
+        )?
+        .ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
+    let result = work(store, &claim);
+    let release = store.lifecycle_release_fenced(&claim);
     match result {
         Ok(value) => {
             release?;

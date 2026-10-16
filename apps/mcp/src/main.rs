@@ -1,5 +1,5 @@
 use nextral::package::PackageError;
-use nextral_mcp::{command_arguments, configure_runtime, input_error, protocol};
+use nextral_mcp::{command_arguments, create_client, input_error, protocol};
 use std::{env, io, process::ExitCode};
 
 fn main() -> ExitCode {
@@ -38,11 +38,12 @@ fn run() -> Result<(), PackageError> {
             ))
         }
     }
-    configure_runtime(config.as_deref())?;
+    let _client = create_client(config.as_deref())?;
     protocol::serve(&mut io::stdin().lock(), &mut io::stdout().lock()).map_err(|error| {
         PackageError {
             code: "io".into(),
             message: error.to_string(),
+            execution_status: None,
         }
     })
 }

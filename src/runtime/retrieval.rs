@@ -10,24 +10,50 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
 /// Request to retrieve memories matching a query, with token budget, privacy scope, and scoring weights.
+fn default_token_budget() -> u32 {
+    1800
+}
+fn default_top_k_vector() -> usize {
+    12
+}
+fn default_max_graph_hops() -> u8 {
+    2
+}
+fn default_privacy_scope() -> Vec<PrivacyLevel> {
+    vec![PrivacyLevel::Private]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
     pub tenant_id: String,
     pub user_id: String,
+    #[serde(default)]
     pub session_id: Option<String>,
     pub query_text: String,
     #[serde(default)]
     pub query_vector: Option<Vec<f32>>,
+    #[serde(default)]
     pub entities: Vec<String>,
+    #[serde(default)]
     pub intent_topic: Option<String>,
+    #[serde(default = "default_token_budget")]
     pub token_budget: u32,
+    #[serde(default = "default_privacy_scope")]
     pub privacy_scope: Vec<PrivacyLevel>,
+    #[serde(default = "default_top_k_vector")]
     pub top_k_vector: usize,
+    #[serde(default = "default_max_graph_hops")]
     pub max_graph_hops: u8,
+    #[serde(default)]
     pub lane: Option<RuntimeLane>,
+    #[serde(default)]
     pub policy_version: Option<String>,
+    #[serde(default)]
     pub trace_id: Option<String>,
+    #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    #[serde(default)]
+    pub filters: Option<crate::memory::MemoryFilters>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +109,8 @@ pub struct RetrievalTelemetry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalResponse {
     pub retrieval_id: String,
+    pub tenant_id: String,
+    pub user_id: String,
     pub trace_id: String,
     pub status: RetrievalStatus,
     pub lane: RuntimeLane,
@@ -126,6 +154,7 @@ impl RetrievalRequest {
                 importance: 0.2,
                 access: 0.1,
             }),
+            filters: None,
         }
     }
 }
@@ -207,6 +236,7 @@ where
                 request.query_vector.as_deref(),
                 request.top_k_vector,
                 &privacy_scope,
+                request.filters.as_ref(),
             );
             (result, start.elapsed().as_millis() as u64)
         });
@@ -264,6 +294,8 @@ where
                 &request.query_text,
                 &crate::memory::now_timestamp(),
             ]),
+            tenant_id: request.tenant_id,
+            user_id: request.user_id,
             trace_id,
             status: RetrievalStatus::Error,
             lane,
@@ -327,6 +359,10 @@ where
             || record.user_id != request.user_id
             || record.status != crate::memory::MemoryStatus::Active
             || !privacy_scope.contains(&record.privacy_level)
+            || request
+                .filters
+                .as_ref()
+                .map_or(false, |f| !f.matches(&record))
         {
             continue;
         }
@@ -419,6 +455,8 @@ where
             &request.query_text,
             &crate::memory::now_timestamp(),
         ]),
+        tenant_id: request.tenant_id,
+        user_id: request.user_id,
         trace_id,
         status,
         lane,

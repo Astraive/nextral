@@ -154,10 +154,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _client_for(args: argparse.Namespace) -> core.Client:
+    config_path = getattr(args, "runtime_config", None)
+    if config_path is not None:
+        return core.Client(_load_json(config_path))
+    import os
+    env_config = os.environ.get("NEXTRAL_CONFIG")
+    if env_config is not None:
+        return core.Client(_load_json(env_config))
+    return core.Client({})
+
+
 def _execute(args: argparse.Namespace) -> Any:
-    config = getattr(args, "runtime_config", None)
-    if config is not None:
-        core.configure_runtime(_load_json(config))
     if args.action == "about":
         return {"name": "nextral", "version": __version__, "runtime": "rust"}
     if args.action == "validate":
@@ -167,15 +175,36 @@ def _execute(args: argparse.Namespace) -> Any:
     if args.action == "smoke":
         return core.e2e_smoke()
     if args.action == "health":
-        return core.health()
+        with _client_for(args) as client:
+            return client.health()
     if args.action == "db_migrate":
-        core.configure_runtime(_load_json(args.request))
-        return core.migrate_database()
+        with core.Client(_load_json(args.request)) as client:
+            return client.migrate_database()
     if args.action == "serve":
-        return core.serve(_load_json(args.request), [args.mode])
+        import signal
+        import time
+        client = core.Client(_load_json(args.request))
+        handle = client.serve()
+        stop = False
+        def on_stop(*_):
+            nonlocal stop
+            stop = True
+        try:
+            signal.signal(signal.SIGINT, on_stop)
+            signal.signal(signal.SIGTERM, on_stop)
+        except (ValueError, AttributeError):
+            pass
+        try:
+            while not stop:
+                time.sleep(0.05)
+        finally:
+            handle.shutdown()
+            client.close()
+        return {"status": "stopped", "binds": handle.binds}
     request = _load_json(args.request)
     if args.action == "tool":
-        return core.mcp_call(args.tool, request)
+        with _client_for(args) as client:
+            return client.call(args.tool, request)
     if args.action == "reembed_plan":
         return core.reembed_plan(request)
     if args.action == "adapter_smoke":
@@ -193,7 +222,8 @@ def _execute(args: argparse.Namespace) -> Any:
             raise SerializationError("serialization", str(error)) from error
         if not isinstance(decoded, dict):
             raise InvalidInputError("invalid_input", "MCP payload_json must encode an object")
-        return core.mcp_call(tool, decoded)
+        with _client_for(args) as client:
+            return client.call(tool, decoded)
     raise InvalidInputError("invalid_input", f"unknown command action: {args.action}")
 
 

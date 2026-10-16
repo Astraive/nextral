@@ -38,6 +38,7 @@ pub mod testkit;
 pub mod topology;
 
 pub use contracts::{CoreError, CoreResult};
+pub use runtime::load_runner;
 
 #[cfg(test)]
 mod tests {
@@ -72,6 +73,32 @@ mod tests {
         topology::{all_profiles, requires_store, StoreRole},
         CoreError,
     };
+    fn test_client() -> crate::package::RuntimeClient {
+        let mut config = crate::config::NextralConfig::default();
+        config.backend = crate::config::RuntimeBackend::TestMemory;
+        crate::package::RuntimeClient::from_config(config).unwrap()
+    }
+
+    fn mcp_call_json(request_json: &str) -> Result<String, crate::package::PackageError> {
+        let value: serde_json::Value = serde_json::from_str(request_json).unwrap();
+        let tool = value["tool"].as_str().unwrap();
+        let payload_json = value
+            .get("payload_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}");
+        static CLIENT: std::sync::OnceLock<crate::package::RuntimeClient> =
+            std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(test_client);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(client.call_json(
+            tool,
+            payload_json.to_string(),
+            crate::package::CallOptions::default(),
+        ))
+    }
 
     #[tokio::test]
     async fn scored_search_returns_matches() {
@@ -384,6 +411,7 @@ mod tests {
             },
             rate_limit: crate::config::RateLimitConfig::default(),
             batch: crate::config::BatchConfig::default(),
+            ..Default::default()
         };
 
         assert!(config.validate().is_ok());
@@ -535,7 +563,7 @@ mod tests {
 
     #[test]
     fn experiment_control_and_safety_policy_workflows_operate() {
-        let create = crate::package::mcp_call_json(
+        let create = mcp_call_json(
             &serde_json::json!({
                 "tool": "experiments.create",
                 "payload_json": serde_json::json!({
@@ -550,7 +578,7 @@ mod tests {
         let created: serde_json::Value = serde_json::from_str(&create).unwrap();
         let experiment_id = created["id"].as_str().unwrap().to_string();
 
-        let blocked = crate::package::mcp_call_json(
+        let blocked = mcp_call_json(
             &serde_json::json!({
                 "tool": "experiments.promote",
                 "payload_json": serde_json::json!({
@@ -562,7 +590,7 @@ mod tests {
         );
         assert!(blocked.is_err());
 
-        let policy = crate::package::mcp_call_json(
+        let policy = mcp_call_json(
             &serde_json::json!({
                 "tool": "safety.policy.set",
                 "payload_json": serde_json::json!({
@@ -1221,6 +1249,7 @@ mod tests {
             },
             rate_limit: crate::config::RateLimitConfig::default(),
             batch: crate::config::BatchConfig::default(),
+            ..Default::default()
         }
     }
 
@@ -1283,7 +1312,7 @@ mod tests {
 
     #[test]
     fn mcp_unknown_tool_returns_error() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "unknown.tool",
                 "payload_json": "{}"
@@ -1295,7 +1324,7 @@ mod tests {
 
     #[test]
     fn mcp_health_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.health",
                 "payload_json": "{}"
@@ -1309,7 +1338,7 @@ mod tests {
 
     #[test]
     fn mcp_session_append_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.session.append",
                 "payload_json": serde_json::json!({
@@ -1326,7 +1355,7 @@ mod tests {
 
     #[test]
     fn mcp_session_context_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.session.context",
                 "payload_json": serde_json::json!({
@@ -1344,7 +1373,7 @@ mod tests {
 
     #[test]
     fn mcp_memory_list_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.list",
                 "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
@@ -1353,7 +1382,7 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     // === TESTMEMORYSTORE ===
@@ -1727,7 +1756,7 @@ mod tests {
 
     #[test]
     fn mcp_batch_ingest_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
+        let result = mcp_call_json(&serde_json::json!({
             "tool": "nextral.batch.ingest",
             "payload_json": serde_json::json!({
                 "items": [
@@ -1768,7 +1797,7 @@ mod tests {
             "idempotency_key": "idempotent_batch_key_1"
         });
         let call = |payload: &serde_json::Value| {
-            crate::package::mcp_call_json(
+            mcp_call_json(
                 &serde_json::json!({
                     "tool": "nextral.batch.ingest",
                     "payload_json": payload.to_string()
@@ -1784,7 +1813,7 @@ mod tests {
 
     #[test]
     fn mcp_batch_retrieve_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.batch.retrieve",
                 "payload_json": serde_json::json!({
@@ -1807,7 +1836,7 @@ mod tests {
 
     #[test]
     fn mcp_batch_forget_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.batch.forget",
                 "payload_json": serde_json::json!({
@@ -2116,7 +2145,7 @@ mod tests {
 
     #[test]
     fn batch_ingest_empty_items() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
+        let result = mcp_call_json(&serde_json::json!({
             "tool": "nextral.batch.ingest",
             "payload_json": serde_json::json!({"items": [], "idempotency_key": "empty_batch"}).to_string()
         }).to_string()).unwrap();
@@ -2127,7 +2156,7 @@ mod tests {
 
     #[test]
     fn batch_retrieve_empty_queries() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.batch.retrieve",
                 "payload_json": serde_json::json!({"queries": []}).to_string()
@@ -2141,7 +2170,7 @@ mod tests {
 
     #[test]
     fn batch_forget_empty_items() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.batch.forget",
                 "payload_json": serde_json::json!({"items": []}).to_string()
@@ -2157,7 +2186,7 @@ mod tests {
 
     #[test]
     fn ingest_idempotency_by_memory_id() {
-        let r1 = crate::package::mcp_call_json(
+        let r1 = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.ingest",
                 "payload_json": serde_json::json!({
@@ -2173,7 +2202,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let r2 = crate::package::mcp_call_json(
+        let r2 = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.ingest",
                 "payload_json": serde_json::json!({
@@ -2508,7 +2537,7 @@ mod tests {
 
     #[test]
     fn mcp_memory_list_default_privacy_scope() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.list",
                 "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
@@ -2517,12 +2546,12 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     #[test]
     fn mcp_memory_list_with_custom_privacy_scope() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.list",
                 "payload_json": serde_json::json!({
@@ -2535,7 +2564,7 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     #[test]
@@ -2553,21 +2582,21 @@ mod tests {
             },
         );
         input.id = Some("mem_inactive".into());
-        crate::package::mcp_call_json(&serde_json::json!({"tool":"nextral.memory.ingest","payload_json":serde_json::to_string(&input).unwrap()}).to_string()).unwrap();
-        crate::package::mcp_call_json(&serde_json::json!({"tool":"nextral.memory.forget","payload_json":serde_json::json!({"tenant_id":"inactive_tenant","user_id":"inactive_user","memory_id":"mem_inactive","actor":"inactive_user","reason":"test inactive listing","redact":false}).to_string()}).to_string()).unwrap();
-        let result = crate::package::mcp_call_json(
+        mcp_call_json(&serde_json::json!({"tool":"nextral.memory.ingest","payload_json":serde_json::to_string(&input).unwrap()}).to_string()).unwrap();
+        mcp_call_json(&serde_json::json!({"tool":"nextral.memory.forget","payload_json":serde_json::json!({"tenant_id":"inactive_tenant","user_id":"inactive_user","memory_id":"mem_inactive","actor":"inactive_user","reason":"test inactive listing","redact":false}).to_string()}).to_string()).unwrap();
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.list",
                 "payload_json": serde_json::json!({
                     "tenant_id": "inactive_tenant", "user_id": "inactive_user",
-                    "include_inactive": true
+                    "filters": { "statuses": ["active", "soft_deleted"] }
                 }).to_string()
             })
             .to_string(),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(!v.as_array().unwrap().is_empty());
+        assert!(!v["items"].as_array().unwrap().is_empty());
     }
 
     // === ENV VAR SUBSTITUTION ===
@@ -2846,7 +2875,7 @@ mod tests {
 
     #[test]
     fn mcp_memory_update_tool() {
-        let ingest_result = crate::package::mcp_call_json(
+        let ingest_result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.ingest",
                 "payload_json": serde_json::json!({
@@ -2864,7 +2893,7 @@ mod tests {
         .unwrap();
         assert!(ingest_result.contains("accepted"));
 
-        let update_result = crate::package::mcp_call_json(
+        let update_result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.update",
                 "payload_json": serde_json::json!({
@@ -2884,7 +2913,7 @@ mod tests {
 
     #[test]
     fn mcp_memory_stats_tool() {
-        let result = crate::package::mcp_call_json(
+        let result = mcp_call_json(
             &serde_json::json!({
                 "tool": "nextral.memory.stats",
                 "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u"}).to_string()
@@ -2896,26 +2925,6 @@ mod tests {
         assert!(v.get("active_count").is_some());
         assert!(v.get("entity_count").is_some());
         assert!(v.get("tag_count").is_some());
-    }
-
-    #[test]
-    fn mcp_memory_search_by_tag_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.search_by_tag",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u", "tag": "important"}).to_string()
-        }).to_string()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
-    }
-
-    #[test]
-    fn mcp_memory_search_by_entity_tool() {
-        let result = crate::package::mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.search_by_entity",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u", "entity": "PostgreSQL"}).to_string()
-        }).to_string()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
     }
 
     // === FULL END-TO-END MEMORY LIFECYCLE TEST ===
@@ -3004,6 +3013,7 @@ mod tests {
                     importance: 0.2,
                     access: 0.1,
                 }),
+                filters: None,
             },
         )
         .unwrap();

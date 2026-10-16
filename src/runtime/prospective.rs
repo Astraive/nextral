@@ -1,3 +1,5 @@
+use crate::domain::ReminderStatus;
+use crate::runtime::storage::RuntimeStore;
 use crate::{
     contracts::{CoreError, CoreResult},
     runtime::{
@@ -5,19 +7,11 @@ use crate::{
         governance::{retain_memory, ForgetMemoryRequest},
         lifecycle::{durable_save, timestamp_epoch, worker_owner, LifecycleStore},
         observability::{record_job, JobOutcome},
-        reminders::{
-            execute_due_reminders, ExecuteDueRemindersRequest, ExecuteDueRemindersResponse,
-        },
+        reminders::ExecuteDueRemindersRequest,
     },
-    store::{AuditSink, GraphStore, MemoryIndexStore, ReminderStore, SessionStore},
+    store::{AuditSink, GraphStore, MemoryIndexStore, SessionStore},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::{
-    sync::{watch, Mutex},
-    task::JoinHandle,
-    time::{self, Duration},
-};
 
 fn default_limit() -> usize {
     100
@@ -131,9 +125,8 @@ where
         }
     }
     let id = crate::memory::deterministic_id(&[&serde_json::to_string(&request)?]);
-    let key = job_key(&request.user_id, &id);
-    if let Some(value) = store.lifecycle_load(&request.tenant_id, &key)? {
-        return Ok(serde_json::from_value(value)?);
+    if let Some(existing) = store.lifecycle_job_get(&request.tenant_id, &request.user_id, &id)? {
+        return Ok(existing);
     }
     let now = crate::memory::now_timestamp();
     if request.trigger == LifecycleTrigger::Close {
@@ -158,12 +151,7 @@ where
         completed_memory_ids: Vec::new(),
         last_error: None,
     };
-    durable_save(
-        store,
-        &job.request.tenant_id,
-        &key,
-        &serde_json::to_value(&job)?,
-    )?;
+    store.lifecycle_job_enqueue(&job)?;
     Ok(job)
 }
 
@@ -182,88 +170,52 @@ where
             "job limit must be 1..=1000 and lease positive".into(),
         ));
     }
-    let values = store.lifecycle_list(
-        &request.tenant_id,
-        &format!("scheduled-job/{}/", request.user_id),
-    )?;
-    let mut jobs = values
-        .into_iter()
-        .map(|value| {
-            let job: LifecycleScheduledJob = serde_json::from_value(value)?;
-            Ok((
-                crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at)?,
-                job,
-            ))
-        })
-        .collect::<CoreResult<Vec<_>>>()?;
-    jobs.sort_by(|(a_due, a), (b_due, b)| a_due.cmp(b_due).then(a.id.cmp(&b.id)));
     let owner = worker_owner();
+    let claimed_jobs = store.lifecycle_job_claim_due(
+        &request.tenant_id,
+        &request.user_id,
+        &owner,
+        now_nanos,
+        request.limit,
+        request.lease_seconds,
+    )?;
+
     let mut results = Vec::new();
-    for (_, mut job) in jobs {
-        if results.len() >= request.limit {
-            break;
-        }
-        if job.request.tenant_id != request.tenant_id || job.request.user_id != request.user_id {
-            return Err(CoreError::InvalidInput(
-                "job store returned an out-of-scope job".into(),
-            ));
-        }
-        if matches!(
-            job.status.as_str(),
-            "completed" | "terminal_failed" | "cancelled"
-        ) || crate::runtime::lifecycle::timestamp_nanos(&job.next_attempt_at)? > now_nanos
-        {
-            continue;
-        }
-        let key = job_key(&request.user_id, &job.id);
-        if !store.lifecycle_claim(
-            &request.tenant_id,
-            &key,
-            &owner,
-            timestamp_epoch(&crate::memory::now_timestamp())?,
-            request.lease_seconds,
-        )? {
-            continue;
-        }
+    for (mut job, claim) in claimed_jobs {
         let attempts_before = job.attempts;
-        let work: CoreResult<()> = (|| {
-            // Reload after atomic claim; another worker may have completed between list and claim.
-            if let Some(value) = store.lifecycle_load(&request.tenant_id, &key)? {
-                job = serde_json::from_value(value)?;
-            }
-            if matches!(
-                job.status.as_str(),
-                "completed" | "terminal_failed" | "cancelled"
-            ) {
-                return Ok(());
-            }
-            if job.request.trigger == LifecycleTrigger::Idle {
-                if let Some(activity) = store.lifecycle_load(
-                    &request.tenant_id,
-                    &format!(
-                        "session-activity/{}/{}",
-                        request.user_id, job.request.session_id
-                    ),
-                )? {
-                    if let Some(last) = activity["last_activity_at"].as_str() {
-                        let idle_due = crate::runtime::lifecycle::timestamp_add_seconds(
-                            last,
-                            job.request.idle_seconds.unwrap_or(0),
-                        )?;
-                        if crate::runtime::lifecycle::timestamp_nanos(&idle_due)? > now_nanos {
-                            job.next_attempt_at = idle_due;
-                            return Ok(());
-                        }
+        let mut postponed = false;
+        if job.request.trigger == LifecycleTrigger::Idle {
+            let activity_key = format!(
+                "session-activity/{}/{}",
+                request.user_id, job.request.session_id
+            );
+            if let Some(activity) = store.lifecycle_load(&request.tenant_id, &activity_key)? {
+                if let Some(last) = activity["last_activity_at"].as_str() {
+                    let idle_due = crate::runtime::lifecycle::timestamp_add_seconds(
+                        last,
+                        job.request.idle_seconds.unwrap_or(0),
+                    )?;
+                    if crate::runtime::lifecycle::timestamp_nanos(&idle_due)? > now_nanos {
+                        job.next_attempt_at = idle_due;
+                        job.status = "queued".into();
+                        job.updated_at = crate::memory::now_timestamp();
+                        store.lifecycle_job_save_guarded(&claim, &job)?;
+                        postponed = true;
                     }
                 }
             }
-            job.attempts = job.attempts.saturating_add(1);
-            job.status = "running".into();
-            job.updated_at = crate::memory::now_timestamp();
-            save_claimed_job(store, &key, &owner, &mut job)?;
-            if job.status != "running" {
-                return Ok(());
-            }
+        }
+        if postponed {
+            results.push(job);
+            continue;
+        }
+
+        job.attempts = job.attempts.saturating_add(1);
+        job.status = "running".into();
+        job.updated_at = crate::memory::now_timestamp();
+        store.lifecycle_job_save_guarded(&claim, &job)?;
+
+        let work: CoreResult<()> = (|| {
             if job.request.trigger == LifecycleTrigger::Retention {
                 for id in job.request.memory_ids.clone() {
                     if job.completed_memory_ids.contains(&id) {
@@ -280,13 +232,12 @@ where
                             redact: job.request.redact,
                         },
                         |store| {
-                            crate::runtime::lifecycle::renew_lease(
-                                store,
-                                &request.tenant_id,
-                                &key,
-                                &owner,
-                                request.lease_seconds,
-                            )
+                            if !store.lifecycle_renew_fenced(&claim, request.lease_seconds)? {
+                                return Err(CoreError::LeaseLost(
+                                    "job lease lost during retention".into(),
+                                ));
+                            }
+                            Ok(())
                         },
                     )?;
                     if response.status != "completed" {
@@ -295,10 +246,8 @@ where
                         ));
                     }
                     job.completed_memory_ids.push(id);
-                    save_claimed_job(store, &key, &owner, &mut job)?;
-                    if job.status != "running" {
-                        return Ok(());
-                    }
+                    job.updated_at = crate::memory::now_timestamp();
+                    store.lifecycle_job_save_guarded(&claim, &job)?;
                 }
             } else {
                 let consolidation = job.request.consolidation.clone().ok_or_else(|| {
@@ -308,8 +257,11 @@ where
             }
             job.status = "completed".into();
             job.last_error = None;
+            job.updated_at = crate::memory::now_timestamp();
+            store.lifecycle_job_save_guarded(&claim, &job)?;
             Ok(())
         })();
+
         if let Err(error) = work {
             if job.attempts == attempts_before {
                 job.attempts = job.attempts.saturating_add(1);
@@ -322,22 +274,9 @@ where
                 job.next_attempt_at =
                     crate::runtime::lifecycle::timestamp_add_seconds(&request.now, 60)?;
             }
+            let _ = store.lifecycle_job_save_guarded(&claim, &job);
         }
-        job.updated_at = crate::memory::now_timestamp();
-        if let Err(error) = crate::runtime::lifecycle::renew_lease(
-            store,
-            &request.tenant_id,
-            &key,
-            &owner,
-            request.lease_seconds,
-        ) {
-            let _ = store.lifecycle_release(&request.tenant_id, &key, &owner);
-            return Err(error);
-        }
-        let saved = save_claimed_job(store, &key, &owner, &mut job);
-        let release = store.lifecycle_release(&request.tenant_id, &key, &owner);
-        saved?;
-        release?;
+
         let outcome = match job.status.as_str() {
             "completed" => Some(JobOutcome::Completed),
             "retry_pending" => Some(JobOutcome::Retried),
@@ -354,149 +293,212 @@ where
     }
     Ok(results)
 }
-fn job_key(user: &str, id: &str) -> String {
-    format!("scheduled-job/{user}/{id}")
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerScope {
+    pub tenant_id: String,
+    pub user_id: String,
 }
 
-fn save_claimed_job(
-    store: &mut impl LifecycleStore,
-    key: &str,
-    owner: &str,
-    job: &mut LifecycleScheduledJob,
-) -> CoreResult<()> {
-    if let Some(value) = store.lifecycle_save_claimed(
-        &job.request.tenant_id,
-        key,
-        owner,
-        &serde_json::to_value(&*job)?,
-    )? {
-        *job = serde_json::from_value(value)?;
-    }
-    Ok(())
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerConfig {
+    pub scopes: Vec<WorkerScope>,
+    #[serde(default = "default_worker_actor")]
+    pub actor: String,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default = "default_worker_limit")]
+    pub job_limit: usize,
+    #[serde(default = "default_worker_limit")]
+    pub reminder_limit: usize,
+    #[serde(default = "default_worker_limit")]
+    pub outbox_limit: usize,
+    #[serde(default = "default_worker_lease_seconds")]
+    pub lease_seconds: u64,
 }
 
-pub struct ProspectiveScheduler<S>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    store: Arc<Mutex<S>>,
-    tenant_id: String,
-    user_id: String,
-    actor: String,
-    retry_delay_seconds: u64,
-    poll_interval: Duration,
-    stop_tx: watch::Sender<bool>,
+fn default_poll_interval_ms() -> u64 {
+    1000
 }
-impl<S> ProspectiveScheduler<S>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    pub fn new(
-        store: Arc<Mutex<S>>,
-        tenant_id: impl Into<String>,
-        user_id: impl Into<String>,
-        actor: impl Into<String>,
-        retry_delay_seconds: u64,
-        poll_interval_seconds: u64,
-    ) -> Self {
-        let (stop_tx, _) = watch::channel(false);
-        Self {
-            store,
-            tenant_id: tenant_id.into(),
-            user_id: user_id.into(),
-            actor: actor.into(),
-            retry_delay_seconds,
-            poll_interval: Duration::from_secs(poll_interval_seconds.max(1)),
-            stop_tx,
+fn default_worker_limit() -> usize {
+    100
+}
+fn default_worker_lease_seconds() -> u64 {
+    30
+}
+fn default_worker_actor() -> String {
+    "nextral-worker".to_string()
+}
+
+impl WorkerConfig {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.scopes.is_empty() || self.scopes.len() > 64 {
+            return Err(CoreError::InvalidInput(
+                "worker scopes must be between 1 and 64".into(),
+            ));
         }
+        let mut seen = std::collections::HashSet::new();
+        for scope in &self.scopes {
+            crate::store::validate_scope_component(&scope.tenant_id, "tenant_id")?;
+            crate::store::validate_scope_component(&scope.user_id, "user_id")?;
+            if !seen.insert((&scope.tenant_id, &scope.user_id)) {
+                return Err(CoreError::InvalidInput("duplicate worker scope".into()));
+            }
+        }
+        if self.actor.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "worker actor cannot be empty".into(),
+            ));
+        }
+        if self.poll_interval_ms < 100 || self.poll_interval_ms > 60000 {
+            return Err(CoreError::InvalidInput(
+                "poll_interval_ms must be between 100 and 60000".into(),
+            ));
+        }
+        if self.job_limit == 0 || self.job_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "job_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.reminder_limit == 0 || self.reminder_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "reminder_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.outbox_limit == 0 || self.outbox_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "outbox_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.lease_seconds < 15 || self.lease_seconds > 3600 {
+            return Err(CoreError::InvalidInput(
+                "lease_seconds must be between 15 and 3600".into(),
+            ));
+        }
+        Ok(())
     }
-    pub fn start(&self) -> JoinHandle<()> {
-        let store = Arc::clone(&self.store);
-        let tenant_id = self.tenant_id.clone();
-        let user_id = self.user_id.clone();
-        let actor = self.actor.clone();
-        let retry_delay_seconds = self.retry_delay_seconds;
-        let poll_interval = self.poll_interval;
-        let mut stop_rx = self.stop_tx.subscribe();
-        tokio::spawn(async move {
-            let mut ticker = time::interval(poll_interval);
-            loop {
-                tokio::select! {
-                    changed=stop_rx.changed()=>{if changed.is_err() || *stop_rx.borrow() {break;}},
-                    _=ticker.tick()=>{
-                        let now=crate::memory::now_timestamp();
-                        let jobs=RunLifecycleJobsRequest {tenant_id:tenant_id.clone(),user_id:user_id.clone(),now:now.clone(),limit:100,lease_seconds:300};
-                        let reminders=reminder_request(&tenant_id,&user_id,&actor,retry_delay_seconds,&now);
-                        if let Err(error)=tick_store(Arc::clone(&store),jobs,reminders).await {eprintln!("ProspectiveScheduler: tick failed: {error}");}
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KindStats {
+    pub processed: usize,
+    pub succeeded: usize,
+    pub retried: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerTickReport {
+    pub jobs: KindStats,
+    pub reminders: KindStats,
+    pub outbox: KindStats,
+    pub lease_lost: usize,
+    pub errors: usize,
+}
+
+pub fn run_worker_tick(
+    store: &RuntimeStore,
+    config: &WorkerConfig,
+) -> CoreResult<WorkerTickReport> {
+    let mut report = WorkerTickReport::default();
+    let mut store = store.clone();
+
+    for scope in &config.scopes {
+        // 1. Process Lifecycle Jobs
+        let jobs_res = execute_lifecycle_jobs(
+            &mut store,
+            RunLifecycleJobsRequest {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                now: crate::memory::now_timestamp(),
+                limit: config.job_limit,
+                lease_seconds: config.lease_seconds,
+            },
+        );
+        match jobs_res {
+            Ok(jobs) => {
+                for job in jobs {
+                    report.jobs.processed += 1;
+                    match job.status.as_str() {
+                        "completed" => report.jobs.succeeded += 1,
+                        "retry_pending" => report.jobs.retried += 1,
+                        "terminal_failed" => report.jobs.failed += 1,
+                        _ => {}
                     }
                 }
             }
-        })
-    }
-    pub fn stop(&self) {
-        let _ = self.stop_tx.send(true);
-    }
-    pub async fn tick_once(
-        &self,
-        due_at_or_before: &str,
-    ) -> CoreResult<ExecuteDueRemindersResponse> {
-        let jobs = RunLifecycleJobsRequest {
-            tenant_id: self.tenant_id.clone(),
-            user_id: self.user_id.clone(),
-            now: due_at_or_before.into(),
-            limit: 100,
-            lease_seconds: 300,
-        };
-        let reminders = reminder_request(
-            &self.tenant_id,
-            &self.user_id,
-            &self.actor,
-            self.retry_delay_seconds,
-            due_at_or_before,
-        );
-        tick_store(Arc::clone(&self.store), jobs, reminders).await
-    }
-}
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
 
-async fn tick_store<S>(
-    store: Arc<Mutex<S>>,
-    jobs: RunLifecycleJobsRequest,
-    reminders: ExecuteDueRemindersRequest,
-) -> CoreResult<ExecuteDueRemindersResponse>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    let mut guard = store.lock_owned().await;
-    tokio::task::spawn_blocking(move || {
-        let jobs_result = execute_lifecycle_jobs(&mut *guard, jobs);
-        let reminders_result = execute_due_reminders(&mut *guard, reminders);
-        jobs_result?;
-        reminders_result
-    })
-    .await
-    .map_err(|error| CoreError::Io(format!("lifecycle worker failed: {error}")))?
+        // 2. Process Reminders
+        let reminders_res = crate::runtime::reminders::execute_due_reminders(
+            &mut store,
+            crate::runtime::reminders::ExecuteDueRemindersRequest {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                due_at_or_before: crate::memory::now_timestamp(),
+                actor: config.actor.clone(),
+                retry_delay_seconds: 60,
+                max_retries: Some(3),
+                dispatch_policy_version: None,
+                retry_strategy_id: None,
+                trace_id: None,
+                privacy_scope: vec![crate::memory::PrivacyLevel::Private],
+                lease_seconds: config.lease_seconds,
+            },
+        );
+        match reminders_res {
+            Ok(rem_resp) => {
+                for res in rem_resp.results {
+                    report.reminders.processed += 1;
+                    match res.status {
+                        ReminderStatus::Completed | ReminderStatus::Dispatched => {
+                            report.reminders.succeeded += 1
+                        }
+                        ReminderStatus::RetryScheduled => report.reminders.retried += 1,
+                        ReminderStatus::Failed
+                        | ReminderStatus::Cancelled
+                        | ReminderStatus::Expired => report.reminders.failed += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
+
+        // 3. Process Outbox
+        let outbox_res = store.drain_outbox(&scope.tenant_id);
+        match outbox_res {
+            Ok(val) => {
+                let comp = val["completed"].as_u64().unwrap_or(0) as usize;
+                let fail = val["failed"].as_u64().unwrap_or(0) as usize;
+                report.outbox.processed += comp + fail;
+                report.outbox.succeeded += comp;
+                report.outbox.failed += fail;
+            }
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
+    }
+
+    crate::runtime::observability::record_worker_tick(report.errors == 0 && report.lease_lost == 0);
+    Ok(report)
 }
+#[allow(dead_code)]
 fn reminder_request(
     tenant: &str,
     user: &str,
@@ -599,11 +601,8 @@ mod tests {
             execute_lifecycle_jobs(&mut store, runner("160")).unwrap()[0].status,
             "terminal_failed"
         );
-        let value = store
-            .lifecycle_load("t", &job_key("u", &job.id))
-            .unwrap()
-            .unwrap();
-        assert_eq!(value["attempts"], 2);
+        let job = store.lifecycle_job_get("t", "u", &job.id).unwrap().unwrap();
+        assert_eq!(job.attempts, 2);
     }
 
     fn fast_job(trigger: LifecycleTrigger) -> (crate::store::TestMemoryStore, LifecycleJobRequest) {

@@ -119,7 +119,7 @@ fn stdio_discovers_and_executes_memory_workflow_then_exits_on_eof() {
     );
     assert_eq!(replies[5]["result"]["isError"], false);
     assert_eq!(
-        replies[6]["result"]["structuredContent"]["result"],
+        replies[6]["result"]["structuredContent"]["items"],
         json!([])
     );
 }

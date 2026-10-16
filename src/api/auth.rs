@@ -15,14 +15,72 @@ pub(crate) struct Authenticator {
     anonymous_test: bool,
 }
 
+struct JwksCache {
+    keys: JwkSet,
+    url: String,
+    ca_pem_env: Option<String>,
+    last_refresh: std::time::Instant,
+}
+
+impl JwksCache {
+    fn fetch_jwk_set(url: &str, ca_pem_env: Option<&str>) -> CoreResult<JwkSet> {
+        let mut client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(name) = ca_pem_env {
+            if let Ok(pem) = std::env::var(name) {
+                if !pem.trim().is_empty() {
+                    let certificate =
+                        reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|_| {
+                            CoreError::InvalidInput(
+                                "JWKS CA environment variable must contain a PEM certificate"
+                                    .into(),
+                            )
+                        })?;
+                    client = client.add_root_certificate(certificate);
+                }
+            }
+        }
+        let client = client.build().map_err(|e| CoreError::Io(e.to_string()))?;
+        let response = client
+            .get(url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| CoreError::Io(format!("JWKS fetch failed: {e}")))?;
+        let bytes = std::io::Read::take(response, 1024 * 1024 + 1);
+        let keys: JwkSet = serde_json::from_reader(bytes)?;
+        if keys.keys.is_empty() {
+            return Err(CoreError::InvalidInput("JWKS contains no keys".into()));
+        }
+        Ok(keys)
+    }
+
+    fn find_or_refresh(&mut self, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> {
+        let kid_str = kid?;
+        if let Some(k) = self.keys.find(kid_str) {
+            return Some(k.clone());
+        }
+        if self.last_refresh.elapsed() >= std::time::Duration::from_secs(1) {
+            self.last_refresh = std::time::Instant::now();
+            if let Ok(new_keys) = Self::fetch_jwk_set(&self.url, self.ca_pem_env.as_deref()) {
+                self.keys = new_keys;
+                if let Some(k) = self.keys.find(kid_str) {
+                    return Some(k.clone());
+                }
+            }
+        }
+        None
+    }
+}
+
 struct JwtConfig {
     issuer: String,
     audience: String,
-    keys: JwkSet,
+    cache: parking_lot::Mutex<JwksCache>,
 }
 
 #[derive(Clone)]
-pub(crate) enum Principal {
+pub enum Principal {
     Service,
     User { tenant_id: String, user_id: String },
 }
@@ -63,42 +121,16 @@ impl Authenticator {
                         "auth.jwks_url must use HTTPS".into(),
                     ));
                 }
-                let mut client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .redirect(reqwest::redirect::Policy::none());
-                if let Some(name) = &config.auth.jwks_ca_pem_env {
-                    let pem = std::env::var(name)
-                        .ok()
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| {
-                            CoreError::InvalidInput(
-                                "JWKS CA environment variable is missing or empty".into(),
-                            )
-                        })?;
-                    let certificate =
-                        reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|_| {
-                            CoreError::InvalidInput(
-                                "JWKS CA environment variable must contain a PEM certificate"
-                                    .into(),
-                            )
-                        })?;
-                    client = client.add_root_certificate(certificate);
-                }
-                let client = client.build().map_err(|e| CoreError::Io(e.to_string()))?;
-                let response = client
-                    .get(url)
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .map_err(|e| CoreError::Io(format!("JWKS fetch failed: {e}")))?;
-                let bytes = std::io::Read::take(response, 1024 * 1024 + 1);
-                let keys: JwkSet = serde_json::from_reader(bytes)?;
-                if keys.keys.is_empty() {
-                    return Err(CoreError::InvalidInput("JWKS contains no keys".into()));
-                }
+                let keys = JwksCache::fetch_jwk_set(url, config.auth.jwks_ca_pem_env.as_deref())?;
                 Some(Arc::new(JwtConfig {
                     issuer: issuer.clone(),
                     audience: audience.clone(),
-                    keys,
+                    cache: parking_lot::Mutex::new(JwksCache {
+                        keys,
+                        url: url.clone(),
+                        ca_pem_env: config.auth.jwks_ca_pem_env.clone(),
+                        last_refresh: std::time::Instant::now(),
+                    }),
                 }))
             }
             _ => {
@@ -150,12 +182,12 @@ impl Authenticator {
                 "JWT algorithm is not permitted",
             ));
         }
-        let key = header
-            .kid
-            .as_deref()
-            .and_then(|kid| jwt.keys.find(kid))
-            .ok_or_else(|| super::ApiError::unauthorized("unknown JWT signing key"))?;
-        let key = DecodingKey::from_jwk(key)
+        let key = {
+            let mut cache = jwt.cache.lock();
+            cache.find_or_refresh(header.kid.as_deref())
+        }
+        .ok_or_else(|| super::ApiError::unauthorized("unknown JWT signing key"))?;
+        let key = DecodingKey::from_jwk(&key)
             .map_err(|_| super::ApiError::unauthorized("invalid JWT signing key"))?;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[&jwt.issuer]);
@@ -186,33 +218,44 @@ impl Principal {
             .get("user_id")
             .and_then(Value::as_str)
             .filter(|v| !v.trim().is_empty());
-        let (Some(tenant), Some(user)) = (tenant, user) else {
+        let Some(tenant) = tenant else {
             return Err(super::ApiError::invalid(
                 "tenant_id and user_id are required",
             ));
         };
-        if tenant.len() > 128 || user.len() > 128 {
+        if tenant.len() > 128 {
             return Err(super::ApiError::invalid(
-                "tenant_id and user_id must not exceed 128 bytes",
+                "tenant_id must not exceed 128 bytes",
             ));
         }
-        if let Self::User { tenant_id, user_id } = self {
-            if tenant != tenant_id || user != user_id {
-                return Err(super::ApiError::forbidden(
-                    "request scope does not match authenticated identity",
+        if let Some(user) = user {
+            if user.len() > 128 {
+                return Err(super::ApiError::invalid(
+                    "tenant_id and user_id must not exceed 128 bytes",
                 ));
             }
-            for field in ["actor_id", "actor"] {
-                if payload
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .is_some_and(|actor| actor != user_id)
-                {
+            if let Self::User { tenant_id, user_id } = self {
+                if tenant != tenant_id || user != user_id {
                     return Err(super::ApiError::forbidden(
-                        "actor does not match authenticated identity",
+                        "request scope does not match authenticated identity",
                     ));
                 }
+                for field in ["actor_id", "actor"] {
+                    if payload
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|actor| actor != user_id)
+                    {
+                        return Err(super::ApiError::forbidden(
+                            "actor does not match authenticated identity",
+                        ));
+                    }
+                }
             }
+        } else if let Self::User { .. } = self {
+            return Err(super::ApiError::invalid(
+                "tenant_id and user_id are required",
+            ));
         }
         Ok(())
     }

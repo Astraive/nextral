@@ -5,6 +5,7 @@ pub mod graphify;
 pub mod ingestion;
 pub mod intelligence;
 pub mod lifecycle;
+pub mod load_runner;
 pub mod observability;
 pub mod prospective;
 pub mod reembed;

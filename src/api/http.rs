@@ -53,7 +53,11 @@ pub(crate) fn router(state: ServiceState) -> Router {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v1/memories", post(ingest))
+        .route("/v1/memories/query", post(query_memories))
+        .route("/v1/memories/list", post(query_memories))
         .route("/v1/retrieval/query", post(retrieve))
+        .route("/v1/retrieve", post(retrieve))
+        .route("/v1/index/repair", post(repair_index))
         .route("/v1/memories/{memory_id}/forget", post(forget))
         .route("/v1/reminders", post(schedule))
         .fallback(|| async { ApiError::new(404, "not_found", "route not found") })
@@ -116,6 +120,30 @@ async fn retrieve(
             "retrieval is unavailable under active policy",
         ));
     }
+    Ok(Json(response))
+}
+
+async fn query_memories(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = principal(&state, &headers)?;
+    let response = state
+        .call(&actor, "nextral.memory.list", body(input)?)
+        .await?;
+    Ok(Json(response))
+}
+
+async fn repair_index(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = principal(&state, &headers)?;
+    let response = state
+        .call(&actor, "nextral.index.repair", body(input)?)
+        .await?;
     Ok(Json(response))
 }
 

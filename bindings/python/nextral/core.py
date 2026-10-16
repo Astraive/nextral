@@ -1,4 +1,4 @@
-"""Thin JSON bridges to the configured, process-wide Rust runtime.
+"""Client-owned Python bridge for Nextral's configured Rust memory runtime.
 
 Requests retain their native field names, including ``embedding``,
 ``query_vector`` and host-provided extraction results. Python does not select
@@ -8,7 +8,7 @@ providers, synthesize vectors, or implement memory policies.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import _nextral as _native
@@ -34,7 +34,15 @@ def _invoke(function: Callable[..., Any], *args: Any) -> Any:
         raise from_core_error(code, message) from error
 
 
-def _json_call(function: Callable[..., str], *args: str) -> Any:
+async def _invoke_async(coro: Any) -> Any:
+    try:
+        return await coro
+    except _native.NativeError as error:
+        code, message = error.args
+        raise from_core_error(code, message) from error
+
+
+def _json_call(function: Callable[..., str], *args: Any) -> Any:
     return json.loads(_invoke(function, *args))
 
 
@@ -44,30 +52,6 @@ def lexical_score(text: str, query: str) -> float:
 
 def validate_config(config: Request) -> JsonObject:
     return _json_call(_native.validate_config, _encode(config))
-
-
-def configure_runtime(config: Request) -> JsonObject:
-    """Validate and install an explicit Rust runtime configuration.
-
-    The backend is never implicitly changed to the test backend. Without an
-    explicit call, Rust resolves the configuration from ``NEXTRAL_CONFIG``.
-    """
-    return _json_call(_native.configure_runtime, _encode(config))
-
-
-def serve(config: Request, modes: Sequence[str] = ("http",)) -> JsonObject:
-    """Run real service hosts, blocking until native service shutdown.
-
-    ``modes`` contains ``http``, ``grpc``, ``graphql`` or ``all``. Bind/startup
-    errors propagate; the return value reports stopped hosts, not a startup plan.
-    The native call releases Python's GIL while the hosts run.
-    """
-    return _json_call(_native.serve, _encode(config), _encode(list(modes)))
-
-
-def stop_serving() -> None:
-    """Signal active native service hosts to shut down gracefully."""
-    _invoke(_native.stop_serving)
 
 
 def e2e_smoke() -> JsonObject:
@@ -88,165 +72,485 @@ def adapter_smoke(request: Request) -> JsonObject:
     return _json_call(_native.adapter_smoke, _encode(request))
 
 
-def mcp_call(tool: str, payload: Request) -> Any:
-    """Dispatch a native tool; preserve its complete response and error code."""
-    return _json_call(
-        _native.mcp_call, _encode({"tool": tool, "payload_json": _encode(payload)})
-    )
+class ServiceHandle:
+    def __init__(self, native_handle: Any) -> None:
+        self._native = native_handle
 
+    def shutdown(self, timeout_ms: int | None = None) -> None:
+        _invoke(self._native.shutdown, timeout_ms)
+
+    async def shutdown_async(self, timeout_ms: int | None = None) -> None:
+        await _invoke_async(self._native.shutdown_async(timeout_ms))
+
+    @property
+    def binds(self) -> list[str]:
+        return self._native.binds()
+
+
+class WorkerHandle:
+    def __init__(self, native_handle: Any) -> None:
+        self._native = native_handle
+
+    def tick(self) -> JsonObject:
+        raw = _invoke(self._native.tick)
+        return json.loads(raw)
 
-def ingest(request: Request) -> JsonObject:
-    return mcp_call("nextral.memory.ingest", request)
+    async def tick_async(self) -> JsonObject:
+        raw = await _invoke_async(self._native.tick_async())
+        return json.loads(raw)
 
+    def shutdown(self, timeout_ms: int | None = None) -> None:
+        _invoke(self._native.shutdown, timeout_ms)
 
-def retrieve(request: Request) -> JsonObject:
-    return mcp_call("nextral.memory.retrieve", request)
+    async def shutdown_async(self, timeout_ms: int | None = None) -> None:
+        await _invoke_async(self._native.shutdown_async(timeout_ms))
 
+class Client:
+    """Synchronous owned client for the Nextral memory runtime."""
+
+    def __init__(self, config: Request | str) -> None:
+        config_json = config if isinstance(config, str) else _encode(config)
+        self._native = _invoke(_native.Client, config_json)
+
+    def __enter__(self) -> Client:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def call(self, tool: str, payload: Request, timeout_ms: int | None = None) -> Any:
+        raw = _invoke(self._native.call_json, tool, _encode(payload), timeout_ms)
+        return json.loads(raw)
 
-def forget(request: Request) -> JsonObject:
-    return mcp_call("nextral.memory.forget", request)
-
-
-def update_memory(request: Request) -> JsonObject:
-    return mcp_call("nextral.memory.update", request)
-
-
-def list_memories(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.memory.list", request)
-
-
-def memory_stats(request: Request) -> JsonObject:
-    return mcp_call("nextral.memory.stats", request)
-
-
-def search_by_tag(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.memory.search_by_tag", request)
-
-
-def search_by_entity(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.memory.search_by_entity", request)
-
-
-def append_session(request: Request) -> JsonObject:
-    return mcp_call("nextral.session.append", request)
-
-
-def eligible_sessions(request: EligibleSessionsRequest) -> list[EligibleSession]:
-    """List scoped inactive sessions, oldest first; limit defaults to 100 (1–1000)."""
-    return mcp_call("nextral.session.eligible", request)
-
-
-def session_context(request: Request) -> JsonObject:
-    return mcp_call("nextral.session.context", request)
-
-
-def graph_query(request: Request) -> JsonObject:
-    return mcp_call("nextral.graph.query", request)
-
-
-def graphify(request: Request) -> JsonObject:
-    return mcp_call("nextral.graph.graphify", request)
-
-
-def schedule_reminder(request: Request) -> JsonObject:
-    return mcp_call("nextral.reminders.schedule", request)
-
-
-def due_reminders(request: Request) -> JsonObject:
-    return mcp_call("nextral.reminders.due", request)
-
-
-def consolidate(request: Request) -> JsonObject:
-    return mcp_call("nextral.consolidation.run", request)
-
-
-def batch_ingest(request: Request) -> JsonObject:
-    return mcp_call("nextral.batch.ingest", request)
-
-
-def batch_retrieve(request: Request) -> JsonObject:
-    return mcp_call("nextral.batch.retrieve", request)
-
-
-def batch_forget(request: Request) -> JsonObject:
-    return mcp_call("nextral.batch.forget", request)
-
-
-def scored_search(request: Request) -> JsonObject:
-    return mcp_call("nextral.runtime.scored_search", request)
-
-
-def health() -> JsonObject:
-    return mcp_call("nextral.health", {})
-
-
-def execute_reembed(request: Request) -> JsonObject:
-    return mcp_call("nextral.jobs.reembed.execute", request)
-
-
-def create_experiment(request: Request) -> JsonObject:
-    return mcp_call("experiments.create", request)
-
-
-def promote_experiment(request: Request) -> JsonObject:
-    return mcp_call("experiments.promote", request)
-
-
-def rollback_experiment(request: Request) -> JsonObject:
-    return mcp_call("experiments.rollback", request)
-
-
-def experiment_status(request: Request) -> JsonObject:
-    return mcp_call("experiments.status", request)
-
-
-def safety_policy() -> JsonObject:
-    return mcp_call("safety.policy.get", {})
-
-
-def set_safety_policy(request: Request) -> JsonObject:
-    return mcp_call("safety.policy.set", request)
-
-
-def migrate_database() -> JsonObject:
-    return mcp_call("nextral.database.migrate", {})
-
-
-def get_memory(request: Request) -> JsonObject | None:
-    return mcp_call("nextral.memory.get", request)
-
-
-def list_reminders(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.reminders.list", request)
-
-
-def enqueue_job(request: Request) -> JsonObject:
-    return mcp_call("nextral.jobs.enqueue", request)
-
-
-def run_jobs(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.jobs.run", request)
-
-
-def list_jobs(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.jobs.list", request)
-
-
-def get_job(request: Request) -> JsonObject | None:
-    return mcp_call("nextral.jobs.get", request)
-
-
-def run_outbox(request: Request) -> JsonObject:
-    return mcp_call("nextral.outbox.run", request)
-
-
-def upsert_policy(request: Request) -> JsonObject:
-    return mcp_call("nextral.policy.upsert", request)
-
-
-def list_policies(request: Request) -> list[JsonObject]:
-    return mcp_call("nextral.policy.list", request)
-
-
-def remove_policy(request: Request) -> JsonObject:
-    return mcp_call("nextral.policy.remove", request)
+    def close(self, timeout_ms: int | None = None) -> JsonObject:
+        raw = _invoke(self._native.close, timeout_ms)
+        return json.loads(raw)
+
+    def serve(self) -> ServiceHandle:
+        native_handle = _invoke(self._native.serve)
+        return ServiceHandle(native_handle)
+
+    def start_worker(self, config: Request | str) -> WorkerHandle:
+        config_json = config if isinstance(config, str) else _encode(config)
+        native_handle = _invoke(self._native.start_worker, config_json)
+        return WorkerHandle(native_handle)
+
+    def health(self, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.health", {}, timeout_ms)
+
+    def ingest(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.ingest", request, timeout_ms)
+
+    def retrieve(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.retrieve", request, timeout_ms)
+
+    def forget(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.forget", request, timeout_ms)
+
+    def get_memory(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        memory_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject | None:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
+        return self.call("nextral.memory.get", payload, timeout_ms)
+
+    def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        res = self.call("nextral.memory.list", request, timeout_ms)
+        return res if isinstance(res, list) else (res.get("items", []) if isinstance(res, dict) else [])
+
+    def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.list", request, timeout_ms)
+
+    def repair_index(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.index.repair", request, timeout_ms)
+    def update_memory(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.memory.update", request, timeout_ms)
+
+    def memory_stats(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return self.call("nextral.memory.stats", payload, timeout_ms)
+
+    def search_by_tag(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return self.call("nextral.memory.search_by_tag", request, timeout_ms)
+
+    def search_by_entity(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return self.call("nextral.memory.search_by_entity", request, timeout_ms)
+
+    def scored_search(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.runtime.scored_search", request, timeout_ms)
+
+    def append_session(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.session.append", request, timeout_ms)
+
+    def session_context(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.session.context", request, timeout_ms)
+
+    def session_tail(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.session.tail", request, timeout_ms)
+
+    def eligible_sessions(self, request: Request | EligibleSessionsRequest, timeout_ms: int | None = None) -> list[EligibleSession]:
+        raw_request = (
+            request.to_dict() if hasattr(request, "to_dict") else request
+        )
+        return [
+            EligibleSession(**item)
+            for item in self.call("nextral.session.eligible", raw_request, timeout_ms)
+        ]
+
+    def graph_query(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.graph.query", request, timeout_ms)
+
+    def graphify(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.graph.graphify", request, timeout_ms)
+
+    def consolidate(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.consolidation.run", request, timeout_ms)
+
+    def schedule_reminder(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.reminders.schedule", request, timeout_ms)
+
+    def list_reminders(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return self.call("nextral.reminders.list", payload, timeout_ms)
+
+    def due_reminders(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return self.call("nextral.reminders.due", request, timeout_ms)
+
+    def upsert_policy(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.policy.upsert", request, timeout_ms)
+
+    def list_policies(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return self.call("nextral.policy.list", payload, timeout_ms)
+
+    def remove_policy(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        policy_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "policy_id": policy_id}
+        return self.call("nextral.policy.remove", payload, timeout_ms)
+
+    def execute_reembed(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.jobs.reembed.execute", request, timeout_ms)
+
+    def enqueue_job(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.jobs.enqueue", request, timeout_ms)
+
+    def get_job(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject | None:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "job_id": job_id}
+        return self.call("nextral.jobs.get", payload, timeout_ms)
+
+    def list_jobs(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return self.call("nextral.jobs.list", payload, timeout_ms)
+
+    def run_jobs(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.jobs.run", request, timeout_ms)
+
+    def run_outbox(self, tenant_id: str, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.outbox.run", {"tenant_id": tenant_id}, timeout_ms)
+
+    def migrate_database(self, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.database.migrate", {}, timeout_ms)
+
+    def create_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("experiments.create", request, timeout_ms)
+
+    def promote_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("experiments.promote", request, timeout_ms)
+
+    def rollback_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("experiments.rollback", request, timeout_ms)
+
+    def experiment_status(self, experiment_id: str | None = None, timeout_ms: int | None = None) -> JsonObject:
+        payload = {"experiment_id": experiment_id} if experiment_id else {}
+        return self.call("experiments.status", payload, timeout_ms)
+
+    def safety_policy(self, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("safety.policy.get", {}, timeout_ms)
+
+    def set_safety_policy(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("safety.policy.set", request, timeout_ms)
+
+    def batch_ingest(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.batch.ingest", request, timeout_ms)
+
+    def batch_retrieve(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.batch.retrieve", request, timeout_ms)
+
+    def batch_forget(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return self.call("nextral.batch.forget", request, timeout_ms)
+
+
+class AsyncClient:
+    """Asynchronous owned client for the Nextral memory runtime."""
+
+    def __init__(self, native_client: Any) -> None:
+        self._native = native_client
+
+    @classmethod
+    async def create(cls, config: Request | str) -> AsyncClient:
+        config_json = config if isinstance(config, str) else _encode(config)
+        native = _invoke(_native.Client, config_json)
+        return cls(native)
+
+    async def __aenter__(self) -> AsyncClient:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def call(self, tool: str, payload: Request, timeout_ms: int | None = None) -> Any:
+        raw = await _invoke_async(self._native.call_json_async(tool, _encode(payload), timeout_ms))
+        return json.loads(raw)
+
+    async def close(self, timeout_ms: int | None = None) -> JsonObject:
+        raw = await _invoke_async(self._native.close_async(timeout_ms))
+        return json.loads(raw)
+
+    async def serve(self) -> ServiceHandle:
+        native_handle = await _invoke_async(self._native.serve_async())
+        return ServiceHandle(native_handle)
+
+    async def start_worker(self, config: Request | str) -> WorkerHandle:
+        config_json = config if isinstance(config, str) else _encode(config)
+        native_handle = await _invoke_async(self._native.start_worker_async(config_json))
+        return WorkerHandle(native_handle)
+
+    async def health(self, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.health", {}, timeout_ms)
+
+    async def ingest(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.ingest", request, timeout_ms)
+
+    async def retrieve(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.retrieve", request, timeout_ms)
+
+    async def forget(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.forget", request, timeout_ms)
+
+    async def get_memory(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        memory_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject | None:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "memory_id": memory_id}
+        return await self.call("nextral.memory.get", payload, timeout_ms)
+
+    async def list_memories(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        res = await self.call("nextral.memory.list", request, timeout_ms)
+        return res if isinstance(res, list) else (res.get("items", []) if isinstance(res, dict) else [])
+
+    async def query_memories(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.list", request, timeout_ms)
+
+    async def repair_index(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.index.repair", request, timeout_ms)
+    async def update_memory(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.memory.update", request, timeout_ms)
+
+    async def memory_stats(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return await self.call("nextral.memory.stats", payload, timeout_ms)
+
+    async def search_by_tag(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return await self.call("nextral.memory.search_by_tag", request, timeout_ms)
+
+    async def search_by_entity(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return await self.call("nextral.memory.search_by_entity", request, timeout_ms)
+
+    async def scored_search(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.runtime.scored_search", request, timeout_ms)
+
+    async def append_session(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.session.append", request, timeout_ms)
+
+    async def session_context(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.session.context", request, timeout_ms)
+
+    async def session_tail(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.session.tail", request, timeout_ms)
+
+    async def eligible_sessions(self, request: Request | EligibleSessionsRequest, timeout_ms: int | None = None) -> list[EligibleSession]:
+        raw_request = (
+            request.to_dict() if hasattr(request, "to_dict") else request
+        )
+        return [
+            EligibleSession(**item)
+            for item in await self.call("nextral.session.eligible", raw_request, timeout_ms)
+        ]
+
+    async def graph_query(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.graph.query", request, timeout_ms)
+
+    async def graphify(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.graph.graphify", request, timeout_ms)
+
+    async def consolidate(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.consolidation.run", request, timeout_ms)
+
+    async def schedule_reminder(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.reminders.schedule", request, timeout_ms)
+
+    async def list_reminders(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return await self.call("nextral.reminders.list", payload, timeout_ms)
+
+    async def due_reminders(self, request: Request, timeout_ms: int | None = None) -> list[JsonObject]:
+        return await self.call("nextral.reminders.due", request, timeout_ms)
+
+    async def upsert_policy(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.policy.upsert", request, timeout_ms)
+
+    async def list_policies(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return await self.call("nextral.policy.list", payload, timeout_ms)
+
+    async def remove_policy(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        policy_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "policy_id": policy_id}
+        return await self.call("nextral.policy.remove", payload, timeout_ms)
+
+    async def execute_reembed(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.jobs.reembed.execute", request, timeout_ms)
+
+    async def enqueue_job(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.jobs.enqueue", request, timeout_ms)
+
+    async def get_job(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        job_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> JsonObject | None:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id, "job_id": job_id}
+        return await self.call("nextral.jobs.get", payload, timeout_ms)
+
+    async def list_jobs(
+        self,
+        request: Request | None = None,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[JsonObject]:
+        payload = request if isinstance(request, dict) else {"tenant_id": tenant_id, "user_id": user_id}
+        return await self.call("nextral.jobs.list", payload, timeout_ms)
+
+    async def run_jobs(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.jobs.run", request, timeout_ms)
+
+    async def run_outbox(self, tenant_id: str, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.outbox.run", {"tenant_id": tenant_id}, timeout_ms)
+
+    async def migrate_database(self, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.database.migrate", {}, timeout_ms)
+
+    async def create_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("experiments.create", request, timeout_ms)
+
+    async def promote_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("experiments.promote", request, timeout_ms)
+
+    async def rollback_experiment(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("experiments.rollback", request, timeout_ms)
+
+    async def experiment_status(self, experiment_id: str | None = None, timeout_ms: int | None = None) -> JsonObject:
+        payload = {"experiment_id": experiment_id} if experiment_id else {}
+        return await self.call("experiments.status", payload, timeout_ms)
+
+    async def safety_policy(self, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("safety.policy.get", {}, timeout_ms)
+
+    async def set_safety_policy(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("safety.policy.set", request, timeout_ms)
+
+    async def batch_ingest(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.batch.ingest", request, timeout_ms)
+
+    async def batch_retrieve(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.batch.retrieve", request, timeout_ms)
+
+    async def batch_forget(self, request: Request, timeout_ms: int | None = None) -> JsonObject:
+        return await self.call("nextral.batch.forget", request, timeout_ms)

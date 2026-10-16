@@ -1,6 +1,6 @@
 [package]
 name = "nextral"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Canonical Rust core for runtime-neutral memory and retrieval."
 license = "MIT"
@@ -43,14 +43,17 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # 0.1.92 removes redundant must_use attributes from generated futures.
 async-trait = "0.1.92"
 sha2 = "0.10"
+base64 = "0.22"
 axum = "0.8"
 tower = { version = "0.5", features = ["limit", "timeout", "load-shed"] }
 tower-http = { version = "0.6", features = ["timeout", "limit"] }
+parking_lot = "0.12"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-health = "0.14"
 prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 async-graphql = { version = "7", default-features = false, features = ["dynamic-schema"] }
 async-graphql-parser = "7"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }

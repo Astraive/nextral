@@ -1,6 +1,6 @@
 [package]
 name = "nextral-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -10,3 +10,4 @@ serde_json = "1.0"
 jsonschema = { version = "0.33", default-features = false }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tokio = { version = "1.40", features = ["rt", "macros"] }

@@ -22,10 +22,12 @@ pub(crate) fn schema() -> serde_json::Value {
         "metadata": {"type": "object", "additionalProperties": false,
           "required": ["schema_version", "suite_id", "suite_revision", "suite_sha256", "run", "started_at_unix_ms", "build_profile", "target_os", "target_arch"],
           "properties": {
-            "schema_version": {"type": "integer", "const": 1}, "suite_id": {"$ref": "#/$defs/label"}, "suite_revision": {"$ref": "#/$defs/label"},
+            "schema_version": {"type": "integer", "enum": [1, 2]}, "suite_id": {"$ref": "#/$defs/label"}, "suite_revision": {"$ref": "#/$defs/label"},
             "suite_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"}, "run": {"$ref": "#/$defs/run"},
             "started_at_unix_ms": {"type": "integer", "minimum": 1, "maximum": u64::MAX},
-            "build_profile": {"type": "string", "const": "release"}, "target_os": {"$ref": "#/$defs/label"}, "target_arch": {"$ref": "#/$defs/label"}
+            "build_profile": {"type": "string", "const": "release"}, "target_os": {"$ref": "#/$defs/label"}, "target_arch": {"$ref": "#/$defs/label"},
+            "configuration_digest": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+            "stage": {"type": "string", "enum": ["calibration", "qualification"]}
           }},
         "observed_outcome": {"oneOf": [
           {"type": "object", "additionalProperties": false, "required": ["kind", "expected", "matched", "returned", "forbidden"], "properties": {

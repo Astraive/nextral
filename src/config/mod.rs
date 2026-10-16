@@ -64,7 +64,7 @@ pub struct RerankerProviderConfig {
     pub api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IngestionPolicy {
     pub min_importance_score: f32,
     pub min_confidence_score: f32,
@@ -76,6 +76,16 @@ pub struct ScoringWeights {
     pub recency: f32,
     pub importance: f32,
     pub access: f32,
+}
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        Self {
+            semantic_similarity: 0.7,
+            recency: 0.1,
+            importance: 0.1,
+            access: 0.1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,12 +121,31 @@ pub struct CacheConfig {
     pub retrieval_ttl_seconds: u64,
     pub policy_ttl_seconds: u64,
 }
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            key_prefix: "nextral".into(),
+            session_ttl_seconds: 7200,
+            retrieval_ttl_seconds: 300,
+            policy_ttl_seconds: 3600,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceConfig {
     pub http_bind: Option<String>,
     pub grpc_bind: Option<String>,
     pub graphql_bind: Option<String>,
+}
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            http_bind: None,
+            grpc_bind: None,
+            graphql_bind: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,12 +158,32 @@ pub struct AuthConfig {
     pub jwks_ca_pem_env: Option<String>,
     pub service_token_env: Option<String>,
 }
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            issuer: None,
+            audience: None,
+            jwks_url: None,
+            jwks_ca_pem_env: None,
+            service_token_env: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObservabilityConfig {
     pub enabled: bool,
     pub otlp_endpoint: Option<String>,
     pub prometheus_bind: Option<String>,
+}
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: None,
+            prometheus_bind: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +217,61 @@ impl Default for BatchConfig {
         }
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionConfig {
+    #[serde(default = "default_max_in_flight")]
+    pub max_in_flight: usize,
+    #[serde(default = "default_max_pending")]
+    pub max_pending: usize,
+    #[serde(default = "default_max_pending_bytes")]
+    pub max_pending_bytes: usize,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_shutdown_timeout_ms")]
+    pub shutdown_timeout_ms: u64,
+    #[serde(default = "default_lease_seconds")]
+    pub lease_seconds: u32,
+}
+
+fn default_max_in_flight() -> usize {
+    8
+}
+fn default_max_pending() -> usize {
+    64
+}
+fn default_max_pending_bytes() -> usize {
+    16777216
+}
+fn default_request_timeout_ms() -> u64 {
+    30000
+}
+fn default_shutdown_timeout_ms() -> u64 {
+    30000
+}
+fn default_lease_seconds() -> u32 {
+    30
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: default_max_in_flight(),
+            max_pending: default_max_pending(),
+            max_pending_bytes: default_max_pending_bytes(),
+            request_timeout_ms: default_request_timeout_ms(),
+            shutdown_timeout_ms: default_shutdown_timeout_ms(),
+            lease_seconds: default_lease_seconds(),
+        }
+    }
+}
+
+fn default_control_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_base_policy_version() -> String {
+    "configured-base".to_string()
+}
 
 /// Complete runtime configuration covering backend selection, store URLs, provider settings,
 /// ingestion/retrieval policies, caching, service binds, auth, and observability.
@@ -188,6 +292,59 @@ pub struct NextralConfig {
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default = "default_control_namespace")]
+    pub control_namespace: String,
+    #[serde(default = "default_base_policy_version")]
+    pub base_policy_version: String,
+}
+impl Default for NextralConfig {
+    fn default() -> Self {
+        Self {
+            backend: RuntimeBackend::TestMemory,
+            stores: None,
+            embedding: EmbeddingProviderConfig {
+                kind: EmbeddingProviderKind::Test,
+                model: "test-model".to_string(),
+                dimension: 128,
+                endpoint: None,
+                api_key_env: None,
+            },
+            extraction: ExtractionProviderConfig {
+                kind: ExtractionProviderKind::Test,
+                model: "test-model".to_string(),
+                endpoint: None,
+                api_key_env: None,
+            },
+            reranker: Some(RerankerProviderConfig {
+                kind: RerankerProviderKind::None,
+                model: None,
+                endpoint: None,
+                api_key_env: None,
+            }),
+            ingestion_policy: IngestionPolicy {
+                min_importance_score: 0.0,
+                min_confidence_score: 0.0,
+            },
+            retrieval_policy: RetrievalPolicy {
+                privacy_scope: vec![crate::memory::PrivacyLevel::Private],
+                token_budget: 1024,
+                top_k_vector: 10,
+                max_graph_hops: 2,
+                scoring_weights: ScoringWeights::default(),
+            },
+            cache: CacheConfig::default(),
+            service: ServiceConfig::default(),
+            auth: AuthConfig::default(),
+            observability: ObservabilityConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            batch: BatchConfig::default(),
+            execution: ExecutionConfig::default(),
+            control_namespace: default_control_namespace(),
+            base_policy_version: default_base_policy_version(),
+        }
+    }
 }
 
 impl NextralConfig {
@@ -207,7 +364,7 @@ impl NextralConfig {
             validate_reranker(reranker)?;
         }
         validate_cache(&self.cache)?;
-        validate_jwks_ca(&self.auth)?;
+        validate_auth_config(&self.auth)?;
 
         if self.backend == RuntimeBackend::ProductionStores {
             let stores = self.stores.as_ref().ok_or_else(|| {
@@ -240,6 +397,57 @@ impl NextralConfig {
         if self.rate_limit.enabled && self.rate_limit.max_requests_per_second == 0 {
             return Err(CoreError::InvalidInput(
                 "rate_limit.max_requests_per_second must be non-zero when enabled".to_string(),
+            ));
+        }
+        if self.execution.max_in_flight == 0 || self.execution.max_in_flight > 64 {
+            return Err(CoreError::InvalidInput(
+                "execution.max_in_flight must be between 1 and 64".to_string(),
+            ));
+        }
+        if self.execution.max_pending < self.execution.max_in_flight
+            || self.execution.max_pending > 1024
+        {
+            return Err(CoreError::InvalidInput(
+                "execution.max_pending must be between max_in_flight and 1024".to_string(),
+            ));
+        }
+        if self.execution.max_pending_bytes < 10485760
+            || self.execution.max_pending_bytes > 268435456
+        {
+            return Err(CoreError::InvalidInput(
+                "execution.max_pending_bytes must be between 10485760 and 268435456".to_string(),
+            ));
+        }
+        if self.execution.request_timeout_ms == 0 || self.execution.request_timeout_ms > 300000 {
+            return Err(CoreError::InvalidInput(
+                "execution.request_timeout_ms must be between 1 and 300000".to_string(),
+            ));
+        }
+        if self.execution.shutdown_timeout_ms == 0 || self.execution.shutdown_timeout_ms > 300000 {
+            return Err(CoreError::InvalidInput(
+                "execution.shutdown_timeout_ms must be between 1 and 300000".to_string(),
+            ));
+        }
+        if self.execution.lease_seconds < 15 || self.execution.lease_seconds > 3600 {
+            return Err(CoreError::InvalidInput(
+                "execution.lease_seconds must be between 15 and 3600".to_string(),
+            ));
+        }
+        if self.control_namespace.is_empty()
+            || self.control_namespace.len() > 64
+            || !self
+                .control_namespace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(CoreError::InvalidInput(
+                "control_namespace must be 1..=64 characters of ASCII letters, digits, '_' or '-'"
+                    .to_string(),
+            ));
+        }
+        if self.base_policy_version.is_empty() || self.base_policy_version.len() > 128 {
+            return Err(CoreError::InvalidInput(
+                "base_policy_version must be nonempty and at most 128 bytes".to_string(),
             ));
         }
 
@@ -408,6 +616,24 @@ fn validate_reranker(config: &RerankerProviderConfig) -> CoreResult<()> {
     Ok(())
 }
 
+fn validate_auth_config(config: &AuthConfig) -> CoreResult<()> {
+    validate_jwks_ca(config)?;
+    match (&config.issuer, &config.audience, &config.jwks_url) {
+        (None, None, None) => Ok(()),
+        (Some(_), Some(_), Some(url)) => {
+            if !url.starts_with("https://") {
+                return Err(CoreError::InvalidInput(
+                    "auth.jwks_url must use HTTPS".into(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(CoreError::InvalidInput(
+            "issuer, audience and jwks_url must be configured together".into(),
+        )),
+    }
+}
+
 fn validate_jwks_ca(config: &AuthConfig) -> CoreResult<()> {
     if let Some(name) = &config.jwks_ca_pem_env {
         require("auth.jwks_ca_pem_env", name)?;
@@ -554,8 +780,11 @@ fn validate_postgres_tls(value: &str) -> CoreResult<()> {
             .first()
             .map(|value| value.trim_matches('\'').to_string())
     };
-    if !matches!(mode.as_deref(), Some("require" | "verify-full")) {
-        return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require or verify-full with certificate verification".into()));
+    if !matches!(
+        mode.as_deref(),
+        Some("require" | "verify-ca" | "verify-full")
+    ) {
+        return Err(CoreError::InvalidInput("strict Postgres transport requires sslmode=require, verify-ca, or verify-full with certificate verification".into()));
     }
     Ok(())
 }
@@ -615,6 +844,8 @@ mod hardening_tests {
                 .is_err()
         );
         assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=require").is_ok());
+        assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=verify-ca").is_ok());
+        assert!(validate_postgres_tls("postgresql://localhost/db?sslmode=disable").is_err());
         assert!(validate_postgres_tls("host=localhost sslmode='verify-full'").is_ok());
         assert!(validate_postgres_tls("host=localhost sslmode=prefer").is_err());
     }

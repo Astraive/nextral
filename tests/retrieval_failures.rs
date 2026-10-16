@@ -126,6 +126,7 @@ impl MemoryIndexStore for FaultStore {
         query_vector: Option<&[f32]>,
         top_k: usize,
         privacy_scope: &[PrivacyLevel],
+        filters: Option<&nextral::memory::MemoryFilters>,
     ) -> CoreResult<Vec<(String, f32)>> {
         if let Some(gate) = &self.vector_gate {
             gate.enter(Path::Vector)?;
@@ -140,6 +141,7 @@ impl MemoryIndexStore for FaultStore {
             query_vector,
             top_k,
             privacy_scope,
+            filters,
         )
     }
 
@@ -183,6 +185,13 @@ impl MemoryIndexStore for FaultStore {
         ids: &[&str],
     ) -> CoreResult<Vec<MemoryRecord>> {
         self.inner.get_active_memories(tenant_id, user_id, ids)
+    }
+
+    fn query_memories(
+        &self,
+        request: &nextral::memory::MemoryQuery,
+    ) -> CoreResult<nextral::memory::MemoryPage> {
+        self.inner.query_memories(request)
     }
 
     fn list_memories(

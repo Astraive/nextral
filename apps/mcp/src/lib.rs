@@ -4,29 +4,32 @@ pub mod catalog;
 mod promote_schema;
 pub mod protocol;
 
-use nextral::package::{self, PackageError};
-use serde_json::{json, Value};
+use nextral::package::PackageError;
+use serde_json::Value;
 use std::{
     env, fs,
     io::{self, Read},
     sync::LazyLock,
 };
 
-/// Configure the process explicitly, preferring --config over NEXTRAL_CONFIG.
-/// With neither present the package resolves its own explicit runtime environment.
-pub fn configure_runtime(path: Option<&str>) -> Result<(), PackageError> {
+pub fn create_client(path: Option<&str>) -> Result<nextral::package::RuntimeClient, PackageError> {
     let environment = env::var("NEXTRAL_CONFIG").ok();
-    if let Some(path) = path.or(environment.as_deref()) {
-        let config = read_file(path)?;
-        package::configure_runtime_json(&config)?;
-    }
-    Ok(())
+    let config = if let Some(path) = path.or(environment.as_deref()) {
+        let text = read_file(path)?;
+        nextral::config::load_config(&text).map_err(PackageError::from)?
+    } else {
+        let mut cfg = nextral::config::NextralConfig::default();
+        cfg.backend = nextral::config::RuntimeBackend::TestMemory;
+        cfg
+    };
+    nextral::package::RuntimeClient::from_config(config)
 }
 
 pub fn input_error(message: impl Into<String>) -> PackageError {
     PackageError {
         code: "invalid_input".into(),
         message: message.into(),
+        execution_status: None,
     }
 }
 
@@ -41,6 +44,7 @@ pub fn read_file(path: &str) -> Result<String, PackageError> {
         .map_err(|error| PackageError {
             code: "io".into(),
             message: format!("cannot read {path}: {error}"),
+            execution_status: None,
         })
 }
 
@@ -53,6 +57,7 @@ pub fn read_json_input(input: &str) -> Result<Value, PackageError> {
             .map_err(|error| PackageError {
                 code: "io".into(),
                 message: error.to_string(),
+                execution_status: None,
             })?;
         std::borrow::Cow::Owned(text)
     } else if input.trim_start().starts_with(['{', '[']) {
@@ -80,6 +85,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), PackageEr
     let validators = VALIDATORS.as_ref().map_err(|message| PackageError {
         code: "internal".into(),
         message: format!("invalid tool schema: {message}"),
+        execution_status: None,
     })?;
     validators[index]
         .validate(arguments)
@@ -92,8 +98,20 @@ pub fn call_tool(
     config_path: Option<&str>,
 ) -> Result<String, PackageError> {
     validate_arguments(name, arguments)?;
-    configure_runtime(config_path)?;
-    package::mcp_call_json(&json!({"tool":name,"payload_json":arguments.to_string()}).to_string())
+    let client = create_client(config_path)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PackageError {
+            code: "io".into(),
+            message: e.to_string(),
+            execution_status: None,
+        })?;
+    rt.block_on(client.call_json(
+        name,
+        arguments.to_string(),
+        nextral::package::CallOptions::default(),
+    ))
 }
 
 /// Extract one leading --config option; commands retain strict positional parsing.

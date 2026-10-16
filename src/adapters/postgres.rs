@@ -11,9 +11,9 @@ mod enabled {
     use postgres::{Client, Transaction};
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Condvar, Mutex};
 
-    const MIGRATIONS: [(&str, &str); 2] = [
+    const MIGRATIONS: [(&str, &str); 4] = [
         (
             "0001",
             include_str!("../../migrations/postgres/0001_core_schema.sql"),
@@ -22,13 +22,74 @@ mod enabled {
             "0002",
             include_str!("../../migrations/postgres/0002_runtime_durability.sql"),
         ),
+        (
+            "0003",
+            include_str!("../../migrations/postgres/0003_lifecycle_execution.sql"),
+        ),
+        (
+            "0004",
+            include_str!("../../migrations/postgres/0004_memory_query_indexes.sql"),
+        ),
     ];
     const MIGRATION_HISTORY: &str =
         "SELECT version,checksum FROM nextral_schema_migrations ORDER BY version";
 
+    struct PoolInner {
+        idle: Vec<Client>,
+        active_foreground: usize,
+        active_renewal: usize,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum ConnectionKind {
+        Foreground,
+        Renewal,
+    }
+
+    pub struct PooledClient<'a> {
+        client: Option<Client>,
+        adapter: &'a PostgresAdapter,
+        kind: ConnectionKind,
+    }
+
+    impl<'a> std::ops::Deref for PooledClient<'a> {
+        type Target = Client;
+        fn deref(&self) -> &Client {
+            self.client.as_ref().unwrap()
+        }
+    }
+
+    impl<'a> std::ops::DerefMut for PooledClient<'a> {
+        fn deref_mut(&mut self) -> &mut Client {
+            self.client.as_mut().unwrap()
+        }
+    }
+
+    impl<'a> Drop for PooledClient<'a> {
+        fn drop(&mut self) {
+            if let Some(c) = self.client.take() {
+                let (lock, cvar) = &*self.adapter.pool;
+                if let Ok(mut inner) = lock.lock() {
+                    match self.kind {
+                        ConnectionKind::Foreground => {
+                            inner.active_foreground = inner.active_foreground.saturating_sub(1);
+                        }
+                        ConnectionKind::Renewal => {
+                            inner.active_renewal = inner.active_renewal.saturating_sub(1);
+                        }
+                    }
+                    if !c.is_closed() && inner.idle.len() < 9 {
+                        inner.idle.push(c);
+                    }
+                    cvar.notify_one();
+                }
+            }
+        }
+    }
+
     pub struct PostgresAdapter {
         pub url: String,
-        pool: Mutex<Vec<Client>>,
+        pool: Arc<(Mutex<PoolInner>, Condvar)>,
     }
     impl PartialEq for PostgresAdapter {
         fn eq(&self, other: &Self) -> bool {
@@ -80,6 +141,9 @@ mod enabled {
         Ok(crate::runtime::lifecycle::timestamp_nanos(value)? as f64 / 1_000_000_000.0)
     }
     impl PostgresAdapter {
+        pub fn from_config(config: &crate::config::StoreConfig) -> CoreResult<Self> {
+            Self::new(&config.postgres_url)
+        }
         pub fn new(url: impl Into<String>) -> CoreResult<Self> {
             let url = url.into();
             if url.trim().is_empty() {
@@ -87,25 +151,102 @@ mod enabled {
             }
             Ok(Self {
                 url,
-                pool: Mutex::new(Vec::new()),
+                pool: Arc::new((
+                    Mutex::new(PoolInner {
+                        idle: Vec::new(),
+                        active_foreground: 0,
+                        active_renewal: 0,
+                    }),
+                    Condvar::new(),
+                )),
             })
         }
-        fn client(&self) -> CoreResult<Client> {
-            if let Some(c) = self
-                .pool
-                .lock()
-                .map_err(|e| CoreError::Io(e.to_string()))?
-                .pop()
-            {
-                if !c.is_closed() {
-                    return Ok(c);
+        fn connect_new(&self) -> CoreResult<Client> {
+            if self.url.contains("sslmode=disable") {
+                return Err(CoreError::InvalidInput(
+                    "insecure PostgreSQL transport mode 'sslmode=disable' is forbidden".into(),
+                ));
+            }
+            let is_verify_ca = self.url.contains("sslmode=verify-ca");
+            let mut builder = native_tls::TlsConnector::builder();
+            if is_verify_ca {
+                builder.danger_accept_invalid_hostnames(true);
+            }
+            if let Ok(ca_path) = std::env::var("PGSSLROOTCERT") {
+                if let Ok(pem) = std::fs::read(&ca_path) {
+                    if let Ok(cert) = native_tls::Certificate::from_pem(&pem) {
+                        builder.add_root_certificate(cert);
+                    }
                 }
             }
-            let tls = native_tls::TlsConnector::builder()
-                .build()
-                .map_err(|e| CoreError::Io(e.to_string()))?;
-            let url = self.url.replace("sslmode=verify-full", "sslmode=require");
+            let tls = builder.build().map_err(|e| CoreError::Io(e.to_string()))?;
+            let url = self
+                .url
+                .replace("sslmode=verify-full", "sslmode=require")
+                .replace("sslmode=verify-ca", "sslmode=require");
             Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(tls)).map_err(db)
+        }
+        pub fn checkout(&self, kind: ConnectionKind) -> CoreResult<PooledClient<'_>> {
+            let (lock, cvar) = &*self.pool;
+            let mut inner = lock.lock().map_err(|e| CoreError::Io(e.to_string()))?;
+            loop {
+                match kind {
+                    ConnectionKind::Foreground => {
+                        if inner.active_foreground < 8 {
+                            inner.active_foreground += 1;
+                            break;
+                        }
+                    }
+                    ConnectionKind::Renewal => {
+                        if inner.active_renewal < 1 {
+                            inner.active_renewal += 1;
+                            break;
+                        }
+                    }
+                }
+                inner = cvar.wait(inner).map_err(|e| CoreError::Io(e.to_string()))?;
+            }
+            let client = if let Some(c) = inner.idle.pop() {
+                if !c.is_closed() {
+                    Some(c)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            drop(inner);
+            let client = match client {
+                Some(c) => c,
+                None => match self.connect_new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let mut inner =
+                            lock.lock().map_err(|_| CoreError::Io("pool lock".into()))?;
+                        match kind {
+                            ConnectionKind::Foreground => {
+                                inner.active_foreground = inner.active_foreground.saturating_sub(1);
+                            }
+                            ConnectionKind::Renewal => {
+                                inner.active_renewal = inner.active_renewal.saturating_sub(1);
+                            }
+                        }
+                        cvar.notify_one();
+                        return Err(e);
+                    }
+                },
+            };
+            Ok(PooledClient {
+                client: Some(client),
+                adapter: self,
+                kind,
+            })
+        }
+        fn client(&self) -> CoreResult<PooledClient<'_>> {
+            self.checkout(ConnectionKind::Foreground)
+        }
+        pub fn renewal_client(&self) -> CoreResult<PooledClient<'_>> {
+            self.checkout(ConnectionKind::Renewal)
         }
         fn scoped<T>(
             &self,
@@ -122,11 +263,6 @@ mod enabled {
             tx.query_one("SELECT set_config('nextral.tenant_id',$1,true),set_config('nextral.user_id',$2,true)",&[&tenant,&user]).map_err(db)?;
             let value = f(&mut tx)?;
             tx.commit().map_err(db)?;
-            if let Ok(mut pool) = self.pool.lock() {
-                if pool.len() < 10 {
-                    pool.push(client);
-                }
-            }
             Ok(value)
         }
         pub fn migration_sql(&self) -> &'static str {
@@ -452,6 +588,202 @@ mod enabled {
                 Self::outbox_write(tx, &r.tenant_id, "memory.sync", &r.id, &plan)
             })
         }
+        pub fn query_memories(
+            &self,
+            request: &crate::memory::MemoryQuery,
+        ) -> CoreResult<crate::memory::MemoryPage> {
+            let mut req = request.clone();
+            req.validate()?;
+
+            let effective_privacy = if req.privacy_scope.is_empty() {
+                vec![
+                    crate::memory::PrivacyLevel::Private,
+                    crate::memory::PrivacyLevel::Shared,
+                    crate::memory::PrivacyLevel::Sensitive,
+                ]
+            } else {
+                req.privacy_scope.clone()
+            };
+
+            let fingerprint = crate::memory::compute_query_fingerprint(
+                &req.tenant_id,
+                &req.user_id,
+                &effective_privacy,
+                &req.filters,
+            );
+
+            let after = if let Some(ref c) = req.cursor {
+                Some(crate::memory::decode_cursor(c, &fingerprint)?)
+            } else {
+                None
+            };
+
+            self.scoped(&req.tenant_id, &req.user_id, |tx| {
+                let rows = tx.query(
+                    r#"SELECT m.id, m.session_id, m.memory_type, m.content_type, m.source_type, m.privacy_level,
+                            CASE
+                              WHEN m.status = 'active' AND EXISTS (SELECT 1 FROM nextral_runtime_state s WHERE s.tenant_id = m.tenant_id AND s.key LIKE 'forgotten-source/' || m.user_id || '/%' AND m.source_message_ids ? substring(s.key from 'forgotten-source/[^/]+/(.*)'))
+                                THEN 'soft_deleted'
+                              ELSE m.status
+                            END AS effective_status,
+                            to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                            to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                            CASE
+                              WHEN EXISTS (SELECT 1 FROM nextral_runtime_state s WHERE s.tenant_id = m.tenant_id AND s.key LIKE 'forgotten-source/' || m.user_id || '/%' AND s.value->>'status' = 'redacted' AND m.source_message_ids ? substring(s.key from 'forgotten-source/[^/]+/(.*)'))
+                                THEN '[redacted]'
+                              ELSE left(m.content, 256)
+                            END AS content_preview,
+                            m.tags, m.entities
+                     FROM nextral_memories m
+                     WHERE m.tenant_id = $1 AND m.user_id = $2
+                     ORDER BY m.created_at DESC, m.id DESC"#,
+                    &[&req.tenant_id, &req.user_id],
+                ).map_err(db)?;
+
+                let mut candidates = Vec::new();
+                for r in rows {
+                    let id: String = r.get(0);
+                    let session_id: Option<String> = r.get(1);
+                    let memory_type: String = r.get(2);
+                    let content_type: String = r.get(3);
+                    let source_type: String = r.get(4);
+                    let privacy_level_str: String = r.get(5);
+                    let effective_status_str: String = r.get(6);
+                    let created_at: String = r.get(7);
+                    let updated_at: String = r.get(8);
+                    let content_preview: String = r.get(9);
+                    let tags: Vec<String> = serde_json::from_value(r.get(10)).unwrap_or_default();
+                    let entities: Vec<String> = serde_json::from_value(r.get(11)).unwrap_or_default();
+
+                    let privacy_level: crate::memory::PrivacyLevel = serde_json::from_value(serde_json::Value::String(privacy_level_str))
+                        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+                    let status: crate::memory::MemoryStatus = serde_json::from_value(serde_json::Value::String(effective_status_str))
+                        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+                    if !effective_privacy.contains(&privacy_level) {
+                        continue;
+                    }
+
+                    if let Some(ref types) = req.filters.memory_types {
+                        let parsed_mt: Result<crate::memory::MemoryType, _> = serde_json::from_value(serde_json::Value::String(memory_type.clone()));
+                        if let Ok(ref mt) = parsed_mt {
+                            if !types.is_empty() && !types.contains(mt) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref types) = req.filters.content_types {
+                        let parsed_ct: Result<crate::memory::ContentType, _> = serde_json::from_value(serde_json::Value::String(content_type.clone()));
+                        if let Ok(ref ct) = parsed_ct {
+                            if !types.is_empty() && !types.contains(ct) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref types) = req.filters.source_types {
+                        let parsed_st: Result<crate::memory::SourceType, _> = serde_json::from_value(serde_json::Value::String(source_type.clone()));
+                        if let Ok(ref st) = parsed_st {
+                            if !types.is_empty() && !types.contains(st) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref sid) = req.filters.session_id {
+                        if session_id.as_deref() != Some(sid.as_str()) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref tags_any) = req.filters.tags_any {
+                        if !tags_any.is_empty() && !tags_any.iter().any(|t| tags.contains(t)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref tags_all) = req.filters.tags_all {
+                        if !tags_all.iter().all(|t| tags.contains(t)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref entities_any) = req.filters.entities_any {
+                        if !entities_any.is_empty() && !entities_any.iter().any(|e| entities.contains(e)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref entities_all) = req.filters.entities_all {
+                        if !entities_all.iter().all(|e| entities.contains(e)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref gte) = req.filters.created_at_gte {
+                        if created_at.as_str() < gte.as_str() {
+                            continue;
+                        }
+                    }
+                    if let Some(ref lt) = req.filters.created_at_lt {
+                        if created_at.as_str() >= lt.as_str() {
+                            continue;
+                        }
+                    }
+
+                    let effective_statuses = req.filters.statuses.as_ref().filter(|s| !s.is_empty());
+                    let status_matched = match effective_statuses {
+                        Some(statuses) => statuses.contains(&status),
+                        None => status == crate::memory::MemoryStatus::Active,
+                    };
+                    if !status_matched {
+                        continue;
+                    }
+
+                    let mem_summary = crate::memory::MemorySummary {
+                        id,
+                        tenant_id: req.tenant_id.clone(),
+                        user_id: req.user_id.clone(),
+                        session_id,
+                        memory_type: serde_json::from_value(serde_json::Value::String(memory_type)).unwrap_or(crate::memory::MemoryType::Semantic),
+                        content_type: serde_json::from_value(serde_json::Value::String(content_type)).unwrap_or(crate::memory::ContentType::Fact),
+                        source_type: serde_json::from_value(serde_json::Value::String(source_type)).unwrap_or(crate::memory::SourceType::Manual),
+                        privacy_level,
+                        status,
+                        importance_score: 0.0,
+                        confidence_score: None,
+                        created_at,
+                        updated_at,
+                        preview: content_preview.clone(),
+                        content_preview: content_preview.clone(),
+                        content: content_preview,
+                        source_message_ids: Vec::new(),
+                        entities,
+                        tags,
+                        embedding: None,
+                        embedding_dim: None,
+                        embedding_model: None,
+                        access_count: 0,
+                        last_accessed_at: None,
+                    };
+                    candidates.push(mem_summary);
+                }
+
+                if let Some((after_created_at, after_id)) = after {
+                    candidates.retain(|r| {
+                        r.created_at < after_created_at || (r.created_at == after_created_at && r.id < after_id)
+                    });
+                }
+
+                let has_next = candidates.len() > req.limit;
+                let items: Vec<_> = candidates.into_iter().take(req.limit).collect();
+                let next_cursor = if has_next {
+                    if let Some(last) = items.last() {
+                        Some(crate::memory::encode_cursor(&last.created_at, &last.id, &fingerprint))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                Ok(crate::memory::MemoryPage { items, next_cursor })
+            })
+        }
+
         pub fn list_memories(&self, s: &TenantUserScope) -> CoreResult<Vec<MemoryRecord>> {
             self.scoped(&s.tenant_id,&s.user_id,|tx|tx.query("SELECT record_json FROM nextral_memories WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at,id",&[&s.tenant_id,&s.user_id]).map_err(db)?.into_iter().map(|r|serde_json::from_value(r.get(0)).map_err(CoreError::from)).collect())
         }
@@ -622,6 +954,317 @@ mod enabled {
             );
             Ok(())
         }
+        pub fn claim_fenced(
+            &self,
+            tenant: &str,
+            user: Option<&str>,
+            resource: crate::runtime::lifecycle::LeaseResource,
+            key: &str,
+            owner: &str,
+            lease_seconds: u64,
+        ) -> CoreResult<Option<crate::runtime::lifecycle::LeaseClaim>> {
+            self.scoped(tenant, user.unwrap_or(""), |tx| {
+                let rows = tx.query(
+                    "INSERT INTO nextral_runtime_state (tenant_id, key, value, locked_by, locked_until, lease_fence, updated_at) VALUES ($1, $2, '{}'::jsonb, $3, clock_timestamp() + ($4 || ' seconds')::interval, 1, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET locked_by = $3, locked_until = clock_timestamp() + ($4 || ' seconds')::interval, lease_fence = nextral_runtime_state.lease_fence + 1, updated_at = clock_timestamp() WHERE nextral_runtime_state.locked_until IS NULL OR nextral_runtime_state.locked_until < clock_timestamp() OR nextral_runtime_state.locked_by = $3 RETURNING lease_fence",
+                    &[&tenant, &key, &owner, &(lease_seconds as i64)],
+                ).map_err(db)?;
+                if let Some(row) = rows.first() {
+                    let fence: i64 = row.get(0);
+                    Ok(Some(crate::runtime::lifecycle::LeaseClaim {
+                        tenant_id: tenant.to_string(),
+                        user_id: user.map(str::to_string),
+                        resource,
+                        key: key.to_string(),
+                        owner: owner.to_string(),
+                        fence: fence as u64,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+
+        pub fn renew_fenced(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            lease_seconds: u64,
+        ) -> CoreResult<bool> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let rows = tx.execute(
+                    "UPDATE nextral_runtime_state SET locked_until = clock_timestamp() + ($4 || ' seconds')::interval, updated_at = clock_timestamp() WHERE tenant_id = $1 AND key = $2 AND locked_by = $3 AND lease_fence = $5 AND locked_until > clock_timestamp()",
+                    &[&claim.tenant_id, &claim.key, &claim.owner, &(lease_seconds as i64), &(claim.fence as i64)],
+                ).map_err(db)?;
+                Ok(rows > 0)
+            })
+        }
+
+        pub fn release_fenced(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+        ) -> CoreResult<()> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                tx.execute(
+                    "UPDATE nextral_runtime_state SET locked_by = NULL, locked_until = NULL, updated_at = clock_timestamp() WHERE tenant_id = $1 AND key = $2 AND locked_by = $3 AND lease_fence = $4",
+                    &[&claim.tenant_id, &claim.key, &claim.owner, &(claim.fence as i64)],
+                ).map_err(db)?;
+                Ok(())
+            })
+        }
+
+        pub fn save_guarded(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            target_key: &str,
+            value: &Value,
+        ) -> CoreResult<crate::runtime::lifecycle::GuardedWriteResult> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let lease_row = tx.query_opt(
+                    "SELECT locked_by, lease_fence, (locked_until IS NOT NULL AND locked_until > clock_timestamp()) FROM nextral_runtime_state WHERE tenant_id = $1 AND key = $2 FOR UPDATE",
+                    &[&claim.tenant_id, &claim.key],
+                ).map_err(db)?.ok_or_else(|| CoreError::LeaseLost("lease row not found".into()))?;
+
+                let locked_by: Option<String> = lease_row.get(0);
+                let fence: i64 = lease_row.get(1);
+                let valid: bool = lease_row.get(2);
+
+                if locked_by.as_deref() != Some(&claim.owner) || fence as u64 != claim.fence {
+                    return Err(CoreError::LeaseLost("lease fence or owner mismatch".into()));
+                }
+                if !valid {
+                    return Err(CoreError::LeaseLost("lease expired".into()));
+                }
+
+                let target_row = tx.query_opt(
+                    "SELECT value FROM nextral_runtime_state WHERE tenant_id = $1 AND key = $2 FOR UPDATE",
+                    &[&claim.tenant_id, &target_key],
+                ).map_err(db)?;
+
+                if let Some(row) = target_row {
+                    let existing: Value = row.get(0);
+                    if matches!(existing["status"].as_str(), Some("cancelled" | "completed" | "terminal_failed")) {
+                        return Ok(crate::runtime::lifecycle::GuardedWriteResult::Superseded(existing));
+                    }
+                }
+
+                tx.execute(
+                    "INSERT INTO nextral_runtime_state (tenant_id, key, value, updated_at) VALUES ($1, $2, $3, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET value = $3, updated_at = clock_timestamp()",
+                    &[&claim.tenant_id, &target_key, value],
+                ).map_err(db)?;
+
+                Ok(crate::runtime::lifecycle::GuardedWriteResult::Applied)
+            })
+        }
+
+        pub fn commit_reminder_delivery(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            state_key: &str,
+            state: &Value,
+            reminder: &ReminderRecord,
+            audits: &[AuditEvent],
+        ) -> CoreResult<()> {
+            self.scoped(&reminder.tenant_id, &reminder.user_id, |tx| {
+                let lease_row = tx.query_opt(
+                    "SELECT locked_by, lease_fence, (locked_until IS NOT NULL AND locked_until > clock_timestamp()) FROM nextral_runtime_state WHERE tenant_id=$1 AND key=$2 FOR UPDATE",
+                    &[&claim.tenant_id, &claim.key],
+                ).map_err(db)?.ok_or_else(|| CoreError::LeaseLost("lease row not found".into()))?;
+
+                let locked_by: Option<String> = lease_row.get(0);
+                let lease_fence: i64 = lease_row.get(1);
+                let valid: bool = lease_row.get(2);
+
+                if locked_by.as_deref() != Some(&claim.owner) || lease_fence as u64 != claim.fence {
+                    return Err(CoreError::LeaseLost("lease fence or owner mismatch".into()));
+                }
+                if !valid {
+                    return Err(CoreError::LeaseLost("lease expired".into()));
+                }
+
+                tx.execute(
+                    "INSERT INTO nextral_runtime_state(tenant_id, key, value, updated_at) VALUES($1, $2, $3, clock_timestamp()) ON CONFLICT (tenant_id, key) DO UPDATE SET value=$3, updated_at=clock_timestamp()",
+                    &[&reminder.tenant_id, &state_key, state],
+                ).map_err(db)?;
+
+                let reminder_json = serde_json::to_value(reminder)?;
+                let due = timestamp_seconds(&reminder.due_at)?;
+                let last = reminder.last_attempt_at.as_deref().map(timestamp_seconds).transpose()?;
+                let next = reminder.next_attempt_at.as_deref().map(timestamp_seconds).transpose()?;
+                let terminal = reminder.terminal_reason.as_ref().map(text).transpose()?;
+                tx.execute(
+                    "INSERT INTO nextral_reminders(id, tenant_id, user_id, source_memory_id, kind, title, details, due_at, timezone, priority, status, attempt_count, last_attempt_at, next_attempt_at, dedupe_key, created_at, updated_at, channel, allowed_channels, quiet_hours, expires_at, privacy_level, terminal_reason, last_error, record_json) VALUES ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8),$9,$10,$11,$12,to_timestamp($13),to_timestamp($14),$15,clock_timestamp(),clock_timestamp(),$16,$17,$18,to_timestamp($19),$20,$21,$22,$23) ON CONFLICT(tenant_id, id) DO UPDATE SET details=$7, due_at=to_timestamp($8), status=$11, attempt_count=$12, last_attempt_at=to_timestamp($13), next_attempt_at=to_timestamp($14), updated_at=clock_timestamp(), terminal_reason=$21, last_error=$22, record_json=$23",
+                    &[
+                        &reminder.id, &reminder.tenant_id, &reminder.user_id, &reminder.source_memory_id,
+                        &text(&reminder.kind)?, &reminder.title, &reminder.details, &due,
+                        &reminder.timezone, &text(&reminder.priority)?, &text(&reminder.status)?,
+                        &(reminder.attempt_count as i32), &last, &next, &reminder.dedupe_key,
+                        &reminder.channel, &reminder.allowed_channels, &reminder.quiet_hours.as_ref().map(serde_json::to_value).transpose()?,
+                        &reminder.expires_at.as_deref().map(timestamp_seconds).transpose()?,
+                        &text(&reminder.privacy_level)?, &terminal, &reminder.last_error, &reminder_json,
+                    ],
+                ).map_err(db)?;
+
+                for audit in audits {
+                    Self::audit_write(tx, &audit_write(audit)?)?;
+                }
+                Ok(())
+            })
+        }
+
+        pub fn job_enqueue(
+            &self,
+            job: &crate::runtime::prospective::LifecycleScheduledJob,
+        ) -> CoreResult<()> {
+            self.scoped(&job.request.tenant_id, &job.request.user_id, |tx| {
+                let req_json = serde_json::to_value(&job.request)?;
+                let next_due = timestamp_seconds(&job.next_attempt_at)?;
+                tx.execute(
+                    "INSERT INTO nextral_lifecycle_jobs (tenant_id, user_id, id, request, progress, status, next_attempt_at, attempts, updated_at, lease_fence) VALUES ($1, $2, $3, $4, '{}'::jsonb, $5, to_timestamp($6), $7, clock_timestamp(), 0) ON CONFLICT (tenant_id, user_id, id) DO NOTHING",
+                    &[&job.request.tenant_id, &job.request.user_id, &job.id, &req_json, &job.status, &next_due, &(job.attempts as i32)],
+                ).map_err(db)?;
+                Ok(())
+            })
+        }
+
+        pub fn job_get(
+            &self,
+            tenant: &str,
+            user: &str,
+            id: &str,
+        ) -> CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>> {
+            self.scoped(tenant, user, |tx| {
+                let row = tx.query_opt(
+                    "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+                    &[&tenant, &user, &id],
+                ).map_err(db)?;
+                if let Some(r) = row {
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    Ok(Some(crate::runtime::prospective::LifecycleScheduledJob {
+                        id: r.get(0),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+
+        pub fn job_list(
+            &self,
+            tenant: &str,
+            user: &str,
+        ) -> CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>> {
+            self.scoped(tenant, user, |tx| {
+                let rows = tx.query(
+                    "SELECT id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 ORDER BY next_attempt_at ASC, id ASC",
+                    &[&tenant, &user],
+                ).map_err(db)?;
+                let mut jobs = Vec::new();
+                for r in rows {
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    jobs.push(crate::runtime::prospective::LifecycleScheduledJob {
+                        id: r.get(0),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    });
+                }
+                Ok(jobs)
+            })
+        }
+
+        pub fn job_claim_due(
+            &self,
+            tenant: &str,
+            user: &str,
+            owner: &str,
+            now_nanos: u128,
+            limit: usize,
+            lease_seconds: u64,
+        ) -> CoreResult<
+            Vec<(
+                crate::runtime::prospective::LifecycleScheduledJob,
+                crate::runtime::lifecycle::LeaseClaim,
+            )>,
+        > {
+            let due_epoch = (now_nanos / 1_000_000_000) as f64;
+            self.scoped(tenant, user, |tx| {
+                let rows = tx.query(
+                    "UPDATE nextral_lifecycle_jobs SET status='running', locked_by=$3, locked_until=clock_timestamp() + ($4 || ' seconds')::interval, lease_fence=nextral_lifecycle_jobs.lease_fence + 1, updated_at=clock_timestamp() WHERE (tenant_id, user_id, id) IN (SELECT tenant_id, user_id, id FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND status IN ('queued', 'running', 'retry_pending') AND (locked_until IS NULL OR locked_until < clock_timestamp()) AND next_attempt_at <= to_timestamp($5) ORDER BY next_attempt_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT $6) RETURNING id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error, lease_fence",
+                    &[&tenant, &user, &owner, &(lease_seconds as i64), &due_epoch, &(limit as i64)],
+                ).map_err(db)?;
+
+                let mut results = Vec::new();
+                for r in rows {
+                    let id: String = r.get(0);
+                    let req: crate::runtime::prospective::LifecycleJobRequest = serde_json::from_value(r.get(1))?;
+                    let due: i64 = r.get(4);
+                    let created: i64 = r.get(5);
+                    let updated: i64 = r.get(6);
+                    let fence: i64 = r.get(9);
+                    let job = crate::runtime::prospective::LifecycleScheduledJob {
+                        id: id.clone(),
+                        request: req,
+                        status: r.get(2),
+                        attempts: r.get::<_, i32>(3) as u32,
+                        next_attempt_at: due.to_string(),
+                        created_at: created.to_string(),
+                        updated_at: updated.to_string(),
+                        completed_memory_ids: r.get::<_, Option<Vec<String>>>(7).unwrap_or_default(),
+                        last_error: r.get(8),
+                    };
+                    let claim = crate::runtime::lifecycle::LeaseClaim {
+                        tenant_id: tenant.to_string(),
+                        user_id: Some(user.to_string()),
+                        resource: crate::runtime::lifecycle::LeaseResource::LifecycleJob,
+                        key: id,
+                        owner: owner.to_string(),
+                        fence: fence as u64,
+                    };
+                    results.push((job, claim));
+                }
+                Ok(results)
+            })
+        }
+
+        pub fn job_save_guarded(
+            &self,
+            claim: &crate::runtime::lifecycle::LeaseClaim,
+            job: &crate::runtime::prospective::LifecycleScheduledJob,
+        ) -> CoreResult<()> {
+            self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
+                let due = timestamp_seconds(&job.next_attempt_at)?;
+                let rows = tx.execute(
+                    "UPDATE nextral_lifecycle_jobs SET status=$4, next_attempt_at=to_timestamp($5), attempts=$6, updated_at=clock_timestamp(), completed_memory_ids=$7, last_error=$8, locked_by=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled', 'retry_pending', 'queued') THEN NULL ELSE locked_by END, locked_until=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled', 'retry_pending', 'queued') THEN NULL ELSE locked_until END WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND locked_by=$9 AND lease_fence=$10 AND locked_until > clock_timestamp()",
+                    &[
+                        &claim.tenant_id, &claim.user_id.as_deref().unwrap_or(""), &claim.key,
+                        &job.status, &due, &(job.attempts as i32), &job.completed_memory_ids,
+                        &job.last_error, &claim.owner, &(claim.fence as i64),
+                    ],
+                ).map_err(db)?;
+                if rows == 0 {
+                    return Err(CoreError::LeaseLost("lifecycle job lease expired or lost".into()));
+                }
+                Ok(())
+            })
+        }
         pub fn cutover(
             &self,
             tenant: &str,
@@ -674,7 +1317,7 @@ mod enabled {
     }
    }
    let payload=json!({"record":memory,"nodes":[],"edges":[]});
-   tx.execute("UPDATE nextral_outbox_events SET payload=$3 WHERE tenant_id=$1 AND aggregate_id=$2",&[&s.tenant_id,&memory.id,&payload]).map_err(db)?;
+   tx.execute("UPDATE nextral_outbox_events SET payload=$3 WHERE tenant_id=$1 AND aggregate_id=$2 AND event_type IN ('memory.sync', 'graph.replay')",&[&s.tenant_id,&memory.id,&payload]).map_err(db)?;
    Ok(())
   })
         }
