@@ -64,7 +64,7 @@ impl TestMemoryStore {
                 if record.status == MemoryStatus::Active {
                     record.status = MemoryStatus::SoftDeleted;
                 }
-                if tombstone["redact"].as_bool() == Some(true) {
+                if tombstone["redact"].as_bool() == Some(true) || tombstone["status"].as_str() == Some("redacted") {
                     record.content = "[redacted]".into();
                     record.entities.clear();
                     record.tags.clear();
@@ -147,8 +147,24 @@ impl MemoryIndexStore for TestMemoryStore {
         _query_vector: Option<&[f32]>,
         top_k: usize,
         privacy_scope: &[PrivacyLevel],
+        filters: Option<&crate::memory::MemoryFilters>,
     ) -> CoreResult<Vec<(String, f32)>> {
-        Ok(self.vector_search(tenant_id, user_id, query, top_k, privacy_scope))
+        let hits = self.vector_search(tenant_id, user_id, query, top_k * 2, privacy_scope);
+        if let Some(filters) = filters {
+            let mut filtered = Vec::new();
+            for (id, score) in hits {
+                if let Some(record) = self.memories.iter().find(|m| m.tenant_id == tenant_id && m.user_id == user_id && m.id == id) {
+                    let protected = self.protect_record(record.clone());
+                    if filters.matches(&protected) {
+                        filtered.push((id, score));
+                    }
+                }
+            }
+            filtered.truncate(top_k);
+            Ok(filtered)
+        } else {
+            Ok(hits.into_iter().take(top_k).collect())
+        }
     }
     fn commit_ingestion(
         &mut self,
@@ -304,6 +320,85 @@ impl MemoryIndexStore for TestMemoryStore {
             .map(|record| self.protect_record(record.clone()))
             .filter(|record| record.status == MemoryStatus::Active)
             .collect())
+    }
+    fn query_memories(
+        &self,
+        request: &crate::memory::MemoryQuery,
+    ) -> CoreResult<crate::memory::MemoryPage> {
+        let mut req = request.clone();
+        req.validate()?;
+
+        let effective_privacy = if req.privacy_scope.is_empty() {
+            vec![
+                crate::memory::PrivacyLevel::Private,
+                crate::memory::PrivacyLevel::Shared,
+                crate::memory::PrivacyLevel::Sensitive,
+            ]
+        } else {
+            req.privacy_scope.clone()
+        };
+
+        let fingerprint = crate::memory::compute_query_fingerprint(
+            &req.tenant_id,
+            &req.user_id,
+            &effective_privacy,
+            &req.filters,
+        );
+
+        let after = if let Some(ref c) = req.cursor {
+            Some(crate::memory::decode_cursor(c, &fingerprint)?)
+        } else {
+            None
+        };
+
+        let mut candidates = Vec::new();
+        for record in self
+            .memories
+            .iter()
+            .filter(|r| r.tenant_id == req.tenant_id && r.user_id == req.user_id)
+        {
+            let protected = self.protect_record(record.clone());
+            if !effective_privacy.contains(&protected.privacy_level) {
+                continue;
+            }
+            if !req.filters.matches(&protected) {
+                continue;
+            }
+            candidates.push(protected);
+        }
+
+        candidates.sort_by(|a, b| {
+            let a_time = crate::memory::normalize_rfc3339_micros(&a.created_at).unwrap_or_else(|_| a.created_at.clone());
+            let b_time = crate::memory::normalize_rfc3339_micros(&b.created_at).unwrap_or_else(|_| b.created_at.clone());
+            b_time.cmp(&a_time).then(b.id.cmp(&a.id))
+        });
+
+        if let Some((after_created_at, after_id)) = after {
+            candidates.retain(|r| {
+                let r_time = crate::memory::normalize_rfc3339_micros(&r.created_at).unwrap_or_else(|_| r.created_at.clone());
+                r_time < after_created_at || (r_time == after_created_at && r.id < after_id)
+            });
+        }
+
+        let has_next = candidates.len() > req.limit;
+        let paged_records: Vec<_> = candidates.into_iter().take(req.limit).collect();
+        let next_cursor = if has_next {
+            if let Some(last) = paged_records.last() {
+                let last_time = crate::memory::normalize_rfc3339_micros(&last.created_at).unwrap_or_else(|_| last.created_at.clone());
+                Some(crate::memory::encode_cursor(&last_time, &last.id, &fingerprint))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let items = paged_records
+            .iter()
+            .map(|r| crate::memory::MemorySummary::from_record(r))
+            .collect();
+
+        Ok(crate::memory::MemoryPage { items, next_cursor })
     }
 
     fn list_memories(

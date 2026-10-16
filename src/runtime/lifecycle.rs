@@ -155,6 +155,7 @@ pub trait LifecycleStore {
         tenant: &str,
         user: &str,
         owner: &str,
+        now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
     ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, LeaseClaim)>>;

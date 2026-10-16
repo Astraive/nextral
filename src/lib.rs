@@ -1370,7 +1370,7 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     // === TESTMEMORYSTORE ===
@@ -2534,7 +2534,7 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     #[test]
@@ -2552,7 +2552,7 @@ mod tests {
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
+        assert!(v["items"].is_array());
     }
 
     #[test]
@@ -2577,14 +2577,14 @@ mod tests {
                 "tool": "nextral.memory.list",
                 "payload_json": serde_json::json!({
                     "tenant_id": "inactive_tenant", "user_id": "inactive_user",
-                    "include_inactive": true
+                    "filters": { "statuses": ["active", "soft_deleted"] }
                 }).to_string()
             })
             .to_string(),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(!v.as_array().unwrap().is_empty());
+        assert!(!v["items"].as_array().unwrap().is_empty());
     }
 
     // === ENV VAR SUBSTITUTION ===
@@ -2915,25 +2915,6 @@ mod tests {
         assert!(v.get("tag_count").is_some());
     }
 
-    #[test]
-    fn mcp_memory_search_by_tag_tool() {
-        let result = mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.search_by_tag",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u", "tag": "important"}).to_string()
-        }).to_string()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
-    }
-
-    #[test]
-    fn mcp_memory_search_by_entity_tool() {
-        let result = mcp_call_json(&serde_json::json!({
-            "tool": "nextral.memory.search_by_entity",
-            "payload_json": serde_json::json!({"tenant_id": "t", "user_id": "u", "entity": "PostgreSQL"}).to_string()
-        }).to_string()).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(v.is_array());
-    }
 
     // === FULL END-TO-END MEMORY LIFECYCLE TEST ===
 
@@ -3021,6 +3002,7 @@ mod tests {
                     importance: 0.2,
                     access: 0.1,
                 }),
+                filters: None,
             },
         )
         .unwrap();

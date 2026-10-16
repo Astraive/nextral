@@ -71,7 +71,7 @@ async fn independent_clients_execute_concurrently_without_global_lock() {
         .await
         .expect("list B");
     let list_b_json: serde_json::Value = serde_json::from_str(&list_b).unwrap();
-    assert_eq!(list_b_json.as_array().unwrap().len(), 0);
+    assert_eq!(list_b_json["items"].as_array().unwrap().len(), 0);
 
     // Closing client A does not stop or affect client B
     let report_a = client_a.close(Duration::from_secs(5)).await.expect("close A");
@@ -184,7 +184,7 @@ async fn admission_bounds_queue_and_rejection() {
         .await
         .unwrap();
     let list_json: serde_json::Value = serde_json::from_str(&list).unwrap();
-    assert_eq!(list_json.as_array().unwrap().len(), 0);
+    assert_eq!(list_json["items"].as_array().unwrap().len(), 0);
 
     let report = client.close(Duration::from_secs(5)).await.unwrap();
     assert!(report.drained);
@@ -265,7 +265,7 @@ async fn cancellation_before_dispatch_does_not_mutate() {
         .await
         .unwrap();
     let list_json: serde_json::Value = serde_json::from_str(&list).unwrap();
-    assert_eq!(list_json.as_array().unwrap().len(), 0);
+    assert_eq!(list_json["items"].as_array().unwrap().len(), 0);
 
     let report = client.close(Duration::from_secs(5)).await.unwrap();
     assert!(report.drained);

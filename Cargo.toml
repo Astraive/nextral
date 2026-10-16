@@ -43,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # 0.1.92 removes redundant must_use attributes from generated futures.
 async-trait = "0.1.92"
 sha2 = "0.10"
+base64 = "0.22"
 axum = "0.8"
 tower = { version = "0.5", features = ["limit", "timeout", "load-shed"] }
 tower-http = { version = "0.6", features = ["timeout", "limit"] }

@@ -788,6 +788,7 @@ fn in_quiet_hours(reminder: &ReminderRecord, now: u64) -> CoreResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::lifecycle::timestamp_epoch;
     #[test]
     fn overnight_quiet_hours_use_named_timezone() {
         let mut reminder = ReminderRecord::new(

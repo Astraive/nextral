@@ -32,6 +32,8 @@ pub struct VectorSearchRequest {
     pub query_vector: Vec<f32>,
     pub privacy_scope: Vec<PrivacyLevel>,
     pub top_k: usize,
+    #[serde(default)]
+    pub filters: Option<crate::memory::MemoryFilters>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

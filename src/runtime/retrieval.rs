@@ -28,6 +28,8 @@ pub struct RetrievalRequest {
     pub policy_version: Option<String>,
     pub trace_id: Option<String>,
     pub scoring_weights: Option<ScoringWeights>,
+    #[serde(default)]
+    pub filters: Option<crate::memory::MemoryFilters>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +128,7 @@ impl RetrievalRequest {
                 importance: 0.2,
                 access: 0.1,
             }),
+            filters: None,
         }
     }
 }
@@ -207,6 +210,7 @@ where
                 request.query_vector.as_deref(),
                 request.top_k_vector,
                 &privacy_scope,
+                request.filters.as_ref(),
             );
             (result, start.elapsed().as_millis() as u64)
         });
@@ -327,6 +331,7 @@ where
             || record.user_id != request.user_id
             || record.status != crate::memory::MemoryStatus::Active
             || !privacy_scope.contains(&record.privacy_level)
+            || request.filters.as_ref().map_or(false, |f| !f.matches(&record))
         {
             continue;
         }

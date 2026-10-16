@@ -826,6 +826,128 @@ impl ProductionStore {
         }
         Ok(json!({"completed":completed,"failed":failed}))
     }
+    pub fn index_repair(&self, tenant: &str, user: &str, limit: usize) -> CoreResult<Value> {
+        let route = self.route(tenant, user)?;
+        let claim = self.postgres.claim_fenced(
+            tenant,
+            Some(user),
+            crate::runtime::lifecycle::LeaseResource::RuntimeState,
+            &format!("privacy/{user}"),
+            "index_repair",
+            300,
+        )?.ok_or_else(|| CoreError::Conflict("user privacy lease contention".into()))?;
+
+        let res = (|| -> CoreResult<Value> {
+            let filter = json!({
+                "must": [
+                    { "key": "tenant_id", "match": { "value": tenant } },
+                    { "key": "user_id", "match": { "value": user } }
+                ]
+            });
+            let scroll_body = self.qdrant.call(
+                reqwest::Method::POST,
+                &format!("/collections/{}/points/scroll", route.collection),
+                Some(&json!({
+                    "filter": filter,
+                    "limit": limit,
+                    "with_vector": false,
+                    "with_payload": true,
+                })),
+            )?;
+            let points = scroll_body["result"]["points"].as_array().cloned().unwrap_or_default();
+            let mut checked = 0;
+            let mut updated = 0;
+            let mut removed = 0;
+
+            for point in &points {
+                checked += 1;
+                let payload = &point["payload"];
+                let memory_id = payload["memory_id"].as_str().unwrap_or("");
+                let point_id = &point["id"];
+                let is_legacy = payload.get("metadata_version").and_then(Value::as_u64).unwrap_or(0) == 0;
+
+                if is_legacy {
+                    let canonical = self.get_memory(tenant, user, memory_id)?;
+                    if let Some(record) = canonical {
+                        if record.status == crate::memory::MemoryStatus::Active {
+                            let micros = crate::runtime::lifecycle::timestamp_nanos(&record.created_at)? / 1000;
+                            let metadata = json!({
+                                "metadata_version": 1,
+                                "session_id": record.session_id,
+                                "source_type": serde_json::to_value(&record.source_type)?,
+                                "tags": record.tags,
+                                "entities": record.entities,
+                                "created_at": micros,
+                            });
+                            self.qdrant.call(
+                                reqwest::Method::POST,
+                                &format!("/collections/{}/points/payload?wait=true", route.collection),
+                                Some(&json!({
+                                    "payload": metadata,
+                                    "points": [point_id]
+                                })),
+                            )?;
+                            updated += 1;
+                        } else {
+                            self.qdrant.call(
+                                reqwest::Method::POST,
+                                &format!("/collections/{}/points/delete?wait=true", route.collection),
+                                Some(&json!({
+                                    "points": [point_id]
+                                })),
+                            )?;
+                            removed += 1;
+                        }
+                    } else {
+                        self.qdrant.call(
+                            reqwest::Method::POST,
+                            &format!("/collections/{}/points/delete?wait=true", route.collection),
+                            Some(&json!({
+                                "points": [point_id]
+                            })),
+                        )?;
+                        removed += 1;
+                    }
+                }
+            }
+
+            let remaining = if checked < limit {
+                0
+            } else {
+                let scroll_check = self.qdrant.call(
+                    reqwest::Method::POST,
+                    &format!("/collections/{}/points/scroll", route.collection),
+                    Some(&json!({
+                        "filter": {
+                            "must": [
+                                { "key": "tenant_id", "match": { "value": tenant } },
+                                { "key": "user_id", "match": { "value": user } }
+                            ],
+                            "must_not": [
+                                { "key": "metadata_version", "match": { "value": 1 } }
+                            ]
+                        },
+                        "limit": 1000,
+                        "with_vector": false,
+                        "with_payload": false,
+                    })),
+                )?;
+                scroll_check["result"]["points"].as_array().map_or(0, |pts| pts.len())
+            };
+            let complete = remaining == 0;
+            Ok(json!({
+                "checked": checked,
+                "updated": updated,
+                "removed": removed,
+                "remaining": remaining,
+                "complete": complete,
+            }))
+        })();
+
+        let _ = self.postgres.release_fenced(&claim);
+        res
+    }
+
     fn mutate(
         &self,
         r: &MemoryRecord,
@@ -898,6 +1020,7 @@ impl<'a> MemoryIndexStore for &'a ProductionStore {
         q: Option<&[f32]>,
         k: usize,
         p: &[PrivacyLevel],
+        filters: Option<&crate::memory::MemoryFilters>,
     ) -> CoreResult<Vec<(String, f32)>> {
         let route = self.route(t, u)?;
         let values = q.ok_or_else(|| CoreError::InvalidInput("query_vector required".into()))?;
@@ -910,6 +1033,7 @@ impl<'a> MemoryIndexStore for &'a ProductionStore {
                     query_vector: values.to_vec(),
                     privacy_scope: p.to_vec(),
                     top_k: k.min(1000),
+                    filters: filters.cloned(),
                 },
             )
             .map(|hits| hits.into_iter().map(|h| (h.memory_id, h.score)).collect())
@@ -979,6 +1103,12 @@ impl<'a> MemoryIndexStore for &'a ProductionStore {
     }
     fn get_active_memories(&self, t: &str, u: &str, ids: &[&str]) -> CoreResult<Vec<MemoryRecord>> {
         self.postgres.get_active_memories(&scope(t, u), ids)
+    }
+    fn query_memories(
+        &self,
+        request: &crate::memory::MemoryQuery,
+    ) -> CoreResult<crate::memory::MemoryPage> {
+        self.postgres.query_memories(request)
     }
     fn list_memories(
         &self,
@@ -1253,12 +1383,13 @@ dispatch!(MemoryIndexStore {
  prepare_retrieval(&Self,r:&mut crate::retrieval::RetrievalRequest)->CoreResult<()>;
  prepare_embedding(&Self,r:&mut MemoryRecord,v:Option<&[f32]>)->CoreResult<()>;
  ingestion_policy(&Self,p:&IngestionPolicy)->IngestionPolicy;
- vector_candidates(&Self,t:&str,u:&str,q:&str,v:Option<&[f32]>,k:usize,p:&[PrivacyLevel])->CoreResult<Vec<(String,f32)>>;
+ vector_candidates(&Self,t:&str,u:&str,q:&str,v:Option<&[f32]>,k:usize,p:&[PrivacyLevel],f:Option<&crate::memory::MemoryFilters>)->CoreResult<Vec<(String,f32)>>;
  commit_ingestion(&mut Self,r:MemoryRecord,n:Vec<GraphNode>,e:Vec<GraphEdge>,a:AuditEvent)->CoreResult<Vec<String>>;
  commit_graph_replay(&mut Self,r:&MemoryRecord,n:&[GraphNode],e:&[GraphEdge],a:&AuditEvent)->CoreResult<Vec<String>>;
  upsert_memory(&mut Self,r:MemoryRecord)->CoreResult<()>;
  get_memory(&Self,t:&str,u:&str,id:&str)->CoreResult<Option<MemoryRecord>>;
  get_active_memories(&Self,t:&str,u:&str,ids:&[&str])->CoreResult<Vec<MemoryRecord>>;
+ query_memories(&Self,request:&crate::memory::MemoryQuery)->CoreResult<crate::memory::MemoryPage>;
  list_memories(&Self,t:&str,u:&str,p:&[PrivacyLevel],inactive:bool)->CoreResult<Vec<MemoryRecord>>;
  update_memory(&mut Self,r:MemoryRecord)->CoreResult<()>;
  record_accesses(&mut Self,t:&str,u:&str,ids:&[&str])->CoreResult<()>;
@@ -1443,11 +1574,11 @@ impl LifecycleStore for TestMemoryStore {
         tenant: &str,
         user: &str,
         owner: &str,
+        now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
     ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
         let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
-        let now_nanos = crate::runtime::lifecycle::timestamp_nanos(&crate::memory::now_timestamp())?;
 
         let mut candidate_keys: Vec<(String, String, String)> = self
             .lifecycle_jobs
@@ -1503,7 +1634,7 @@ impl LifecycleStore for TestMemoryStore {
             return Err(CoreError::LeaseLost("job lease expired or lost".into()));
         }
         *existing = job.clone();
-        if matches!(job.status.as_str(), "completed" | "terminal_failed" | "cancelled") {
+        if matches!(job.status.as_str(), "completed" | "terminal_failed" | "cancelled" | "retry_pending" | "queued") {
             *locked_by = None;
             *locked_until = None;
         }
@@ -2152,10 +2283,11 @@ impl<'a> LifecycleStore for &'a ProductionStore {
         tenant: &str,
         user: &str,
         owner: &str,
+        now_nanos: u128,
         limit: usize,
         lease_seconds: u64,
     ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
-        self.postgres.job_claim_due(tenant, user, owner, limit, lease_seconds)
+        self.postgres.job_claim_due(tenant, user, owner, now_nanos, limit, lease_seconds)
     }
 
     fn lifecycle_job_save_guarded(
@@ -2189,7 +2321,7 @@ dispatch!(LifecycleStore {
  lifecycle_job_enqueue(&mut Self,j:&crate::runtime::prospective::LifecycleScheduledJob)->CoreResult<()>;
  lifecycle_job_get(&Self,t:&str,u:&str,id:&str)->CoreResult<Option<crate::runtime::prospective::LifecycleScheduledJob>>;
  lifecycle_job_list(&Self,t:&str,u:&str)->CoreResult<Vec<crate::runtime::prospective::LifecycleScheduledJob>>;
- lifecycle_job_claim_due(&mut Self,t:&str,u:&str,o:&str,limit:usize,l:u64)->CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob,crate::runtime::lifecycle::LeaseClaim)>>;
+ lifecycle_job_claim_due(&mut Self,t:&str,u:&str,o:&str,now_nanos:u128,limit:usize,l:u64)->CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob,crate::runtime::lifecycle::LeaseClaim)>>;
  lifecycle_job_save_guarded(&mut Self,c:&crate::runtime::lifecycle::LeaseClaim,j:&crate::runtime::prospective::LifecycleScheduledJob)->CoreResult<()>;
 });
 

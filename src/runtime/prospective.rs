@@ -177,6 +177,7 @@ where
         &request.tenant_id,
         &request.user_id,
         &owner,
+        now_nanos,
         request.limit,
         request.lease_seconds,
     )?;
@@ -593,11 +594,11 @@ mod tests {
             execute_lifecycle_jobs(&mut store, runner("160")).unwrap()[0].status,
             "terminal_failed"
         );
-        let value = store
-            .lifecycle_load("t", &job_key("u", &job.id))
+        let job = store
+            .lifecycle_job_get("t", "u", &job.id)
             .unwrap()
             .unwrap();
-        assert_eq!(value["attempts"], 2);
+        assert_eq!(job.attempts, 2);
     }
 
     fn fast_job(trigger: LifecycleTrigger) -> (crate::store::TestMemoryStore, LifecycleJobRequest) {

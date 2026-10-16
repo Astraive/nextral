@@ -82,7 +82,7 @@ impl QdrantAdapter {
         })?;
         Ok((status, body))
     }
-    fn call(&self, method: Method, path: &str, payload: Option<&Value>) -> CoreResult<Value> {
+    pub(crate) fn call(&self, method: Method, path: &str, payload: Option<&Value>) -> CoreResult<Value> {
         let (status, body) = self.request(method, path, payload)?;
         if !status.is_success() {
             return Err(store_failure(
@@ -391,6 +391,39 @@ impl QdrantPort for QdrantAdapter {
             .ok_or_else(|| CoreError::Serialization("invalid filter".into()))?;
         must.push(json!({"key":"status","match":{"value":"active"}}));
         must.push(json!({"key":"privacy_level","match":{"any":request.privacy_scope}}));
+        if let Some(ref filters) = request.filters {
+            if let Some(ref sid) = filters.session_id {
+                must.push(json!({"key": "session_id", "match": {"value": sid}}));
+            }
+            if let Some(ref st) = filters.source_types {
+                let any_st: Vec<String> = st.iter().map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_string()).collect();
+                must.push(json!({"key": "source_type", "match": {"any": any_st}}));
+            }
+            if let Some(ref tags_any) = filters.tags_any {
+                must.push(json!({"key": "tags", "match": {"any": tags_any}}));
+            }
+            if let Some(ref tags_all) = filters.tags_all {
+                for tag in tags_all {
+                    must.push(json!({"key": "tags", "match": {"value": tag}}));
+                }
+            }
+            if let Some(ref entities_any) = filters.entities_any {
+                must.push(json!({"key": "entities", "match": {"any": entities_any}}));
+            }
+            if let Some(ref entities_all) = filters.entities_all {
+                for entity in entities_all {
+                    must.push(json!({"key": "entities", "match": {"value": entity}}));
+                }
+            }
+            if let Some(ref gte) = filters.created_at_gte {
+                let micros = crate::runtime::lifecycle::timestamp_nanos(gte)? / 1000;
+                must.push(json!({"key": "created_at", "range": {"gte": micros}}));
+            }
+            if let Some(ref lt) = filters.created_at_lt {
+                let micros = crate::runtime::lifecycle::timestamp_nanos(lt)? / 1000;
+                must.push(json!({"key": "created_at", "range": {"lt": micros}}));
+            }
+        }
         let body=self.call(Method::POST,&format!("/collections/{collection}/points/search"),Some(&json!({"vector":request.query_vector,"limit":request.top_k,"with_payload":true,"filter":filter})))?;
         parse_hits(&body, request)
     }
@@ -542,6 +575,7 @@ mod tests {
             query_vector: vec![1.0],
             privacy_scope: vec![crate::memory::PrivacyLevel::Private],
             top_k: 1,
+            filters: None,
         };
         let mut body = json!({"result":[{"id":point_id("t","u","mem_1"),"score":0.5,"payload":{"tenant_id":"t","user_id":"u","memory_id":"mem_1","privacy_level":"private","status":"active"}}]});
         assert_eq!(parse_hits(&body, &request).unwrap()[0].memory_id, "mem_1");
@@ -609,6 +643,7 @@ mod tests {
             query_vector: vec![1.0, 0.0, 0.0],
             privacy_scope: vec![crate::memory::PrivacyLevel::Private],
             top_k: 5,
+            filters: None,
         };
         assert_eq!(
             adapter.search(&collection, &request).unwrap()[0].memory_id,

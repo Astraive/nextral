@@ -848,6 +848,7 @@ pub fn adapter_smoke_json(request_json: &str) -> Result<String, PackageError> {
             query_vector: request.qdrant_query_vector.clone(),
             privacy_scope: vec![crate::memory::PrivacyLevel::Private],
             top_k: 3,
+            filters: None,
         },
     )?;
     neo4j.merge_node(&crate::graph::GraphNode::new(
@@ -1006,7 +1007,7 @@ fn dispatch_tool_impl(
             let result = crate::ingestion::ingest_memory(store, decode!(IngestMemoryRequest))?;
             value!(result)
         }
-        "nextral.memory.retrieve" | "nextral.runtime.scored_search" => {
+        "nextral.memory.retrieve" => {
             let mut result = crate::retrieval::retrieve(store, decode!(RetrievalRequest))?;
             let control = load_control(store)?;
             result.decision_action = decision_for(&control.safety_policy, &result.severity);
@@ -1022,36 +1023,29 @@ fn dispatch_tool_impl(
             value!(store.get_memory(tenant, user, string_field("memory_id")?)?)
         }
         "nextral.memory.forget" => value!(forget_memory(store, decode!(ForgetMemoryRequest))?),
-        "nextral.memory.list"
-        | "nextral.memory.search_by_tag"
-        | "nextral.memory.search_by_entity" => {
-            let privacy = payload
-                .get("privacy_scope")
-                .map(|v| serde_json::from_value(v.clone()))
-                .transpose()
-                .map_err(invalid_json_input)?
-                .unwrap_or_else(|| {
-                    vec![
-                        crate::memory::PrivacyLevel::Private,
-                        crate::memory::PrivacyLevel::Shared,
-                        crate::memory::PrivacyLevel::Sensitive,
-                    ]
-                });
-            let mut records = store.list_memories(
-                tenant,
-                user,
-                &privacy,
-                payload["include_inactive"].as_bool().unwrap_or(false),
-            )?;
-            if tool == "nextral.memory.search_by_tag" {
-                let tag = string_field("tag")?;
-                records.retain(|r| r.has_tag(tag));
+        "nextral.memory.list" => {
+            let mut query = decode!(crate::memory::MemoryQuery);
+            query.tenant_id = tenant.to_string();
+            query.user_id = user.to_string();
+            let page = store.query_memories(&query)?;
+            value!(page)
+        }
+        "nextral.index.repair" => {
+            let limit = payload.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            if limit == 0 || limit > 1000 {
+                return Err(CoreError::InvalidInput("limit must be between 1 and 1000".into()).into());
             }
-            if tool == "nextral.memory.search_by_entity" {
-                let entity = string_field("entity")?;
-                records.retain(|r| r.has_entity(entity));
-            }
-            value!(records)
+            let res = match store {
+                RuntimeStore::Test(_) => serde_json::json!({
+                    "checked": 0,
+                    "updated": 0,
+                    "removed": 0,
+                    "remaining": 0,
+                    "complete": true,
+                }),
+                RuntimeStore::Production(p) => p.index_repair(tenant, user, limit)?,
+            };
+            value!(res)
         }
         "nextral.memory.update" => {
             let mut record = store

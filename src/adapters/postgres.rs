@@ -13,7 +13,7 @@ mod enabled {
     use sha2::{Digest, Sha256};
     use std::sync::{Arc, Condvar, Mutex};
 
-    const MIGRATIONS: [(&str, &str); 3] = [
+    const MIGRATIONS: [(&str, &str); 4] = [
         (
             "0001",
             include_str!("../../migrations/postgres/0001_core_schema.sql"),
@@ -25,6 +25,10 @@ mod enabled {
         (
             "0003",
             include_str!("../../migrations/postgres/0003_lifecycle_execution.sql"),
+        ),
+        (
+            "0004",
+            include_str!("../../migrations/postgres/0004_memory_query_indexes.sql"),
         ),
     ];
     const MIGRATION_HISTORY: &str =
@@ -565,6 +569,185 @@ mod enabled {
                 Self::outbox_write(tx, &r.tenant_id, "memory.sync", &r.id, &plan)
             })
         }
+        pub fn query_memories(&self, request: &crate::memory::MemoryQuery) -> CoreResult<crate::memory::MemoryPage> {
+            let mut req = request.clone();
+            req.validate()?;
+
+            let effective_privacy = if req.privacy_scope.is_empty() {
+                vec![
+                    crate::memory::PrivacyLevel::Private,
+                    crate::memory::PrivacyLevel::Shared,
+                    crate::memory::PrivacyLevel::Sensitive,
+                ]
+            } else {
+                req.privacy_scope.clone()
+            };
+
+            let fingerprint = crate::memory::compute_query_fingerprint(
+                &req.tenant_id,
+                &req.user_id,
+                &effective_privacy,
+                &req.filters,
+            );
+
+            let after = if let Some(ref c) = req.cursor {
+                Some(crate::memory::decode_cursor(c, &fingerprint)?)
+            } else {
+                None
+            };
+
+            self.scoped(&req.tenant_id, &req.user_id, |tx| {
+                let rows = tx.query(
+                    r#"SELECT m.id, m.session_id, m.memory_type, m.content_type, m.source_type, m.privacy_level,
+                            CASE
+                              WHEN m.status = 'active' AND EXISTS (SELECT 1 FROM nextral_runtime_state s WHERE s.tenant_id = m.tenant_id AND s.key LIKE 'forgotten-source/' || m.user_id || '/%' AND m.source_message_ids ? substring(s.key from 'forgotten-source/[^/]+/(.*)'))
+                                THEN 'soft_deleted'
+                              ELSE m.status
+                            END AS effective_status,
+                            to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                            to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                            CASE
+                              WHEN EXISTS (SELECT 1 FROM nextral_runtime_state s WHERE s.tenant_id = m.tenant_id AND s.key LIKE 'forgotten-source/' || m.user_id || '/%' AND s.value->>'status' = 'redacted' AND m.source_message_ids ? substring(s.key from 'forgotten-source/[^/]+/(.*)'))
+                                THEN '[redacted]'
+                              ELSE left(m.content, 256)
+                            END AS content_preview,
+                            m.tags, m.entities
+                     FROM nextral_memories m
+                     WHERE m.tenant_id = $1 AND m.user_id = $2
+                     ORDER BY m.created_at DESC, m.id DESC"#,
+                    &[&req.tenant_id, &req.user_id],
+                ).map_err(db)?;
+
+                let mut candidates = Vec::new();
+                for r in rows {
+                    let id: String = r.get(0);
+                    let session_id: Option<String> = r.get(1);
+                    let memory_type: String = r.get(2);
+                    let content_type: String = r.get(3);
+                    let source_type: String = r.get(4);
+                    let privacy_level_str: String = r.get(5);
+                    let effective_status_str: String = r.get(6);
+                    let created_at: String = r.get(7);
+                    let updated_at: String = r.get(8);
+                    let content_preview: String = r.get(9);
+                    let tags: Vec<String> = serde_json::from_value(r.get(10)).unwrap_or_default();
+                    let entities: Vec<String> = serde_json::from_value(r.get(11)).unwrap_or_default();
+
+                    let privacy_level: crate::memory::PrivacyLevel = serde_json::from_value(serde_json::Value::String(privacy_level_str))
+                        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+                    let status: crate::memory::MemoryStatus = serde_json::from_value(serde_json::Value::String(effective_status_str))
+                        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+                    if !effective_privacy.contains(&privacy_level) {
+                        continue;
+                    }
+
+                    if let Some(ref types) = req.filters.memory_types {
+                        let parsed_mt: Result<crate::memory::MemoryType, _> = serde_json::from_value(serde_json::Value::String(memory_type.clone()));
+                        if let Ok(ref mt) = parsed_mt {
+                            if !types.is_empty() && !types.contains(mt) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref types) = req.filters.content_types {
+                        let parsed_ct: Result<crate::memory::ContentType, _> = serde_json::from_value(serde_json::Value::String(content_type.clone()));
+                        if let Ok(ref ct) = parsed_ct {
+                            if !types.is_empty() && !types.contains(ct) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref types) = req.filters.source_types {
+                        let parsed_st: Result<crate::memory::SourceType, _> = serde_json::from_value(serde_json::Value::String(source_type.clone()));
+                        if let Ok(ref st) = parsed_st {
+                            if !types.is_empty() && !types.contains(st) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref sid) = req.filters.session_id {
+                        if session_id.as_deref() != Some(sid.as_str()) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref tags_any) = req.filters.tags_any {
+                        if !tags_any.is_empty() && !tags_any.iter().any(|t| tags.contains(t)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref tags_all) = req.filters.tags_all {
+                        if !tags_all.iter().all(|t| tags.contains(t)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref entities_any) = req.filters.entities_any {
+                        if !entities_any.is_empty() && !entities_any.iter().any(|e| entities.contains(e)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref entities_all) = req.filters.entities_all {
+                        if !entities_all.iter().all(|e| entities.contains(e)) {
+                            continue;
+                        }
+                    }
+                    if let Some(ref gte) = req.filters.created_at_gte {
+                        if created_at.as_str() < gte.as_str() {
+                            continue;
+                        }
+                    }
+                    if let Some(ref lt) = req.filters.created_at_lt {
+                        if created_at.as_str() >= lt.as_str() {
+                            continue;
+                        }
+                    }
+
+                    let effective_statuses = req.filters.statuses.as_ref().filter(|s| !s.is_empty());
+                    let status_matched = match effective_statuses {
+                        Some(statuses) => statuses.contains(&status),
+                        None => status == crate::memory::MemoryStatus::Active,
+                    };
+                    if !status_matched {
+                        continue;
+                    }
+
+                    let mem_summary = crate::memory::MemorySummary {
+                        id,
+                        session_id,
+                        memory_type: serde_json::from_value(serde_json::Value::String(memory_type)).unwrap_or(crate::memory::MemoryType::Semantic),
+                        content_type: serde_json::from_value(serde_json::Value::String(content_type)).unwrap_or(crate::memory::ContentType::Fact),
+                        source_type: serde_json::from_value(serde_json::Value::String(source_type)).unwrap_or(crate::memory::SourceType::Manual),
+                        privacy_level,
+                        status,
+                        created_at,
+                        updated_at,
+                        content_preview,
+                    };
+                    candidates.push(mem_summary);
+                }
+
+                if let Some((after_created_at, after_id)) = after {
+                    candidates.retain(|r| {
+                        r.created_at < after_created_at || (r.created_at == after_created_at && r.id < after_id)
+                    });
+                }
+
+                let has_next = candidates.len() > req.limit;
+                let items: Vec<_> = candidates.into_iter().take(req.limit).collect();
+                let next_cursor = if has_next {
+                    if let Some(last) = items.last() {
+                        Some(crate::memory::encode_cursor(&last.created_at, &last.id, &fingerprint))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                Ok(crate::memory::MemoryPage { items, next_cursor })
+            })
+        }
+        
         pub fn list_memories(&self, s: &TenantUserScope) -> CoreResult<Vec<MemoryRecord>> {
             self.scoped(&s.tenant_id,&s.user_id,|tx|tx.query("SELECT record_json FROM nextral_memories WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at,id",&[&s.tenant_id,&s.user_id]).map_err(db)?.into_iter().map(|r|serde_json::from_value(r.get(0)).map_err(CoreError::from)).collect())
         }
@@ -964,13 +1147,15 @@ mod enabled {
             tenant: &str,
             user: &str,
             owner: &str,
+            now_nanos: u128,
             limit: usize,
             lease_seconds: u64,
         ) -> CoreResult<Vec<(crate::runtime::prospective::LifecycleScheduledJob, crate::runtime::lifecycle::LeaseClaim)>> {
+            let due_epoch = (now_nanos / 1_000_000_000) as f64;
             self.scoped(tenant, user, |tx| {
                 let rows = tx.query(
-                    "UPDATE nextral_lifecycle_jobs SET status='running', locked_by=$3, locked_until=clock_timestamp() + ($4 || ' seconds')::interval, lease_fence=nextral_lifecycle_jobs.lease_fence + 1, updated_at=clock_timestamp() WHERE (tenant_id, user_id, id) IN (SELECT tenant_id, user_id, id FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND status IN ('queued', 'running', 'retry_pending') AND (locked_until IS NULL OR locked_until < clock_timestamp()) AND next_attempt_at <= clock_timestamp() ORDER BY next_attempt_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT $5) RETURNING id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error, lease_fence",
-                    &[&tenant, &user, &owner, &(lease_seconds as i64), &(limit as i64)],
+                    "UPDATE nextral_lifecycle_jobs SET status='running', locked_by=$3, locked_until=clock_timestamp() + ($4 || ' seconds')::interval, lease_fence=nextral_lifecycle_jobs.lease_fence + 1, updated_at=clock_timestamp() WHERE (tenant_id, user_id, id) IN (SELECT tenant_id, user_id, id FROM nextral_lifecycle_jobs WHERE tenant_id=$1 AND user_id=$2 AND status IN ('queued', 'running', 'retry_pending') AND (locked_until IS NULL OR locked_until < clock_timestamp()) AND next_attempt_at <= to_timestamp($5) ORDER BY next_attempt_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT $6) RETURNING id, request, status, attempts, extract(epoch from next_attempt_at)::bigint, extract(epoch from created_at)::bigint, extract(epoch from updated_at)::bigint, completed_memory_ids, last_error, lease_fence",
+                    &[&tenant, &user, &owner, &(lease_seconds as i64), &due_epoch, &(limit as i64)],
                 ).map_err(db)?;
 
                 let mut results = Vec::new();
@@ -1014,7 +1199,7 @@ mod enabled {
             self.scoped(&claim.tenant_id, claim.user_id.as_deref().unwrap_or(""), |tx| {
                 let due = timestamp_seconds(&job.next_attempt_at)?;
                 let rows = tx.execute(
-                    "UPDATE nextral_lifecycle_jobs SET status=$4, next_attempt_at=to_timestamp($5), attempts=$6, updated_at=clock_timestamp(), completed_memory_ids=$7, last_error=$8, locked_by=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled') THEN NULL ELSE locked_by END, locked_until=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled') THEN NULL ELSE locked_until END WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND locked_by=$9 AND lease_fence=$10 AND locked_until > clock_timestamp()",
+                    "UPDATE nextral_lifecycle_jobs SET status=$4, next_attempt_at=to_timestamp($5), attempts=$6, updated_at=clock_timestamp(), completed_memory_ids=$7, last_error=$8, locked_by=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled', 'retry_pending', 'queued') THEN NULL ELSE locked_by END, locked_until=CASE WHEN $4 IN ('completed', 'terminal_failed', 'cancelled', 'retry_pending', 'queued') THEN NULL ELSE locked_until END WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND locked_by=$9 AND lease_fence=$10 AND locked_until > clock_timestamp()",
                     &[
                         &claim.tenant_id, &claim.user_id.as_deref().unwrap_or(""), &claim.key,
                         &job.status, &due, &(job.attempts as i32), &job.completed_memory_ids,
@@ -1079,7 +1264,7 @@ mod enabled {
     }
    }
    let payload=json!({"record":memory,"nodes":[],"edges":[]});
-   tx.execute("UPDATE nextral_outbox_events SET payload=$3 WHERE tenant_id=$1 AND aggregate_id=$2",&[&s.tenant_id,&memory.id,&payload]).map_err(db)?;
+   tx.execute("UPDATE nextral_outbox_events SET payload=$3 WHERE tenant_id=$1 AND aggregate_id=$2 AND event_type IN ('memory.sync', 'graph.replay')",&[&s.tenant_id,&memory.id,&payload]).map_err(db)?;
    Ok(())
   })
         }

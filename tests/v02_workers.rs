@@ -49,8 +49,8 @@ async fn two_workers_racing_for_one_due_job_claim_only_one_lease() {
     let mut store_a = client.store().clone();
     let mut store_b = client.store().clone();
 
-    let claims_a = store_a.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_a", 10, 300).unwrap();
-    let claims_b = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_b", 10, 300).unwrap();
+    let claims_a = store_a.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_a", 1800000000_000000000, 10, 300).unwrap();
+    let claims_b = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", "worker_b", 1800000000_000000000, 10, 300).unwrap();
 
     // Exactly one worker got the claim
     assert_eq!(claims_a.len() + claims_b.len(), 1);
@@ -79,7 +79,7 @@ async fn two_workers_racing_for_one_due_job_claim_only_one_lease() {
     assert!(matches!(save_err, CoreError::LeaseLost(_)));
 
     // Reclaimed fence rejects the old owner even if owner text is reused
-    let new_claim = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", &claim.owner, 10, 300);
+    let new_claim = store_b.lifecycle_job_claim_due("tenant_jobs", "user_jobs", &claim.owner, 1800000000_000000000, 10, 300);
     // If not due or already claimed, returns empty
     assert!(new_claim.unwrap().is_empty());
 
