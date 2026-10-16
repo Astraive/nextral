@@ -75,6 +75,29 @@ class ServiceHandle {
     return this._native.binds();
   }
 }
+class WorkerHandle {
+  constructor(nativeHandle) {
+    this._native = nativeHandle;
+  }
+
+  async tick() {
+    try {
+      const raw = await this._native.tick();
+      return JSON.parse(raw);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async shutdown(timeoutMs) {
+    try {
+      return await this._native.shutdown(timeoutMs);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+}
+
 
 class Client {
   constructor(nativeClient) {
@@ -132,6 +155,15 @@ class Client {
     try {
       const nativeHandle = await this._native.serve();
       return new ServiceHandle(nativeHandle);
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  async startWorker(config) {
+    try {
+      const nativeHandle = await this._native.startWorker(encode(config));
+      return new WorkerHandle(nativeHandle);
     } catch (error) {
       throw normalizeError(error);
     }
@@ -297,6 +329,7 @@ class Client {
     return this.call('nextral.batch.forget', request, options);
   }
 }
+exports.WorkerHandle = WorkerHandle;
 
 exports.Client = Client;
 exports.ServiceHandle = ServiceHandle;

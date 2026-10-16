@@ -138,6 +138,42 @@ fn run(arguments: Vec<String>) -> Result<String, PackageError> {
             let arguments = read_json_input(input)?;
             return call_tool(tool, &arguments, config.as_deref());
         }
+        [command, action, rest @ ..] if command == "worker" && action == "run" => {
+            let mut worker_path = None;
+            let mut config_path = config.clone();
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--worker" && i + 1 < rest.len() {
+                    worker_path = Some(rest[i + 1].clone());
+                    i += 2;
+                } else if rest[i] == "--config" && i + 1 < rest.len() {
+                    config_path = Some(rest[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err(input_error("usage: nextral worker run --config PATH --worker PATH"));
+                }
+            }
+            let config_file = config_path.ok_or_else(|| input_error("--config PATH is required"))?;
+            let worker_file = worker_path.ok_or_else(|| input_error("--worker PATH is required"))?;
+            let cfg_text = read_file(&config_file)?;
+            let wrk_text = read_file(&worker_file)?;
+            let nextral_cfg = nextral::config::load_config(&cfg_text).map_err(PackageError::from)?;
+            let worker_cfg: nextral::runtime::prospective::WorkerConfig = serde_json::from_str(&wrk_text).map_err(|e| input_error(e.to_string()))?;
+
+            let client = package::RuntimeClient::from_config(nextral_cfg)?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| input_error(e.to_string()))?;
+            rt.block_on(async {
+                let handle = client.start_worker(worker_cfg).await?;
+                let _ = tokio::signal::ctrl_c().await;
+                handle.shutdown(std::time::Duration::from_secs(30)).await?;
+                client.close(std::time::Duration::from_secs(30)).await?;
+                Ok::<_, PackageError>(())
+            })?;
+            return Ok(json!({"status":"stopped","worker":"drained"}).to_string());
+        }
         [group, operation] => {
             let tool = OPERATIONS
                 .iter()

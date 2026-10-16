@@ -64,6 +64,26 @@ impl ServiceHandle {
         self.handle.binds().to_vec()
     }
 }
+#[napi]
+pub struct WorkerHandle {
+    handle: Arc<nextral::package::WorkerHandle>,
+}
+
+#[napi]
+impl WorkerHandle {
+    #[napi]
+    pub async fn tick(&self) -> Result<String> {
+        let report = self.handle.tick().await.map_err(package_error)?;
+        serde_json::to_string(&report).map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
+    pub async fn shutdown(&self, timeout_ms: Option<u32>) -> Result<()> {
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30000) as u64);
+        self.handle.shutdown(timeout).await.map_err(package_error)
+    }
+}
+
 
 #[napi]
 impl Client {
@@ -115,6 +135,16 @@ impl Client {
     pub async fn serve(&self) -> Result<ServiceHandle> {
         let handle = self.client.serve().await.map_err(package_error)?;
         Ok(ServiceHandle {
+            handle: Arc::new(handle),
+        })
+    }
+
+    #[napi]
+    pub async fn start_worker(&self, config_json: String) -> Result<WorkerHandle> {
+        let config: nextral::runtime::prospective::WorkerConfig =
+            serde_json::from_str(&config_json).map_err(|e| Error::from_reason(e.to_string()))?;
+        let handle = self.client.start_worker(config).await.map_err(package_error)?;
+        Ok(WorkerHandle {
             handle: Arc::new(handle),
         })
     }

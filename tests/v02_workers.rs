@@ -247,3 +247,45 @@ async fn fenced_leases_increment_fence_and_reject_lost_owner() {
     let loaded = store.lifecycle_load(tenant, target).unwrap().unwrap();
     assert_eq!(loaded["active_version"], "v1");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_lifecycle_tick_and_duplicate_start_conflict() {
+    let client = RuntimeClient::from_config(test_config()).unwrap();
+    let worker_cfg = nextral::runtime::prospective::WorkerConfig {
+        scopes: vec![nextral::runtime::prospective::WorkerScope {
+            tenant_id: "tenant_loop".into(),
+            user_id: "user_loop".into(),
+        }],
+        actor: "test_worker_actor".into(),
+        poll_interval_ms: 1000,
+        job_limit: 10,
+        reminder_limit: 10,
+        outbox_limit: 10,
+        lease_seconds: 30,
+    };
+
+    let worker = client.start_worker(worker_cfg.clone()).await.unwrap();
+
+    // Duplicate start returns Conflict
+    let dup = client.start_worker(worker_cfg).await.unwrap_err();
+    assert_eq!(dup.code, "conflict");
+
+    // Explicit tick processes cleanly and returns bounded counters
+    let report = worker.tick().await.unwrap();
+    assert_eq!(report.errors, 0);
+    assert_eq!(report.lease_lost, 0);
+
+    // Holding tick lock causes concurrent tick to return Conflict
+    let lock_clone = worker.tick_lock();
+    let guard = lock_clone.lock().await;
+
+    let conflict_tick = worker.tick().await.unwrap_err();
+    assert_eq!(conflict_tick.code, "conflict");
+    assert!(conflict_tick.message.contains("already in progress"));
+
+    drop(guard);
+
+    // Shuts down cleanly
+    worker.shutdown(Duration::from_secs(5)).await.unwrap();
+    client.close(Duration::from_secs(5)).await.unwrap();
+}

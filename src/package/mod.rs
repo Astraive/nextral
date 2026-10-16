@@ -91,14 +91,57 @@ impl ServiceHandle {
     }
 }
 
+#[derive(Clone)]
 pub struct WorkerHandle {
     pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
+    pub(crate) join_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub(crate) tick_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) client: RuntimeClient,
+    pub(crate) config: crate::runtime::prospective::WorkerConfig,
+}
+impl std::fmt::Debug for WorkerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerHandle").finish()
+    }
 }
 
+
 impl WorkerHandle {
-    pub async fn shutdown(&self, _timeout: Duration) -> Result<(), PackageError> {
+    pub async fn tick(&self) -> Result<crate::runtime::prospective::WorkerTickReport, PackageError> {
+        let Ok(_guard) = self.tick_lock.try_lock() else {
+            return Err(PackageError {
+                code: "conflict".into(),
+                message: "worker tick already in progress".into(),
+                execution_status: None,
+            });
+        };
+        let store = self.client.store().clone();
+        let config = self.config.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            crate::runtime::prospective::run_worker_tick(&store, &config)
+        })
+        .await
+        .map_err(|e| PackageError {
+            code: "io".into(),
+            message: e.to_string(),
+            execution_status: None,
+        })??;
+        Ok(report)
+    }
+
+    pub async fn shutdown(&self, timeout: Duration) -> Result<(), PackageError> {
         self.shutdown_token.cancel();
+        let handle = {
+            let mut guard = self.join_handle.lock();
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(timeout, handle).await;
+        }
         Ok(())
+    }
+    pub fn tick_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.tick_lock.clone()
     }
 }
 
@@ -610,6 +653,60 @@ impl RuntimeClient {
             join_handle: Mutex::new(None),
             binds,
         })
+    }
+
+    pub async fn start_worker(
+        &self,
+        config: crate::runtime::prospective::WorkerConfig,
+    ) -> Result<WorkerHandle, PackageError> {
+        config.validate().map_err(PackageError::from)?;
+        {
+            let active = self.inner.active_worker.lock();
+            if active.is_some() {
+                return Err(PackageError {
+                    code: "conflict".into(),
+                    message: "worker already running for this client".into(),
+                    execution_status: None,
+                });
+            }
+        }
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let token = shutdown_token.clone();
+        let tick_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let tick_lock_loop = tick_lock.clone();
+        let store = self.store().clone();
+        let worker_cfg = config.clone();
+        let interval = Duration::from_millis(config.poll_interval_ms);
+
+        let join_handle = tokio::spawn(async move {
+            while !token.is_cancelled() {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {
+                        if let Ok(_guard) = tick_lock_loop.try_lock() {
+                            let s = store.clone();
+                            let c = worker_cfg.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::runtime::prospective::run_worker_tick(&s, &c)
+                            }).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let handle = WorkerHandle {
+            shutdown_token: shutdown_token.clone(),
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
+            tick_lock,
+            client: self.clone(),
+            config,
+        };
+        {
+            let mut active = self.inner.active_worker.lock();
+            *active = Some(Arc::new(handle.clone()));
+        }
+        Ok(handle)
     }
 }
 

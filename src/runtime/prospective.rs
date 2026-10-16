@@ -11,13 +11,9 @@ use crate::{
     },
     store::{AuditSink, GraphStore, MemoryIndexStore, ReminderStore, SessionStore},
 };
+use crate::domain::ReminderStatus;
+use crate::runtime::storage::RuntimeStore;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::{
-    sync::{watch, Mutex},
-    task::JoinHandle,
-    time::{self, Duration},
-};
 
 fn default_limit() -> usize {
     100
@@ -297,127 +293,203 @@ where
     Ok(results)
 }
 
-pub struct ProspectiveScheduler<S>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    store: Arc<Mutex<S>>,
-    tenant_id: String,
-    user_id: String,
-    actor: String,
-    retry_delay_seconds: u64,
-    poll_interval: Duration,
-    stop_tx: watch::Sender<bool>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerScope {
+    pub tenant_id: String,
+    pub user_id: String,
 }
-impl<S> ProspectiveScheduler<S>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    pub fn new(
-        store: Arc<Mutex<S>>,
-        tenant_id: impl Into<String>,
-        user_id: impl Into<String>,
-        actor: impl Into<String>,
-        retry_delay_seconds: u64,
-        poll_interval_seconds: u64,
-    ) -> Self {
-        let (stop_tx, _) = watch::channel(false);
-        Self {
-            store,
-            tenant_id: tenant_id.into(),
-            user_id: user_id.into(),
-            actor: actor.into(),
-            retry_delay_seconds,
-            poll_interval: Duration::from_secs(poll_interval_seconds.max(1)),
-            stop_tx,
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerConfig {
+    pub scopes: Vec<WorkerScope>,
+    pub actor: String,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default = "default_worker_limit")]
+    pub job_limit: usize,
+    #[serde(default = "default_worker_limit")]
+    pub reminder_limit: usize,
+    #[serde(default = "default_worker_limit")]
+    pub outbox_limit: usize,
+    #[serde(default = "default_worker_lease_seconds")]
+    pub lease_seconds: u64,
+}
+
+fn default_poll_interval_ms() -> u64 {
+    1000
+}
+fn default_worker_limit() -> usize {
+    100
+}
+fn default_worker_lease_seconds() -> u64 {
+    30
+}
+
+impl WorkerConfig {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.scopes.is_empty() || self.scopes.len() > 64 {
+            return Err(CoreError::InvalidInput(
+                "worker scopes must be between 1 and 64".into(),
+            ));
         }
-    }
-    pub fn start(&self) -> JoinHandle<()> {
-        let store = Arc::clone(&self.store);
-        let tenant_id = self.tenant_id.clone();
-        let user_id = self.user_id.clone();
-        let actor = self.actor.clone();
-        let retry_delay_seconds = self.retry_delay_seconds;
-        let poll_interval = self.poll_interval;
-        let mut stop_rx = self.stop_tx.subscribe();
-        tokio::spawn(async move {
-            let mut ticker = time::interval(poll_interval);
-            loop {
-                tokio::select! {
-                    changed=stop_rx.changed()=>{if changed.is_err() || *stop_rx.borrow() {break;}},
-                    _=ticker.tick()=>{
-                        let now=crate::memory::now_timestamp();
-                        let jobs=RunLifecycleJobsRequest {tenant_id:tenant_id.clone(),user_id:user_id.clone(),now:now.clone(),limit:100,lease_seconds:300};
-                        let reminders=reminder_request(&tenant_id,&user_id,&actor,retry_delay_seconds,&now);
-                        if let Err(error)=tick_store(Arc::clone(&store),jobs,reminders).await {eprintln!("ProspectiveScheduler: tick failed: {error}");}
-                    }
-                }
+        let mut seen = std::collections::HashSet::new();
+        for scope in &self.scopes {
+            crate::store::validate_scope_component(&scope.tenant_id, "tenant_id")?;
+            crate::store::validate_scope_component(&scope.user_id, "user_id")?;
+            if !seen.insert((&scope.tenant_id, &scope.user_id)) {
+                return Err(CoreError::InvalidInput("duplicate worker scope".into()));
             }
-        })
-    }
-    pub fn stop(&self) {
-        let _ = self.stop_tx.send(true);
-    }
-    pub async fn tick_once(
-        &self,
-        due_at_or_before: &str,
-    ) -> CoreResult<ExecuteDueRemindersResponse> {
-        let jobs = RunLifecycleJobsRequest {
-            tenant_id: self.tenant_id.clone(),
-            user_id: self.user_id.clone(),
-            now: due_at_or_before.into(),
-            limit: 100,
-            lease_seconds: 300,
-        };
-        let reminders = reminder_request(
-            &self.tenant_id,
-            &self.user_id,
-            &self.actor,
-            self.retry_delay_seconds,
-            due_at_or_before,
-        );
-        tick_store(Arc::clone(&self.store), jobs, reminders).await
+        }
+        if self.actor.trim().is_empty() {
+            return Err(CoreError::InvalidInput("worker actor cannot be empty".into()));
+        }
+        if self.poll_interval_ms < 100 || self.poll_interval_ms > 60000 {
+            return Err(CoreError::InvalidInput(
+                "poll_interval_ms must be between 100 and 60000".into(),
+            ));
+        }
+        if self.job_limit == 0 || self.job_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "job_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.reminder_limit == 0 || self.reminder_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "reminder_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.outbox_limit == 0 || self.outbox_limit > 1000 {
+            return Err(CoreError::InvalidInput(
+                "outbox_limit must be between 1 and 1000".into(),
+            ));
+        }
+        if self.lease_seconds < 15 || self.lease_seconds > 3600 {
+            return Err(CoreError::InvalidInput(
+                "lease_seconds must be between 15 and 3600".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
-async fn tick_store<S>(
-    store: Arc<Mutex<S>>,
-    jobs: RunLifecycleJobsRequest,
-    reminders: ExecuteDueRemindersRequest,
-) -> CoreResult<ExecuteDueRemindersResponse>
-where
-    S: ReminderStore
-        + LifecycleStore
-        + MemoryIndexStore
-        + AuditSink
-        + GraphStore
-        + SessionStore
-        + Send
-        + 'static,
-{
-    let mut guard = store.lock_owned().await;
-    tokio::task::spawn_blocking(move || {
-        let jobs_result = execute_lifecycle_jobs(&mut *guard, jobs);
-        let reminders_result = execute_due_reminders(&mut *guard, reminders);
-        jobs_result?;
-        reminders_result
-    })
-    .await
-    .map_err(|error| CoreError::Io(format!("lifecycle worker failed: {error}")))?
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KindStats {
+    pub processed: usize,
+    pub succeeded: usize,
+    pub retried: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerTickReport {
+    pub jobs: KindStats,
+    pub reminders: KindStats,
+    pub outbox: KindStats,
+    pub lease_lost: usize,
+    pub errors: usize,
+}
+
+pub fn run_worker_tick(
+    store: &RuntimeStore,
+    config: &WorkerConfig,
+) -> CoreResult<WorkerTickReport> {
+    let mut report = WorkerTickReport::default();
+    let mut store = store.clone();
+
+    for scope in &config.scopes {
+        // 1. Process Lifecycle Jobs
+        let jobs_res = execute_lifecycle_jobs(
+            &mut store,
+            RunLifecycleJobsRequest {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                now: crate::memory::now_timestamp(),
+                limit: config.job_limit,
+                lease_seconds: config.lease_seconds,
+            },
+        );
+        match jobs_res {
+            Ok(jobs) => {
+                for job in jobs {
+                    report.jobs.processed += 1;
+                    match job.status.as_str() {
+                        "completed" => report.jobs.succeeded += 1,
+                        "retry_pending" => report.jobs.retried += 1,
+                        "terminal_failed" => report.jobs.failed += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
+
+        // 2. Process Reminders
+        let reminders_res = crate::runtime::reminders::execute_due_reminders(
+            &mut store,
+            crate::runtime::reminders::ExecuteDueRemindersRequest {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                due_at_or_before: crate::memory::now_timestamp(),
+                actor: config.actor.clone(),
+                retry_delay_seconds: 60,
+                max_retries: Some(3),
+                dispatch_policy_version: None,
+                retry_strategy_id: None,
+                trace_id: None,
+                privacy_scope: vec![crate::memory::PrivacyLevel::Private],
+                lease_seconds: config.lease_seconds,
+            },
+        );
+        match reminders_res {
+            Ok(rem_resp) => {
+                for res in rem_resp.results {
+                    report.reminders.processed += 1;
+                    match res.status {
+                        ReminderStatus::Completed | ReminderStatus::Dispatched => {
+                            report.reminders.succeeded += 1
+                        }
+                        ReminderStatus::RetryScheduled => report.reminders.retried += 1,
+                        ReminderStatus::Failed
+                        | ReminderStatus::Cancelled
+                        | ReminderStatus::Expired => report.reminders.failed += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
+
+        // 3. Process Outbox
+        let outbox_res = store.drain_outbox(&scope.tenant_id);
+        match outbox_res {
+            Ok(val) => {
+                let comp = val["completed"].as_u64().unwrap_or(0) as usize;
+                let fail = val["failed"].as_u64().unwrap_or(0) as usize;
+                report.outbox.processed += comp + fail;
+                report.outbox.succeeded += comp;
+                report.outbox.failed += fail;
+            }
+            Err(CoreError::LeaseLost(_)) => {
+                report.lease_lost += 1;
+            }
+            Err(_) => {
+                report.errors += 1;
+            }
+        }
+    }
+
+    crate::runtime::observability::record_worker_tick(report.errors == 0 && report.lease_lost == 0);
+    Ok(report)
 }
 fn reminder_request(
     tenant: &str,

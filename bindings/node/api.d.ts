@@ -253,12 +253,48 @@ export class ServiceHandle {
   shutdown(timeoutMs?: number): Promise<void>;
   readonly binds: string[];
 }
+export interface WorkerScope {
+  tenant_id: string;
+  user_id: string;
+}
+
+export interface WorkerConfig {
+  scopes: WorkerScope[];
+  actor: string;
+  poll_interval_ms?: number;
+  job_limit?: number;
+  reminder_limit?: number;
+  outbox_limit?: number;
+  lease_seconds?: number;
+}
+
+export interface KindStats {
+  processed: number;
+  succeeded: number;
+  retried: number;
+  failed: number;
+}
+
+export interface WorkerTickReport {
+  jobs: KindStats;
+  reminders: KindStats;
+  outbox: KindStats;
+  lease_lost: number;
+  errors: number;
+}
+
+export class WorkerHandle {
+  tick(): Promise<WorkerTickReport>;
+  shutdown(timeoutMs?: number): Promise<void>;
+}
+
 
 export class Client {
   static create(config: RuntimeConfig): Promise<Client>;
   call(tool: string, payload: unknown, options?: CallOptions): Promise<unknown>;
   close(timeoutMs?: number): Promise<{ drained: boolean; in_flight_remaining: number }>;
   serve(): Promise<ServiceHandle>;
+  startWorker(config: WorkerConfig): Promise<WorkerHandle>;
   health(options?: CallOptions): Promise<{ fail_fast: boolean; backends: { backend: string; status: 'ready' | 'unavailable'; degraded_signature: string | null }[] }>;
   ingest(request: IngestMemoryRequest, options?: CallOptions): Promise<IngestMemoryResponse>;
   retrieve(request: RetrievalRequest, options?: CallOptions): Promise<RetrievalResponse>;

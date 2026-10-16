@@ -167,6 +167,40 @@ impl Client {
             })
         })
     }
+
+    fn start_worker(&self, py: Python<'_>, config_json: &str) -> PyResult<PyWorkerHandle> {
+        let config: nextral::runtime::prospective::WorkerConfig =
+            serde_json::from_str(config_json)
+                .map_err(|e| NativeError::new_err(("invalid_input".to_string(), e.to_string())))?;
+        let client = self.client.clone();
+        let rt = self.rt.clone();
+        let handle = py
+            .detach(move || rt.block_on(client.start_worker(config)))
+            .map_err(map_package_error)?;
+        Ok(PyWorkerHandle {
+            handle: Arc::new(handle),
+            rt: self.rt.clone(),
+        })
+    }
+
+    fn start_worker_async<'py>(
+        &self,
+        py: Python<'py>,
+        config_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let config: nextral::runtime::prospective::WorkerConfig =
+            serde_json::from_str(&config_json)
+                .map_err(|e| NativeError::new_err(("invalid_input".to_string(), e.to_string())))?;
+        let client = self.client.clone();
+        let rt = self.rt.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = client.start_worker(config).await.map_err(map_package_error)?;
+            Ok(PyWorkerHandle {
+                handle: Arc::new(handle),
+                rt,
+            })
+        })
+    }
 }
 
 #[pyclass]
@@ -203,12 +237,62 @@ impl PyServiceHandle {
         self.handle.binds().to_vec()
     }
 }
+#[pyclass]
+struct PyWorkerHandle {
+    handle: Arc<nextral::package::WorkerHandle>,
+    rt: Arc<tokio::runtime::Runtime>,
+}
+
+#[pymethods]
+impl PyWorkerHandle {
+    fn tick(&self, py: Python<'_>) -> PyResult<String> {
+        let handle = self.handle.clone();
+        let rt = self.rt.clone();
+        let report = py
+            .detach(move || rt.block_on(handle.tick()))
+            .map_err(map_package_error)?;
+        serde_json::to_string(&report)
+            .map_err(|e| NativeError::new_err(("serialization".to_string(), e.to_string())))
+    }
+
+    fn tick_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.handle.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let report = handle.tick().await.map_err(map_package_error)?;
+            serde_json::to_string(&report)
+                .map_err(|e| NativeError::new_err(("serialization".to_string(), e.to_string())))
+        })
+    }
+
+    #[pyo3(signature = (timeout_ms=None))]
+    fn shutdown(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<()> {
+        let handle = self.handle.clone();
+        let rt = self.rt.clone();
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30000));
+        py.detach(move || rt.block_on(handle.shutdown(timeout)))
+            .map_err(map_package_error)
+    }
+
+    #[pyo3(signature = (timeout_ms=None))]
+    fn shutdown_async<'py>(
+        &self,
+        py: Python<'py>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.handle.clone();
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30000));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            handle.shutdown(timeout).await.map_err(map_package_error)
+        })
+    }
+}
 
 #[pymodule]
 fn _nextral(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("NativeError", py.get_type::<NativeError>())?;
     module.add_class::<Client>()?;
     module.add_class::<PyServiceHandle>()?;
+    module.add_class::<PyWorkerHandle>()?;
     module.add_function(wrap_pyfunction!(lexical_score, module)?)?;
     module.add_function(wrap_pyfunction!(validate_config, module)?)?;
     module.add_function(wrap_pyfunction!(e2e_smoke, module)?)?;

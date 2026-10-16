@@ -1314,30 +1314,67 @@ impl LifecycleStore for TestMemoryStore {
         lease_seconds: u64,
     ) -> CoreResult<bool> {
         let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
-        let entry_key = (claim.tenant_id.clone(), claim.key.clone());
-        let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&entry_key).cloned() else {
-            return Ok(false);
-        };
-        if owner != claim.owner || fence != claim.fence || expiry <= now {
-            return Ok(false);
+        match claim.resource {
+            crate::runtime::lifecycle::LeaseResource::LifecycleJob => {
+                let job_key = (
+                    claim.tenant_id.clone(),
+                    claim.user_id.clone().unwrap_or_default(),
+                    claim.key.clone(),
+                );
+                if let Some((_, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&job_key) {
+                    if locked_by.as_deref() != Some(&claim.owner) || *fence != claim.fence || locked_until.map_or(true, |u| u <= now) {
+                        return Ok(false);
+                    }
+                    *locked_until = Some(now + lease_seconds);
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            _ => {
+                let entry_key = (claim.tenant_id.clone(), claim.key.clone());
+                let Some((owner, expiry, fence)) = self.lifecycle_fences.get(&entry_key).cloned() else {
+                    return Ok(false);
+                };
+                if owner != claim.owner || fence != claim.fence || expiry <= now {
+                    return Ok(false);
+                }
+                self.lifecycle_fences.insert(entry_key.clone(), (claim.owner.clone(), now + lease_seconds, claim.fence));
+                self.lifecycle_leases.insert(entry_key, (claim.owner.clone(), now + lease_seconds));
+                Ok(true)
+            }
         }
-        self.lifecycle_fences.insert(entry_key, (claim.owner.clone(), now + lease_seconds, claim.fence));
-        self.lifecycle_leases.insert((claim.tenant_id.clone(), claim.key.clone()), (claim.owner.clone(), now + lease_seconds));
-        Ok(true)
     }
 
     fn lifecycle_release_fenced(
         &mut self,
         claim: &crate::runtime::lifecycle::LeaseClaim,
     ) -> CoreResult<()> {
-        let entry_key = (claim.tenant_id.clone(), claim.key.clone());
-        if let Some((owner, expiry, fence)) = self.lifecycle_fences.get_mut(&entry_key) {
-            if owner == &claim.owner && *fence == claim.fence {
-                owner.clear();
-                *expiry = 0;
+        let now = crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?;
+        match claim.resource {
+            crate::runtime::lifecycle::LeaseResource::LifecycleJob => {
+                let job_key = (
+                    claim.tenant_id.clone(),
+                    claim.user_id.clone().unwrap_or_default(),
+                    claim.key.clone(),
+                );
+                if let Some((_, locked_by, locked_until, fence)) = self.lifecycle_jobs.get_mut(&job_key) {
+                    if locked_by.as_deref() == Some(&claim.owner) && *fence == claim.fence {
+                        *locked_by = None;
+                        *locked_until = None;
+                    }
+                }
+            }
+            _ => {
+                let entry_key = (claim.tenant_id.clone(), claim.key.clone());
+                if let Some((owner, expiry, fence)) = self.lifecycle_fences.get_mut(&entry_key) {
+                    if owner == &claim.owner && *fence == claim.fence {
+                        owner.clear();
+                        *expiry = 0;
+                    }
+                }
+                self.lifecycle_leases.remove(&entry_key);
             }
         }
-        self.lifecycle_leases.remove(&entry_key);
         Ok(())
     }
 
