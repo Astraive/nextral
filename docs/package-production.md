@@ -21,6 +21,28 @@ Release artifacts target Windows x64 MSVC, macOS x64/arm64, and glibc Linux x64/
 
 Keep these contexts separate from workspace/native builds: Cargo verification of an extracted same-version crate can otherwise leave native builds using the archive's core artifacts rather than current checkout sources. The integration runner builds its Python wheel under `<target>/python-native`. Pre-existing checkout-native binaries are not release evidence; verify clean installed wheels and npm tarballs outside the checkout.
 
+### Release verification and publication
+
+Pushing a matching `vVERSION` tag runs manifest/lockfile version checks, the full reusable CI build and clean-install matrix, GitHub artifact attestation, and detached-provenance verification for every payload and checksum manifest. The workflow uploads the complete `attested-release` artifact, including `provenance.jsonl`. Tag pushes do not publish to PyPI, npm, crates.io, or GitHub Releases. This is verified source/artifact evidence, not registry availability or a deployment SLO.
+
+Manual dispatch defaults to the same verification-only mode:
+
+```sh
+gh workflow run release.yml --ref vVERSION -F publish=false
+```
+
+Replace `VERSION` with the manifest version and use an existing `refs/tags/v*` tag. Branch dispatch fails the version job instead of silently skipping verification. The tag must equal `v` plus the version in all release manifests and lockfiles.
+
+Publication is a separate explicit maintainer decision:
+
+```sh
+gh workflow run release.yml --ref vVERSION -F publish=true
+```
+
+This dispatch repeats all verification and attestation before publishing the exact checked artifacts. Configure protected `pypi`, `npm`, and `crates-io` environments before opting in. PyPI and npm require their repository/workflow/environment trusted-publisher configuration and OIDC; crates.io requires `CARGO_REGISTRY_TOKEN` with permission for both `nextral` and `nextral-api`. The crate publication guard additionally requires `workflow_dispatch`, a version-tag ref, and `PUBLISH_RELEASE=true`, supplied only by the publication job. Checksums, detached provenance, and tag/version equality remain mandatory. GitHub release creation waits for attestation and all three registry jobs to succeed.
+
+Verification-only runs still require GitHub artifact-attestation/OIDC permissions and a repository plan that supports attestations. Download workflow artifacts before their GitHub retention expires; verification-only runs do not create a permanent GitHub Release. Neither these instructions nor an attested bundle claim that a registry publication has occurred.
+
 ## Configuration and stores
 
 Start with `examples/config.production.example.json`. Replace deployment placeholders and set referenced environment variables. Rust resolves `${NAME}` configuration references; credential fields ending in `_env` name environment variables rather than containing secrets. Container DNS names in the example are not valid host addresses automatically.

@@ -16,6 +16,8 @@ python -m pip install -e bindings/python
 
 Run that command from the complete repository checkout. The package does not install PostgreSQL, Redis, Qdrant, Neo4j, S3/MinIO or an embedding service. See the [capability/package matrix](../../docs/package-production.md#supported-capabilities-and-packages).
 
+Version-tag pushes verify and attest release artifacts without publishing to PyPI or other registries. Maintainers explicitly publish with `gh workflow run release.yml --ref vVERSION -F publish=true`, subject to the configured release environment protections and trusted publisher. See [release verification and publication](../../docs/package-production.md#release-verification-and-publication).
+
 ## Configure and execute
 
 Configuration is process-wide. Call `configure_runtime` before operations or provide `NEXTRAL_CONFIG`; no implicit in-memory application backend exists. Choose `production_stores` with all required store configuration (including `qdrant_collection`), or explicitly select `test_memory` only for isolated process-local tests.
@@ -48,11 +50,13 @@ Apply schema migration explicitly using an owner configuration (`migrate_databas
 
 ## Public operations
 
+`eligible_sessions(EligibleSessionsRequest)` returns `list[EligibleSession]` with `session_id`, RFC3339 UTC `last_message_at`, and `message_count`. Supply scoped `inactive_at_or_before` and optional `limit` (default 100, range 1–1000); results order by oldest latest-message time then session ID. Hosts select aged sessions and supply deep jobs, without internal model calls or a daemon. Scheduled retention of session-backed memory waits for verified deep archive/source coverage; standalone retention and explicit privacy forget are unchanged. Session context includes `degraded_reasons` when Redis falls back to the warm transcript.
+
 | Area | Functions |
 | --- | --- |
 | Configuration/inspection | `configure_runtime`, `validate_config`, `health`, `lexical_score`, `ingest_request_schema`, `e2e_smoke`, `adapter_smoke`, `migrate_database` |
 | Memory | `ingest`, `retrieve`, `get_memory`, `update_memory`, `list_memories`, `memory_stats`, `search_by_tag`, `search_by_entity`, `forget` |
-| Sessions | `append_session`, `session_context` |
+| Sessions | `append_session`, `eligible_sessions`, `session_context` |
 | Policies | `upsert_policy`, `list_policies`, `remove_policy` |
 | Graph | `graph_query`, `graphify` |
 | Consolidation | `consolidate` |

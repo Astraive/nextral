@@ -30,6 +30,8 @@ npm --workspace bindings/node run build
 
 These require Rust and the platform linker. Package release artifacts have a narrower supported platform matrix than arbitrary Rust targets; see the package guide. Registry installation commands assume an appropriate artifact is available, not that this checkout has been published.
 
+Version-tag pushes verify the full release matrix and upload attested artifacts without publishing. Registry/GitHub publication requires an explicit maintainer dispatch: `gh workflow run release.yml --ref vVERSION -F publish=true`. See [release verification and publication](docs/package-production.md#release-verification-and-publication) for prerequisites.
+
 ## Usage
 
 The Rust CLI executable is built as `nextral` (under Cargo's configured target directory):

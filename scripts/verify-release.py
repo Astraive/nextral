@@ -408,8 +408,10 @@ def crate_smoke(directory: Path) -> None:
 
 def crate_publish(directory: Path) -> None:
     reference = os.environ.get("GITHUB_REF", "")
-    require(os.environ.get("GITHUB_EVENT_NAME") == "push" and reference.startswith("refs/tags/v"),
-            "Registry publishing requires a version-tag push workflow")
+    require(os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+            and reference.startswith("refs/tags/v")
+            and os.environ.get("PUBLISH_RELEASE") == "true",
+            "Registry publishing requires explicit PUBLISH_RELEASE=true in a version-tag workflow_dispatch")
     require(bool(os.environ.get("CARGO_REGISTRY_TOKEN")), "Configure CARGO_REGISTRY_TOKEN in the crates-io environment")
     tag = reference.removeprefix("refs/tags/")
     artifact_guard(directory, tag, require_checksums=True, require_provenance=True)

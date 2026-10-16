@@ -75,11 +75,14 @@ For fast consolidation, supply a nonempty host summary and explicit candidates r
 
 All operations take typed objects; field names follow the Rust wire contract (`tenant_id`, `query_vector`, and so on). Optional values may be omitted or set to `null` where declared. Most functions are synchronous and can block on storage IO; use a worker thread for latency-sensitive Node servers. `serve` alone runs on a native async worker.
 
+
+`eligibleSessions({tenant_id, user_id, inactive_at_or_before, limit?})` returns typed `{session_id,last_message_at,message_count}[]`, ordered by oldest latest-message time then session ID. Returned times are RFC3339 UTC; limit defaults to 100 (1–1000). Hosts choose aged sessions and supply deep jobs; no daemon or model calls are started. Scheduled retention of session-backed memory waits for verified deep archive/source coverage; standalone retention and explicit privacy forget are unchanged. `workingContext.degraded_reasons` reports Redis warm-transcript fallback.
+
 | Area | Public functions |
 | --- | --- |
 | Configuration and health | `configureRuntime`, `validateConfig`, `health`, `lexicalScore`, `migrateDatabase` |
 | Memory | `ingestMemory`, `retrieve`, `getMemory`, `updateMemory`, `listMemories`, `memoryStats`, `searchByTag`, `searchByEntity`, `forgetMemory` |
-| Sessions | `appendSessionMessage`, `workingContext` |
+| Sessions | `appendSessionMessage`, `eligibleSessions`, `workingContext` |
 | Procedural policies | `upsertPolicy`, `listPolicies`, `removePolicy` |
 | Graph | `queryGraph`, `graphify` |
 | Consolidation | `consolidate` |
@@ -160,10 +163,11 @@ npm ci
 npm run artifacts:collect -- PATH_TO_DOWNLOADED_ARTIFACTS
 npm run release:check
 npm pack
-npm publish nextral-0.1.0.tgz --access public
 ```
 
 The collector rejects duplicate artifact names. `release:check` requires the complete supported matrix; normal `npm pack` requires the current host artifact so a source-only or wrong-platform package cannot accidentally pass its prepack hook. Package version changes must update both Cargo/npm versions and lockfiles before a tagged release. An isolated installation of a locally built single-platform tarball supports that platform only; published releases must pass the all-platform guard.
+
+Tag pushes verify and attest the complete release without publishing. Maintainers publish only through the protected release workflow: `gh workflow run release.yml --ref vVERSION -F publish=true`. See [release verification and publication](../../docs/package-production.md#release-verification-and-publication); do not publish a locally assembled tarball directly.
 
 ## Consumer checks
 
