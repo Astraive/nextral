@@ -10,23 +10,39 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 
 /// Request to retrieve memories matching a query, with token budget, privacy scope, and scoring weights.
+fn default_token_budget() -> u32 { 1800 }
+fn default_top_k_vector() -> usize { 12 }
+fn default_max_graph_hops() -> u8 { 2 }
+fn default_privacy_scope() -> Vec<PrivacyLevel> { vec![PrivacyLevel::Private] }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RetrievalRequest {
     pub tenant_id: String,
     pub user_id: String,
+    #[serde(default)]
     pub session_id: Option<String>,
     pub query_text: String,
     #[serde(default)]
     pub query_vector: Option<Vec<f32>>,
+    #[serde(default)]
     pub entities: Vec<String>,
+    #[serde(default)]
     pub intent_topic: Option<String>,
+    #[serde(default = "default_token_budget")]
     pub token_budget: u32,
+    #[serde(default = "default_privacy_scope")]
     pub privacy_scope: Vec<PrivacyLevel>,
+    #[serde(default = "default_top_k_vector")]
     pub top_k_vector: usize,
+    #[serde(default = "default_max_graph_hops")]
     pub max_graph_hops: u8,
+    #[serde(default)]
     pub lane: Option<RuntimeLane>,
+    #[serde(default)]
     pub policy_version: Option<String>,
+    #[serde(default)]
     pub trace_id: Option<String>,
+    #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
     #[serde(default)]
     pub filters: Option<crate::memory::MemoryFilters>,

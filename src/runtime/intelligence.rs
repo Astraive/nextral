@@ -51,11 +51,17 @@ pub enum ExperimentStatus {
     Quarantined,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeSnapshot {
     pub lane: RuntimeLane,
     pub policy_version: String,
     pub experiment_id: Option<String>,
+    #[serde(default)]
+    pub scoring_weights: Option<crate::config::ScoringWeights>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub top_k_vector: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +76,12 @@ pub struct ExperimentCandidate {
     pub last_severity: Severity,
     #[serde(default)]
     pub promoted_report_run_id: Option<String>,
+    #[serde(default)]
+    pub scoring_weights: Option<crate::config::ScoringWeights>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub top_k_vector: Option<usize>,
     pub rollback_target: Option<RuntimeSnapshot>,
     pub rollback_reason: Option<String>,
 }
@@ -79,6 +91,12 @@ pub struct ExperimentRegistry {
     pub current_lane: RuntimeLane,
     pub active_policy_version: String,
     pub active_experiment_id: Option<String>,
+    #[serde(default)]
+    pub scoring_weights: Option<crate::config::ScoringWeights>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub top_k_vector: Option<usize>,
     pub experiments: HashMap<String, ExperimentCandidate>,
 }
 
@@ -140,6 +158,9 @@ impl Default for ExperimentRegistry {
             current_lane: RuntimeLane::Stable,
             active_policy_version: "policy-v1".to_string(),
             active_experiment_id: None,
+            scoring_weights: None,
+            token_budget: None,
+            top_k_vector: None,
             experiments: HashMap::new(),
         }
     }
@@ -151,6 +172,18 @@ impl ExperimentRegistry {
         lane: RuntimeLane,
         policy_version: String,
         description: String,
+    ) -> ExperimentCandidate {
+        self.create_with_settings(lane, policy_version, description, None, None, None)
+    }
+
+    pub fn create_with_settings(
+        &mut self,
+        lane: RuntimeLane,
+        policy_version: String,
+        description: String,
+        scoring_weights: Option<crate::config::ScoringWeights>,
+        token_budget: Option<u32>,
+        top_k_vector: Option<usize>,
     ) -> ExperimentCandidate {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -171,6 +204,9 @@ impl ExperimentRegistry {
             rollback_id: None,
             last_severity: Severity::Info,
             promoted_report_run_id: None,
+            scoring_weights,
+            token_budget,
+            top_k_vector,
             rollback_target: None,
             rollback_reason: None,
         };
@@ -220,6 +256,9 @@ impl ExperimentRegistry {
                 candidate.policy_version.clone(),
             ),
             experiment_id: self.active_experiment_id.replace(candidate.id.clone()),
+            scoring_weights: std::mem::replace(&mut self.scoring_weights, candidate.scoring_weights.clone()),
+            token_budget: std::mem::replace(&mut self.token_budget, candidate.token_budget),
+            top_k_vector: std::mem::replace(&mut self.top_k_vector, candidate.top_k_vector),
         });
         Ok(candidate.clone())
     }
@@ -253,6 +292,9 @@ impl ExperimentRegistry {
         self.active_policy_version
             .clone_from(&target.policy_version);
         self.active_experiment_id.clone_from(&target.experiment_id);
+        self.scoring_weights.clone_from(&target.scoring_weights);
+        self.token_budget = target.token_budget;
+        self.top_k_vector = target.top_k_vector;
         candidate.status = ExperimentStatus::RolledBack;
         candidate.last_severity = Severity::Destructive;
         candidate.rollback_id = Some(deterministic_id(&[experiment_id, reason, "rollback"]));
@@ -270,6 +312,9 @@ impl ExperimentRegistry {
             "current_lane": self.current_lane,
             "active_policy_version": self.active_policy_version,
             "active_experiment_id": self.active_experiment_id,
+            "scoring_weights": self.scoring_weights,
+            "token_budget": self.token_budget,
+            "top_k_vector": self.top_k_vector,
             "experiments": self.experiments,
         })
     }

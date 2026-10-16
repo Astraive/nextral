@@ -64,7 +64,7 @@ pub struct RerankerProviderConfig {
     pub api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IngestionPolicy {
     pub min_importance_score: f32,
     pub min_confidence_score: f32,

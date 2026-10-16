@@ -188,11 +188,17 @@ pub struct McpCallRequest {
     pub payload_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExperimentCreateRequest {
     pub lane: RuntimeLane,
     pub policy_version: String,
     pub description: String,
+    #[serde(default)]
+    pub scoring_weights: Option<crate::config::ScoringWeights>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub top_k_vector: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -270,43 +276,35 @@ fn with_control(
     operation: impl FnOnce(&mut RuntimeControlPlane) -> CoreResult<serde_json::Value>,
 ) -> CoreResult<serde_json::Value> {
     let owner = crate::runtime::lifecycle::worker_owner();
-    if !store.lifecycle_claim(
-        "__nextral_control",
-        "control-lease",
-        &owner,
-        crate::runtime::lifecycle::timestamp_epoch(&crate::memory::now_timestamp())?,
-        300,
-    )? {
-        return Err(CoreError::Conflict(
-            "control plane is leased by another worker".into(),
-        ));
-    }
+    let claim = store
+        .lifecycle_claim_fenced(
+            "__nextral_control",
+            None,
+            crate::runtime::lifecycle::LeaseResource::RuntimeState,
+            "control-lease",
+            &owner,
+            300,
+        )?
+        .ok_or_else(|| CoreError::Conflict("control plane is leased by another worker".into()))?;
+
     let result = (|| {
         let mut control = load_control(store)?;
         let result = operation(&mut control)?;
-        let receipt = store.lifecycle_save(
-            "__nextral_control",
+        let write_res = store.lifecycle_save_guarded(
+            &claim,
             "control-plane",
             &serde_json::to_value(control)?,
         )?;
-        if !crate::runtime::lifecycle::acknowledged(&receipt) {
-            return Err(CoreError::Io(
-                "control plane persistence was not acknowledged".into(),
-            ));
+        if matches!(
+            write_res,
+            crate::runtime::lifecycle::GuardedWriteResult::Superseded(_)
+        ) {
+            return Err(CoreError::LeaseLost("control plane write superseded".into()));
         }
         Ok(result)
     })();
-    let release = store.lifecycle_release("__nextral_control", "control-lease", &owner);
-    match result {
-        Ok(value) => {
-            release?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = release;
-            Err(error)
-        }
-    }
+    let _ = store.lifecycle_release_fenced(&claim);
+    result
 }
 
 fn invalid_json_input(_: serde_json::Error) -> CoreError {
@@ -1009,8 +1007,24 @@ fn dispatch_tool_impl(
             value!(result)
         }
         "nextral.memory.retrieve" => {
-            let mut result = crate::retrieval::retrieve(store, decode!(RetrievalRequest))?;
+            let mut req = decode!(RetrievalRequest);
             let control = load_control(store)?;
+            if req.scoring_weights.is_none() {
+                if let Some(weights) = &control.registry.scoring_weights {
+                    req.scoring_weights = Some(weights.clone());
+                }
+            }
+            if let Some(budget) = control.registry.token_budget {
+                if req.token_budget == 1800 {
+                    req.token_budget = budget;
+                }
+            }
+            if let Some(top_k) = control.registry.top_k_vector {
+                if req.top_k_vector == 12 {
+                    req.top_k_vector = top_k;
+                }
+            }
+            let mut result = crate::retrieval::retrieve(store, req)?;
             result.decision_action = decision_for(&control.safety_policy, &result.severity);
             result.lane = control.registry.current_lane.clone();
             result.policy_version = control.registry.active_policy_version.clone();
@@ -1433,10 +1447,13 @@ fn dispatch_tool_impl(
         "experiments.create" => {
             let p = decode!(ExperimentCreateRequest);
             with_control(store, |c| {
-                Ok(serde_json::to_value(c.registry.create(
+                Ok(serde_json::to_value(c.registry.create_with_settings(
                     p.lane,
                     p.policy_version,
                     p.description,
+                    p.scoring_weights,
+                    p.token_budget,
+                    p.top_k_vector,
                 ))?)
             })?
         }

@@ -172,6 +172,10 @@ pub struct ReportMetadata {
     pub build_profile: String,
     pub target_os: String,
     pub target_arch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -281,6 +285,8 @@ pub fn run_golden_replay_with_observer(
         .into(),
         target_os: std::env::consts::OS.into(),
         target_arch: std::env::consts::ARCH.into(),
+        configuration_digest: None,
+        stage: None,
     };
     summarize(metadata, observations, latency_budget_ns)
 }
@@ -369,7 +375,7 @@ struct MeasuredMetrics {
     destructive_events: u64,
 }
 
-fn summarize(
+pub fn summarize(
     metadata: ReportMetadata,
     observations: Vec<CaseObservation>,
     latency_budget_ns: u64,
@@ -540,6 +546,18 @@ pub fn promotion_replay_gate(evidence: &PromotionEvidence) -> CoreResult<()> {
             "promotion reports must be distinct comparable release replays of the same suite",
         );
     }
+    if let (Some(stage_left), Some(stage_right)) = (&left.stage, &right.stage) {
+        if stage_left == "calibration" || stage_right == "calibration" {
+            return invalid(
+                "calibration replay cannot be used as promotion qualification evidence; qualification stage required",
+            );
+        }
+    }
+    if let (Some(conf_left), Some(conf_right)) = (&left.configuration_digest, &right.configuration_digest) {
+        if conf_left != conf_right {
+            return invalid("promotion evidence reports must match the same measured system configuration");
+        }
+    }
     if !meets_thresholds(candidate, &CanaryGateConfig::default())
         || candidate.golden_recall_score < baseline.golden_recall_score
         || candidate.contradiction_score < baseline.contradiction_score
@@ -685,6 +703,8 @@ pub(crate) fn deterministic_test_evidence() -> PromotionEvidence {
         build_profile: "release".into(),
         target_os: "test".into(),
         target_arch: "test".into(),
+        configuration_digest: None,
+        stage: None,
     };
     let baseline = summarize(metadata, observations, 1_000).unwrap();
     let mut candidate = baseline.clone();

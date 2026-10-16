@@ -20,14 +20,20 @@ pub struct IngestMemoryRequest {
     pub content: String,
     pub content_type: ContentType,
     pub memory_type: MemoryType,
+    #[serde(default)]
     pub source_type: SourceType,
+    #[serde(default)]
     pub source_message_ids: Vec<String>,
     pub importance_score: f32,
     pub confidence_score: Option<f32>,
+    #[serde(default)]
     pub entities: Vec<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     pub privacy_level: PrivacyLevel,
+    #[serde(default)]
     pub graph_hints: Vec<GraphHint>,
+    #[serde(default)]
     pub policy: IngestionPolicy,
     pub trace_id: Option<String>,
     #[serde(default)]

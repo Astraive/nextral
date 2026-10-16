@@ -40,13 +40,14 @@ pub enum MemoryType {
     Prospective,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     Realtime,
     FastLane,
     DeepLane,
     Import,
+    #[default]
     Manual,
 }
 
